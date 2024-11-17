@@ -38,6 +38,34 @@ def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
     trans_probs[np.arange(1, n-1), np.arange(1, n-1), :] = diags
     trans_probs[:, 0, :] = 1 - np.sum(trans_probs[:, 1:n, :], axis=1)
 
+    # # construct the sparse transition probability matrix
+    # import sparse
+    # nz_indices = np.hstack((
+    #     np.vstack((
+    #         np.arange(k),
+    #         np.zeros(k),
+    #         np.ones(k)
+    #     )),
+    #     np.vstack((
+    #         np.repeat(np.arange(k), n-1),
+    #         np.tile(np.arange(1, n), k),
+    #         np.zeros(k * (n-1))
+    #     )),
+    #     np.vstack((
+    #         np.repeat(np.arange(k), n-1),
+    #         np.tile(np.arange(1, n), k),
+    #         np.tile(np.append(np.arange(2, n), n-1), k)
+    #     ))
+    # )).astype(int)
+    # nz_prob = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n+1).reshape(1, -1)) / np.arange(1, k+1).reshape(-1, 1)))
+    # nz_values = np.concatenate((
+    #     np.ones(k),
+    #     1 - nz_prob.reshape(-1),
+    #     nz_prob.reshape(-1)
+    # ))
+    # trans_probs = sparse.COO(nz_indices, nz_values, shape=(k, n, n))
+
+
     # construct the cost function
     cost_fun = np.exp((np.arange(1, k+1).reshape(1, -1)) ** pow1 / (np.arange(1, n+1).reshape(-1, 1)) ** pow2)
 
