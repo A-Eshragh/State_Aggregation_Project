@@ -86,7 +86,7 @@ def choose_d_stochastic(states, actions, trans_probs, gamma, d, initial_s=None, 
     states_d = []
     if initial_s is None:
         len_initial_s = 0
-        s = random.choices(states, weights = [gamma[s] for s in states], k=1)[0]
+        s = np.random.default_rng(1).choice(states, p=gamma)
         states_d.append(s)
         trans_probs_temp = {s: {s_prime: trans_probs[s][policy[s]][s_prime]
                       for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}}
