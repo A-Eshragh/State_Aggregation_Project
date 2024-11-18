@@ -11,7 +11,7 @@ Date: 10 Nov 2024
 
 import numpy as np
 import time
-import random
+
 
 def policy_iteration(states, actions, trans_probs, cost_fun, beta, gamma, pi_old=None):
     """
