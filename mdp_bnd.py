@@ -35,7 +35,7 @@ def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
     trans_probs[0, 1, :] = 1
     trans_probs[-1, -1, :] = 1 / (1 + np.exp((c0 + c1 * n) / np.arange(1, k+1)))
     diags = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n).reshape(-1, 1)) / np.arange(1, k+1).reshape(1, -1)))
-    trans_probs[np.arange(1, n-1), np.arange(1, n-1), :] = diags
+    trans_probs[np.arange(1, n-1), np.arange(2, n), :] = diags
     trans_probs[:, 0, :] = 1 - np.sum(trans_probs[:, 1:n, :], axis=1)
 
     # # construct the sparse transition probability matrix
