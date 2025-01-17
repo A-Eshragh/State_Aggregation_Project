@@ -26,12 +26,12 @@ if __name__ == '__main__':
     pow2 = 1 # constant for calculating cost function
     S, A, P, C, gamma, time_create_mdp = create_mdp_bnd(n, k, c0, c1, pow1, pow2)
     beta = 0.99 # discount factor
+    epsilon = 1e-6
 
     # solve by value iteration algorithm
     print(f'\n--------------------')
     print(f"Value Iteration:")
     print('--------------------')
-    epsilon = 1e-6
     opt_pi_vi, opt_v_vi, v_star_vi, time_vi = value_iteration(S, A, P, C, beta, gamma, epsilon)
     print(f"Optimal Policy: {opt_pi_vi}")
     #print(f"Value Function: " , [f"{s}: {opt_v_vi[s]:.4f}" for s in S])
