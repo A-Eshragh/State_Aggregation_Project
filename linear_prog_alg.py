@@ -28,22 +28,6 @@ def lin_prog(states, actions, trans_probs, cost_fun, beta, gamma):
     n = len(states)
     k = len(actions)
 
-    # s_num = {}
-    # s_num_inv = {}
-    # count = 0
-    # for s in states:
-    #     s_num[s] = count
-    #     s_num_inv[count] = s
-    #     count += 1
-    #
-    # a_num = {}
-    # a_num_inv = {}
-    # count = 0
-    # for a in actions:
-    #     a_num[a] = count
-    #     a_num_inv[count] = a
-    #     count += 1
-
     # construct the model
     m = Model('linear program for solving discounted MDP')
 
