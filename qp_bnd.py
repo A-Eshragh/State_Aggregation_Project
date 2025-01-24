@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 
 
 class ThetaPredictor(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=64):
+    def __init__(self, input_dim, output_dim, hidden_dim):
         super(ThetaPredictor, self).__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -35,13 +35,7 @@ def gen_trans_probs_from_theta(theta, n_states, n_actions):
 
 
 # Generate synthetic data
-def generate_qpdata_bnd(n, k, pow1, pow2, n_samples=500, xi_dim=2):
-    # construct the state space
-    states = range(1, n + 1)
-
-    # construct the action set
-    actions = range(1, k + 1)
-
+def gen_batch_bnd(n, k, pow1, pow2, n_samples=500, xi_dim=2):
     # Generate features and MDP paramters
     feats = torch.randn(n_samples, xi_dim)
     # Calculate the true parameters
@@ -57,7 +51,7 @@ def generate_qpdata_bnd(n, k, pow1, pow2, n_samples=500, xi_dim=2):
     # construct initial distribution
     gamma = 1 / n * torch.ones(n)
 
-    return states, actions, feats, thetas, cost_fun, gamma
+    return feats, thetas, cost_fun, gamma
 
 
 def solve_qp(theta_hat, theta_true, cost_fun, gamma, beta, epsilon, qp_solver):
@@ -100,14 +94,14 @@ def solve_qp(theta_hat, theta_true, cost_fun, gamma, beta, epsilon, qp_solver):
     return y_hat, y_true
 
 
-def train_eval(states, actions, feats, thetas, cost_fun, gamma, beta, epsilon=1e-2, xi_dim=2):
-    # hyperparameters (to be tuned)
+def train_eval(feats, thetas, cost_fun, gamma, beta, epsilon=1e-2, xi_dim=2):
+    # hyperparameters
     batch_size = 20
     num_epochs = 100
-    learning_rate = 1e-3
+    learning_rate = 5e-3
+    hidden_dim = 64
 
-    n = len(states)  # Number of states
-    k = len(actions)  # Number of actions
+    n, k = cost_fun.shape
 
     # Split into training and test sets
     xi_train, xi_test, theta_train, theta_test = train_test_split(
@@ -115,11 +109,11 @@ def train_eval(states, actions, feats, thetas, cost_fun, gamma, beta, epsilon=1e
     )
 
     # Initialize model, optimizer, and loss function
-    model = ThetaPredictor(xi_dim, (n - 1) * k)
+    model = ThetaPredictor(xi_dim, (n - 1) * k, hidden_dim)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Define loss function
-    loss_fn = nn.MSELoss(reduction='sum')
+    loss_fn = nn.MSELoss()
 
     # QPFunction expects specific formats
     qp_solver = QPFunction()
@@ -153,7 +147,7 @@ def train_eval(states, actions, feats, thetas, cost_fun, gamma, beta, epsilon=1e
 
             epoch_loss += loss.item()
 
-        avg_epoch_loss = epoch_loss / train_size
+        avg_epoch_loss = epoch_loss / num_batches
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {avg_epoch_loss:.4f}")
 
@@ -178,7 +172,7 @@ def train_eval(states, actions, feats, thetas, cost_fun, gamma, beta, epsilon=1e
             # Compute test loss
             test_loss += loss_fn(y_hat, y_true).item()
 
-        avg_test_loss = test_loss / test_size
+        avg_test_loss = test_loss / num_test_batches
         print(f"\nTest Loss: {avg_test_loss:.4f}")
 
 
@@ -186,12 +180,8 @@ if __name__ == '__main__':
     # Set random seeds for reproducibility
     torch.manual_seed(0)
     np.random.seed(0)
-    hyperparams = [{'lr': lr, 'hidden_dim': hd, 'num_epochs': ne}
-                   for lr in [1e-2, 1e-3, 1e-4, 1e-5]
-                   for hd in [32, 64, 128]
-                   for ne in [200, 350, 500]]
 
     # generate the MDP of the input birth and death process
-    S, A, xi, params, C, g = generate_qpdata_bnd(10, 5, 0.8, 1)
+    xi, params, C, g = gen_batch_bnd(10, 5, 0.8, 1)
     # decision-focused learning
-    train_eval(S, A, xi, params, C, g, 0.95, 1e-2)
+    train_eval(xi, params, C, g, 0.95, 0.1)
