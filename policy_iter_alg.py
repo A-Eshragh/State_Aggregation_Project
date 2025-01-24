@@ -1,4 +1,4 @@
-#--------------------------------------------
+# -------------------------------------------
 """
 Policy-Iteration Algorithm
 Written by: Ali Eshragh & Ali Fattahi
@@ -7,7 +7,7 @@ Revised: 24 July 2024
 Revised by: Yuexing Li
 Date: 10 Nov 2024
 """
-#--------------------------------------------
+# -------------------------------------------
 
 import numpy as np
 import time
@@ -15,10 +15,22 @@ import time
 
 def policy_iteration(states, actions, trans_probs, cost_fun, beta, gamma, pi_old=None):
     """
-    This function takes the state space S, action set A, the cost function C,\
-    the discount factor beta, the initial distribution gamma, and the initial \
-    policy pi_old (optional) as inputs to implement the Policy Iteration \
-    algorithm for a given discounted MDP.
+    This function implements the Policy Iteration algorithm for a given discounted MDP.
+
+    Args:
+        states: states of the MDP
+        actions: actions of the MDP
+        trans_probs: transition probabilities of the MDP
+        cost_fun: cost function of the MDP
+        beta: discount factor
+        gamma: initial distribution over the states
+        pi_old: the policy in the previous round
+
+    Returns:
+        pi_new: the improved policy
+        v_pi: the value of the improved policy
+        v_star: the value of the MDP
+        run_time: running time
     """
 
     start_time = time.time()
@@ -38,7 +50,7 @@ def policy_iteration(states, actions, trans_probs, cost_fun, beta, gamma, pi_old
         v_pi = np.linalg.solve(coeff_matrix, c_pi)
 
         # policy improvement
-        pi_new = np.array(actions)[np.argmin(cost_fun + beta * np.sum(trans_probs * v_pi.reshape(1, -1, 1), axis=1), axis=1)]
+        pi_new = actions[np.argmin(cost_fun + beta * np.sum(trans_probs * v_pi.reshape(1, -1, 1), axis=1), axis=1)]
 
         if np.all(pi_old == pi_new):
             break
