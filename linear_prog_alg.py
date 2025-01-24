@@ -64,7 +64,7 @@ def lin_prog(states, actions, trans_probs, cost_fun, beta, gamma):
     v_opt = m.ObjVal
     y_opt = np.array([[y[s, a].X for a in range(k)] for s in range(n)])
 
-    policy = np.array(actions)[np.argmax(y_opt, axis=1)]
+    policy = actions[np.argmax(y_opt, axis=1)]
 
     run_time = time.time() - start_time
 
