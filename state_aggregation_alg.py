@@ -91,6 +91,9 @@ def choose_d_stochastic(states, actions, trans_probs, gamma, d, initial_s=None, 
     initial_s_iterable = iter(initial_s)
     states_d = []  # cluster set
     candidate_pairs = {}
+    # for faster indexing
+    state_pos_index = {state: pos for pos, state in enumerate(states)}
+    action_pos_index = {action: pos for pos, action in enumerate(actions)}
 
     for i in range(d):
         next_state = next(initial_s_iterable, -1)  # default -1 indicating no next elements in initial_s
@@ -106,13 +109,15 @@ def choose_d_stochastic(states, actions, trans_probs, gamma, d, initial_s=None, 
 
         states_d.append(next_state)
         # update the candidate pairs dictionary
-        state_index = states.tolist().index(next_state)
-        action_index = actions.tolist().index(policy[state_index])
+        state_index = state_pos_index[next_state]
+        action_index = action_pos_index[policy[state_index]]
         new_pairs = {(next_state, states[j]): trans_probs[state_index, j, action_index]
                      for j in range(len(states)) if states[j] not in states_d and trans_probs[state_index, j, action_index] > 0}
         candidate_pairs.update(new_pairs)
         # delete all pairs whose second componenet is the next state just added to the cluster set
-        candidate_pairs = {k: v for k, v in candidate_pairs.items() if k[1] != next_state}
+        for s in states_d:
+            if candidate_pairs.get((s, next_state), 0) > 0:
+                candidate_pairs.pop((s, next_state))
 
     return states_d
 
@@ -127,8 +132,8 @@ def state_agg(states, actions, trans_probs, cost_fun, gamma, d, rnd=True, initia
         states_d = choose_d_deterministic(states, actions, trans_probs, gamma, d, initial_s, policy)
 
     n, k = cost_fun.shape
-    # cluster_indices = np.where(np.isin(states, states_d))[0].tolist()
-    cluster_indices = np.searchsorted(states, states_d).tolist()
+    state_to_position = {state: pos for pos, state in enumerate(states)}
+    cluster_indices = [state_to_position[s] for s in states_d]
     agg_indices = np.setdiff1d(np.arange(n), cluster_indices).tolist()
     states_d.append(-1)  # -1 represents the super state
 
@@ -147,7 +152,7 @@ def state_agg(states, actions, trans_probs, cost_fun, gamma, d, rnd=True, initia
     ))
 
     # initial distribution
-    gamma_d = np.append(gamma[cluster_indices], 1- np.sum(gamma[cluster_indices]))
+    gamma_d = np.append(gamma[cluster_indices], 1 - np.sum(gamma[cluster_indices]))
 
     run_time = time.time() - start_time
 
@@ -196,12 +201,11 @@ def dis_agg_pi(states, states_d, pi_d):
     pi = np.full(len(states), pi_d[-1])
 
     # Find the indices where states_d are in states
-    mask = np.isin(states_d, states)
-    original_states = states_d[mask]
-    original_indices = np.searchsorted(states, original_states)
+    state_pos_index = {state: pos for pos, state in enumerate(states)}
+    original_indices = [state_pos_index[s] for s in states_d[:-1]]
 
     # Assign the corresponding pi_d values to these positions in `pi`
-    pi[original_indices] = pi_d[mask]
+    pi[original_indices] = pi_d[:-1]
 
     return pi
 
