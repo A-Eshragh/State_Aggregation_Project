@@ -5,6 +5,7 @@ Written by: actionsli Eshragh & actionsli Fattahi & Yuexing Li
 Date: 10 July 2024
 Updated: 17 July 2024
 Updated: 24 July 2024
+Updated: 18 January 2025
 """
 # --------------------------------------------
 
@@ -12,6 +13,7 @@ import random
 import time
 import numpy as np
 import math
+
 
 # --------------------------------------------
 def find_max_pair(trans_probs):
@@ -80,61 +82,43 @@ def select_s_s_prime(trans_probs):
 
 # --------------------------------------------
 def choose_d_stochastic(states, actions, trans_probs, gamma, d, initial_s=None, policy=None):
+    # initial policy
     if policy is None:
         policy = np.random.default_rng(42).choice(actions, size=len(states), replace=True)
 
-    states_d = []
-    if initial_s is None:
-        len_initial_s = 0
-        s = np.random.default_rng(1).choice(states, p=gamma)
-        states_d.append(s)
-        trans_probs_temp = {s: {s_prime: trans_probs[s][policy[s]][s_prime]
-                      for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}}
-    else:
-        len_initial_s = len(initial_s)
-        count = 0
-        for s in initial_s:
-            count += 1
-            states_d.append(s)
-            if (count == 1):
-                trans_probs_temp = {s: {s_prime: trans_probs[s][policy[s]][s_prime]
-                              for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}}
+    initial_s = set() if initial_s is None else set(initial_s)
+    assert len(initial_s) <= d
+    initial_s_iterable = iter(initial_s)
+    states_d = []  # cluster set
+    candidate_pairs = {}
+
+    for i in range(d):
+        next_state = next(initial_s_iterable, -1)  # default -1 indicating no next elements in initial_s
+        if next_state == -1:
+            if len(candidate_pairs) > 0:
+                # select a state pair from the candidate pairs dictionary according to the weights
+                # ([0] extracts the element from the one-element list returned by random.choices)
+                state_pair = random.Random(i).choices(list(candidate_pairs.keys()), list(candidate_pairs.values()))[0]
+                # pick the second element of the state pair as the next state and add it to the cluster set
+                next_state = state_pair[1]
             else:
-                trans_probs_temp[s] = {}
-                trans_probs_temp[s] = {s_prime: trans_probs[s][policy[s]][s_prime]
-                             for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}
-                if not trans_probs_temp[s]:  # Checks if trans_probs_temp[s] is empty
-                    del trans_probs_temp[s]  #
+                next_state = np.random.default_rng(i).choice(states, p=gamma)
 
-                for s_prime in states_d:
-                    if trans_probs_temp.get(s_prime, {}).get(s, 0) > 0:
-                        del trans_probs_temp[s_prime][s]  # Remove the key s from the inner dictionary
-                        if not trans_probs_temp[s_prime]:  # If the inner dictionary is empty
-                            del trans_probs_temp[s_prime]  # Remove s_prime from trans_probs_temp
-
-    for _ in range(d-len_initial_s):
-        selected_pair = select_s_s_prime(trans_probs_temp)
-        s = selected_pair[1]
-        states_d.append(s)
-        trans_probs_temp[s] = {}
-        trans_probs_temp[s] = {s_prime: trans_probs[s][policy[s]][s_prime]
-                     for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}
-        if not trans_probs_temp[s]:  # Checks if trans_probs_temp[s] is empty
-            del trans_probs_temp[s]  #
-            # y
-
-        for s_prime in states_d:
-            if trans_probs_temp.get(s_prime, {}).get(s, 0) > 0:
-                del trans_probs_temp[s_prime][s]  # Remove the key s from the inner dictionary
-                if not trans_probs_temp[s_prime]:  # If the inner dictionary is empty
-                    del trans_probs_temp[s_prime]  # Remove s_prime from trans_probs_temp
+        states_d.append(next_state)
+        # update the candidate pairs dictionary
+        state_index = states.tolist().index(next_state)
+        action_index = actions.tolist().index(policy[state_index])
+        new_pairs = {(next_state, states[j]): trans_probs[state_index, j, action_index]
+                     for j in range(len(states)) if states[j] not in states_d and trans_probs[state_index, j, action_index] > 0}
+        candidate_pairs.update(new_pairs)
+        # delete all pairs whose second componenet is the next state just added to the cluster set
+        candidate_pairs = {k: v for k, v in candidate_pairs.items() if k[1] != next_state}
 
     return states_d
 
 
 # --------------------------------------------
 def state_agg(states, actions, trans_probs, cost_fun, gamma, d, rnd=True, initial_s=None, policy=None):
-
     start_time = time.time()
 
     if rnd is True:
@@ -142,36 +126,32 @@ def state_agg(states, actions, trans_probs, cost_fun, gamma, d, rnd=True, initia
     else:
         states_d = choose_d_deterministic(states, actions, trans_probs, gamma, d, initial_s, policy)
 
-    trans_probs_d = {s: {a: {s_prime: trans_probs[s][a][s_prime] for s_prime in states_d} for a in actions} for s in states_d}
-    states_d.append('super_s')
-    trans_probs_d['super_s'] = {}
-    for a in actions:
-        trans_probs_d['super_s'][a] = {}
-        for s_prime in states_d:
-            if s_prime != 'super_s':
-                trans_probs_d['super_s'][a][s_prime] = np.mean([trans_probs[s][a][s_prime] for s in states if s not in states_d])
+    n, k = cost_fun.shape
+    # cluster_indices = np.where(np.isin(states, states_d))[0].tolist()
+    cluster_indices = np.searchsorted(states, states_d).tolist()
+    agg_indices = np.setdiff1d(np.arange(n), cluster_indices).tolist()
+    states_d.append(-1)  # -1 represents the super state
 
-    for s in states_d:
-        for a in actions:
-            trans_probs_d[s][a]['super_s'] = 1 - np.sum([trans_probs_d[s][a][s_prime] for s_prime in states_d if s_prime != 'super_s'])
+    # transition probability
+    trans_probs_d = np.zeros((d + 1, d + 1, k))
+    cluster_probs = trans_probs[np.ix_(cluster_indices, cluster_indices, range(k))]
+    trans_probs_d[:d, :d, :] = cluster_probs
+    trans_probs_d[:d, -1, :] = 1 - np.sum(cluster_probs, axis=1)
+    trans_probs_d[-1, :d, :] = np.mean(trans_probs[np.ix_(agg_indices, cluster_indices, range(k))], axis=0)
+    trans_probs_d[-1, -1, :] = 1 - np.sum(trans_probs_d[-1, :d, :], axis=0)
 
+    # cost function
+    cost_fun_d = np.vstack((
+        cost_fun[cluster_indices, :],
+        np.mean(cost_fun[agg_indices, :], axis=0)
+    ))
 
-    #C_d = lambda s, a: cost_fun(s,a) if s != 'super_s' else np.mean([cost_fun(s_prime, a) for s_prime in states if s_prime not in states_d])
-    C_d = {s: {a: 0 for a in actions} for s in states_d}
-    for s in states_d:
-        for a in actions:
-            C_d[s][a] = cost_fun[s][a] if s != 'super_s' else np.mean([cost_fun[s_prime][a] for s_prime in states if s_prime not in states_d])
-
-    gamma_d = {}
-    for s in states_d:
-        if s != 'super_s':
-            gamma_d[s] =gamma[s]
-        else:
-            gamma_d[s] = np.sum([gamma[s_prime] for s_prime in states if s_prime not in states_d])
+    # initial distribution
+    gamma_d = np.append(gamma[cluster_indices], 1- np.sum(gamma[cluster_indices]))
 
     run_time = time.time() - start_time
 
-    return states_d, trans_probs_d, C_d, gamma_d, run_time
+    return np.array(states_d), trans_probs_d, cost_fun_d, gamma_d, run_time
 
 
 # --------------------------------------------
@@ -212,12 +192,16 @@ def state_agg_det(states, actions, trans_probs, cost_fun, gamma, d, states_d):
 
 
 def dis_agg_pi(states, states_d, pi_d):
-    pi = {}
-    for s in states:
-        if s in states_d:
-            pi[s] = pi_d[s]
-        else:
-            pi[s] = pi_d['super_s']
+    # Initialize pi with the action corresponding to the super state, i.e., the last one in pi_d
+    pi = np.full(len(states), pi_d[-1])
+
+    # Find the indices where states_d are in states
+    mask = np.isin(states_d, states)
+    original_states = states_d[mask]
+    original_indices = np.searchsorted(states, original_states)
+
+    # Assign the corresponding pi_d values to these positions in `pi`
+    pi[original_indices] = pi_d[mask]
 
     return pi
 
