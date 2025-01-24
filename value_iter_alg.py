@@ -1,4 +1,4 @@
-#--------------------------------------------
+# -------------------------------------------
 """
 Value-Iteration Algorithm
 Written by: Ali Eshragh & Ali Fattahi
@@ -6,18 +6,31 @@ Date: 21 May 2024
 Revised by: Yuexing Li
 Date: 21 Oct 2024
 """
-#--------------------------------------------
+# -------------------------------------------
 
 import numpy as np
 import time
 
+
 def value_iteration(states, actions, trans_probs, cost_fun, beta, gamma, epsilon, v_old=None):
     """
-    This function takes the state space S, action set A,
-    the reward function R, the discount factor beta, and
-    the error bound for the stopping criterion epsilon as
-    inputs to implement the Value Iteration algorithm for
-    a given discounted MDP.
+    This function implements the Value Iteration algorithm for a given discounted MDP.
+
+    Args:
+        states: states of the MDP
+        actions: actions of the MDP
+        trans_probs: transition probabilities of the MDP
+        cost_fun: cost function of the MDP
+        beta: discount factor
+        gamma: initial distribution over the states
+        epsilon: tolerance in the stopping criterion
+        v_old: initial value function
+
+    Returns:
+        policy: optimal policy
+        v_new: the latest value function
+        v_star: the optimal value function
+        run_time: running time
     """
 
     start_time = time.time()
@@ -33,7 +46,7 @@ def value_iteration(states, actions, trans_probs, cost_fun, beta, gamma, epsilon
         else:
             v_old = v_new.copy()
 
-    policy = np.array(actions)[np.argmin(cost_fun + beta * np.sum(trans_probs * v_new.reshape(1, -1, 1), axis=1), axis=1)]
+    policy = actions[np.argmin(cost_fun + beta * np.sum(trans_probs * v_new.reshape(1, -1, 1), axis=1), axis=1)]
 
     # optimal value
     v_star = np.sum(gamma * v_new)
