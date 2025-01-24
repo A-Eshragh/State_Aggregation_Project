@@ -27,7 +27,7 @@ def gen_trans_probs_from_theta(theta, n_states, n_actions):
     trans_probs = torch.zeros(num, n_states, n_states, n_actions)
     for s in range(num):
         trans_probs[s, 0, 1, :] = 1
-        trans_probs[s, torch.arange(1, n_states - 1), torch.arange(2, n_states), :] = theta_array[s, :(n_states - 2), :]
+        trans_probs[s, torch.arange(1, n_states - 1), torch.arange(2, n_states), :] = theta_array[s, :-1, :]
         trans_probs[s, -1, -1, :] = theta_array[s, -1, :]
         trans_probs[s, :, 0, :] = 1 - torch.sum(trans_probs[s, :, 1:n_states, :], dim=1)
 
