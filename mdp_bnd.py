@@ -25,8 +25,8 @@ def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
         pow2: power 2 of the cost function
 
     Returns:
-        states: dictionary of the MDP states in the form of {(state: position)}
-        actions: dictionary of the MDP actions in the form of {(action: position)}
+        states: states of the MDP
+        actions: actions of the MDP
         trans_probs: transition probabilities of the MDP
         cost_fun: cost function of the MDP
         gamma: initial distribution over the states
@@ -40,13 +40,13 @@ def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
 
     # construct the action set
     actions = np.arange(1, k + 1)
-    
+
     # construct the transition probability matrix
+    theta = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n + 1).reshape(-1, 1)) / np.arange(1, k + 1).reshape(1, -1)))
     trans_probs = np.zeros((n, n, k))
     trans_probs[0, 1, :] = 1
-    trans_probs[-1, -1, :] = 1 / (1 + np.exp((c0 + c1 * n) / np.arange(1, k + 1)))
-    diags = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n).reshape(-1, 1)) / np.arange(1, k + 1).reshape(1, -1)))
-    trans_probs[np.arange(1, n - 1), np.arange(2, n), :] = diags
+    trans_probs[np.arange(1, n - 1), np.arange(2, n), :] = theta[:-1, :]
+    trans_probs[-1, -1, :] = theta[-1, :]
     trans_probs[:, 0, :] = 1 - np.sum(trans_probs[:, 1:n, :], axis=1)
 
     # # construct the sparse transition probability matrix
