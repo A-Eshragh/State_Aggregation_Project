@@ -1,4 +1,4 @@
-#--------------------------------------------
+# -------------------------------------------
 """
 Linear Programming Model for Solving MDP
 Written by: Ali Eshragh & Ali Fattahi
@@ -7,7 +7,7 @@ Revised: 24 July 2024
 Revised by: Yuexing Li
 Date: 10 Nov 2024
 """
-#--------------------------------------------
+# -------------------------------------------
 
 
 from gurobipy import Model, GRB, quicksum
