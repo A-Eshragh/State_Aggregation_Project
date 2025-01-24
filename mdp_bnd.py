@@ -1,41 +1,52 @@
-#--------------------------------------------
+# -------------------------------------------
 """
 Main Body for creating the MDP for Birth-and-Death Problem
 Written by: Ali Eshragh & Ali Fattahi
 Date: 29 May 2024
 Revised by: Yuexing Li
-Date: 11 Oct 2024
+Date: 18 Jan 2025
 """
-#--------------------------------------------
+# -------------------------------------------
 
 import numpy as np
 import time
 
+
 def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
     """
-    This function takes the number of states n,
-    the number of actions k, the two constants c0
-    and c1 used in the construction of transition
-    probabilities, and the two powers pow1 and pow2
-    used in the construction of the cost function to
-    generate the MDP of the corresponding birth and
-    death process
+    This function creates an MDP instance for the birth and death process.
+
+    Args:
+        n: the number of states
+        k: the number of actions
+        c0: feature 1 of the transition probabilities
+        c1: feature 2 of the transition probabilities
+        pow1: power 1 of the cost function
+        pow2: power 2 of the cost function
+
+    Returns:
+        states: dictionary of the MDP states in the form of {(state: position)}
+        actions: dictionary of the MDP actions in the form of {(action: position)}
+        trans_probs: transition probabilities of the MDP
+        cost_fun: cost function of the MDP
+        gamma: initial distribution over the states
+        run_time: running time
     """
 
     start_time = time.time()
 
     # construct the state space
-    states = range(1, n+1)
+    states = np.arange(1, n + 1)
 
     # construct the action set
-    actions = range(1, k+1)
+    actions = np.arange(1, k + 1)
     
     # construct the transition probability matrix
     trans_probs = np.zeros((n, n, k))
     trans_probs[0, 1, :] = 1
-    trans_probs[-1, -1, :] = 1 / (1 + np.exp((c0 + c1 * n) / np.arange(1, k+1)))
-    diags = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n).reshape(-1, 1)) / np.arange(1, k+1).reshape(1, -1)))
-    trans_probs[np.arange(1, n-1), np.arange(2, n), :] = diags
+    trans_probs[-1, -1, :] = 1 / (1 + np.exp((c0 + c1 * n) / np.arange(1, k + 1)))
+    diags = 1 / (1 + np.exp((c0 + c1 * np.arange(2, n).reshape(-1, 1)) / np.arange(1, k + 1).reshape(1, -1)))
+    trans_probs[np.arange(1, n - 1), np.arange(2, n), :] = diags
     trans_probs[:, 0, :] = 1 - np.sum(trans_probs[:, 1:n, :], axis=1)
 
     # # construct the sparse transition probability matrix
@@ -65,16 +76,16 @@ def create_mdp_bnd(n, k, c0, c1, pow1, pow2):
     # ))
     # trans_probs = sparse.COO(nz_indices, nz_values, shape=(k, n, n))
 
-
     # construct the cost function
-    cost_fun = np.exp((np.arange(1, k+1).reshape(1, -1)) ** pow1 / (np.arange(1, n+1).reshape(-1, 1)) ** pow2)
+    cost_fun = np.exp((np.arange(1, k + 1).reshape(1, -1)) ** pow1 / (np.arange(1, n + 1).reshape(-1, 1)) ** pow2)
 
     # construct initial distribution
-    gamma = 1/n * np.ones(n)
+    gamma = 1 / n * np.ones(n)
 
     run_time = time.time() - start_time
 
     return states, actions, trans_probs, cost_fun, gamma, run_time
+
 
 if __name__ == '__main__':
     create_mdp_bnd(100, 10, 0.1, 0.2, 0.8, 1)
