@@ -4,19 +4,21 @@ Main body for solving the input MDP
 Written by: Ali Eshragh & Ali Fattahi
 Date: 29 May 2024
 Revised by: Yuexing Li
-Date: 26 Oct 2024
+Date: 26 Jan 2025
 """
 # -------------------------------------------
 
-from mdp_bnd import create_mdp_bnd
-from value_iter_alg import value_iteration
-from policy_iter_alg import policy_iteration
-from linear_prog_alg import lin_prog
+from mdp import *
+from value_iter_alg import *
+from policy_iter_alg import *
+from linear_prog_alg import *
 from state_aggregation_alg import state_agg, dis_agg_pi
 from v_policy_calc import val_policy
 
 
 if __name__ == '__main__':
+    np.random.seed(42)
+    torch.manual_seed(42)
     # generate the MDP of the input birth and death process
     n = 50  # number of states: |S|
     k = 10  # number of actions: |A|
@@ -24,44 +26,41 @@ if __name__ == '__main__':
     c1 = 0.2  # constant for calculating transition probabilities
     pow1 = 0.8  # constant for calculating cost function
     pow2 = 1  # constant for calculating cost function
-    S, A, P, C, gamma, time_create_mdp = create_mdp_bnd(n, k, c0, c1, pow1, pow2)
     beta = 0.9  # discount factor
-    epsilon = 1e-6  # tolerance
+    bnd_instance = BirthDeath(n, k, [c0, c1], pow1, pow2, beta)
 
     # solve by value iteration algorithm
-    print(f'\n--------------------')
-    print(f"Value Iteration:")
+    print('\n--------------------')
+    print('Value Iteration:')
     print('--------------------')
-    opt_pi_vi, opt_v_vi, v_star_vi, time_vi = value_iteration(S, A, P, C, beta, gamma, epsilon)
-    print(f"Optimal Policy: {opt_pi_vi}")
-    # print(f"Value Function: " , [f"{s}: {opt_v_vi[s]:.4f}" for s in S])
-    print(f"Optimal Value: {v_star_vi:.4f}")
-    print(f"Run Time: {time_vi:.4f}")
+    opt_pi_vi, v_star_vi, time_vi = value_iteration(bnd_instance)
+    print(f'Optimal Policy: {opt_pi_vi}')
+    print(f'Optimal Value: {v_star_vi}')
+    print(f'Run Time: {time_vi:.4f}s')
 
     # solve by policy iteration algorithm
-    print(f'\n--------------------')
-    print(f"Policy Iteration:")
+    print('\n--------------------')
+    print('Policy Iteration:')
     print('--------------------')
-    opt_pi_pi, opt_v_pi, v_star_pi, time_pi = policy_iteration(S, A, P, C, beta, gamma)
-    print(f"Optimal Policy: {opt_pi_pi}")
-    # print(f"Value Function: " , [f"{s}: {opt_v_pi[s-1,0]:.4f}" for s in S])
-    print(f"Optimal Value: {v_star_pi:.4f}")
-    print(f"Run Time: {time_pi:.4f}")
+    opt_pi_pi, v_star_pi, time_pi = policy_iteration(bnd_instance)
+    print(f'Optimal Policy: {opt_pi_pi}')
+    print(f'Optimal Value: {v_star_pi}')
+    print(f'Run Time: {time_pi:.4f}')
 
     # solve by linear programming
-    print(f'\n--------------------')
-    print(f"Linear Programming:")
-    print(f'--------------------')
-    opt_pi_lp, v_star_lp, time_lp = lin_prog(S, A, P, C, beta, gamma)
-    # print(f"Optimal Policy: {opt_pi_lp}")
-    print(f"Optimal Value: {v_star_lp:.4f}")
-    print(f"Run Time: {time_lp:.4f}")
+    print('\n--------------------')
+    print('Linear Programming:')
+    print('--------------------')
+    opt_pi_lp, v_star_lp, time_lp = lin_prog(bnd_instance)
+    print(f'Optimal Policy: {opt_pi_lp}')
+    print(f'Optimal Value: {v_star_lp}')
+    print(f'Run Time: {time_lp:.4f}')
 
     # -------------------
     # State aggregation
     # -------------------
-    print(f'\n--------------------')
-    print(f'State Aggregation:')
+    print('\n--------------------')
+    print('State Aggregation:')
     print('--------------------')
 
     d = 5
