@@ -5,61 +5,66 @@ Written by: Ali Eshragh & Ali Fattahi
 Date: 29 May 2024
 Revised: 24 July 2024
 Revised by: Yuexing Li
-Date: 10 Nov 2024
+Date: 22 Jan 2025
 """
 # -------------------------------------------
 
-import numpy as np
 import time
+import torch
+import numpy as np
 
 
-def policy_iteration(states, actions, trans_probs, cost_fun, beta, gamma, pi_old=None):
+def policy_iteration(mdp, pi_old=None):
     """
-    This function implements the Policy Iteration algorithm for a given discounted MDP.
+    Perform policy iteration for a general MDP.
 
     Args:
-        states: states of the MDP
-        actions: actions of the MDP
-        trans_probs: transition probabilities of the MDP
-        cost_fun: cost function of the MDP
-        beta: discount factor
-        gamma: initial distribution over the states
-        pi_old: the policy in the previous round
+        mdp: An instance of an MDP class.
+        pi_old: Initial policy.
 
     Returns:
-        pi_new: the improved policy
-        v_pi: the value of the improved policy
-        v_star: the value of the MDP
-        run_time: running time
+        policy: Optimal policy for each state.
+        v_star: Optimal value for each state.
+        run_time: Time taken to compute the result.
     """
 
     start_time = time.time()
 
-    n = len(states)
+    # Retrieve information from the MDP
+    actions = mdp.actions
+    trans_probs = mdp.trans_probs
+    obj_fun = mdp.obj_fun
+    gamma = mdp.gamma
+    beta = mdp.beta
+
+    n_samples, n, _, k = trans_probs.shape
     if pi_old is None:
-        # Initialize the value function randomly
-        pi_old = np.random.default_rng(42).choice(actions, size=n, replace=True)
+        pi_old = actions[torch.randint(0, k, (n,))]  # Initialize the policy randomly if not provided
 
-    while True:
-        # The first element of np.where is the row indices. We need the column indices
-        action_indices = np.where(pi_old[:, np.newaxis] == actions)[1]
-        action_indices_broadcast = np.tile(action_indices[:, np.newaxis], (1, n))
-        p_pi = np.take_along_axis(trans_probs, action_indices_broadcast[:, :, np.newaxis], axis=2).squeeze(axis=2)
-        c_pi = np.take_along_axis(cost_fun, action_indices[:, np.newaxis], axis=1).squeeze(axis=1)
-        coeff_matrix = np.eye(n) - beta * p_pi
-        v_pi = np.linalg.solve(coeff_matrix, c_pi)
+    policy = np.zeros((n_samples, n))
+    v_star = np.zeros(n_samples)
+    for s in range(n_samples):
+        while True:
+            indices = torch.tensor([mdp.action_indices[action] for action in pi_old])
+            p_pi = torch.gather(trans_probs[s], dim=2, index=indices[:, None, None].expand(n, n, 1)).squeeze(2)
+            c_pi = torch.gather(obj_fun, dim=1, index=indices[:, None]).squeeze(1)
+            coeff_matrix = torch.eye(n) - beta * p_pi
+            v_pi = torch.linalg.solve(coeff_matrix, c_pi)
 
-        # policy improvement
-        pi_new = actions[np.argmin(cost_fun + beta * np.sum(trans_probs * v_pi.reshape(1, -1, 1), axis=1), axis=1)]
+            # policy improvement
+            _, v_pi_index = torch.min(obj_fun + beta * torch.sum(trans_probs[s] * v_pi.reshape(1, -1, 1), dim=1), dim=1)
+            pi_new = actions[v_pi_index]
 
-        if np.all(pi_old == pi_new):
-            break
-        else:
-            pi_old = pi_new.copy()
+            if np.all(pi_old == pi_new):
+                break
+            else:
+                pi_old = pi_new.copy()
 
-    # optimal value
-    v_star = np.sum(v_pi * gamma)
+        policy[s] = pi_new
+
+        # optimal value
+        v_star[s] = torch.sum(gamma * v_pi).item()
 
     run_time = time.time() - start_time
 
-    return pi_new, v_pi, v_star, run_time
+    return policy, v_star, run_time
