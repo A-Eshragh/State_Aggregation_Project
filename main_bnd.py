@@ -8,17 +8,29 @@ Date: 26 Jan 2025
 """
 # -------------------------------------------
 
+import random
 from mdp import *
-from value_iter_alg import *
-from policy_iter_alg import *
-from linear_prog_alg import *
 from state_aggregation_alg import state_agg, dis_agg_pi
-from v_policy_calc import val_policy
+
+
+def set_seed(seed):
+    # Set Python built-in random seed
+    random.seed(seed)
+
+    # Set NumPy seed
+    np.random.seed(seed)
+
+    # Set PyTorch seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Ensure deterministic behavior (PyTorch only)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 if __name__ == '__main__':
-    np.random.seed(42)
-    torch.manual_seed(42)
+    set_seed(42)
     # generate the MDP of the input birth and death process
     n = 50  # number of states: |S|
     k = 10  # number of actions: |A|
@@ -27,102 +39,42 @@ if __name__ == '__main__':
     pow1 = 0.8  # constant for calculating cost function
     pow2 = 1  # constant for calculating cost function
     beta = 0.9  # discount factor
-    bnd_instance = BirthDeath(n, k, [c0, c1], pow1, pow2, beta)
+    mdp = BirthDeath(n, k, [c0, c1], pow1, pow2, beta)
 
-    # solve by value iteration algorithm
-    print('\n--------------------')
-    print('Value Iteration:')
-    print('--------------------')
-    opt_pi_vi, v_star_vi, time_vi = value_iteration(bnd_instance)
-    print(f'Optimal Policy: {opt_pi_vi}')
-    print(f'Optimal Value: {v_star_vi}')
-    print(f'Run Time: {time_vi:.4f}s')
-
-    # solve by policy iteration algorithm
-    print('\n--------------------')
-    print('Policy Iteration:')
-    print('--------------------')
-    opt_pi_pi, v_star_pi, time_pi = policy_iteration(bnd_instance)
-    print(f'Optimal Policy: {opt_pi_pi}')
-    print(f'Optimal Value: {v_star_pi}')
-    print(f'Run Time: {time_pi:.4f}')
-
-    # solve by linear programming
-    print('\n--------------------')
-    print('Linear Programming:')
-    print('--------------------')
-    opt_pi_lp, v_star_lp, time_lp = lin_prog(bnd_instance)
-    print(f'Optimal Policy: {opt_pi_lp}')
-    print(f'Optimal Value: {v_star_lp}')
-    print(f'Run Time: {time_lp:.4f}')
-
-    # -------------------
-    # State aggregation
-    # -------------------
     print('\n--------------------')
     print('State Aggregation:')
     print('--------------------')
 
     d = 5
-    rnd = True
-    S_d, P_d, C_d, gamma_d, run_time = state_agg(S, A, P, C, gamma, d, rnd)
-    print(f'S_d: {S_d}')
+    mdp_d, time_sa = state_agg(mdp, d)
+    print(f'Aggregated States: {mdp_d.states}')
+    print(f'Run Time: {time_sa: .4f}s')
 
-    # solve by value iteration algorithm
-    print(f'\n--------------------')
-    print(f"Value Iteration:")
-    print('--------------------')
-    opt_pi_vi_agg, opt_v_vi_agg, v_star_vi_agg, time_vi_agg = value_iteration(S_d, A, P_d, C_d, beta, gamma_d, epsilon)
-    # print(f"Optimal Policy: {opt_pi_vi_agg}")
-    # print(f"Value Function: " , [f"{s}: {opt_v_vi_agg[s]:.4f}" for s in S])
-    print(f"Optimal Value: {v_star_vi_agg:.4f}")
-    pi_dis_agg = dis_agg_pi(S, S_d, opt_pi_vi_agg)
-    _, vbar_policy, _ = val_policy(S, A, pi_dis_agg, P, C, beta, gamma)
-    print(f"\nDisaggregated Policy: {pi_dis_agg}")
-    print(f'vbar_dis_policy = {vbar_policy:.4f}')
-    print(f"Run Time: {time_vi_agg:.4f}")
-
-    # solve by policy iteration algorithm
-    print(f'\n--------------------')
-    print(f"Policy Iteration:")
-    print('--------------------')
-    opt_pi_pi_agg, opt_v_pi_agg, v_star_pi_agg, time_pi_agg = policy_iteration(S_d, A, P_d, C_d, beta, gamma_d)
-    # print(f"Optimal Policy: {opt_pi_pi_agg}")
-    # print(f"Value Function: " , [f"{s}: {opt_v_pi_agg[s-1,0]:.4f}" for s in S])
-    # print(f"Optimal Value: {v_star_pi_agg:.4f}")
-    pi_dis_agg = dis_agg_pi(S, S_d, opt_pi_pi_agg)
-    _, vbar_policy, _ = val_policy(S, A, pi_dis_agg, P, C, beta, gamma)
-    # print(f"Disaggregated Policy: {pi_dis_agg}")
-    print(f'vbar_dis_policy = {vbar_policy:.4f}')
-    print(f"Run Time: {time_pi_agg:.4f}")
-
-    # solve by linear programming
-    print(f'\n--------------------')
-    print(f"Linear Programming:")
-    print('--------------------')
-    opt_pi_lp_agg, v_star_lp_agg, time_lp_agg = lin_prog(S_d, A, P_d, C_d, beta, gamma_d)
-    # print(f"Optimal Policy: {opt_pi_lp_agg}")
-    # print(f"Optimal Value: {v_star_lp_agg:.4f}")
-    pi_dis_agg = dis_agg_pi(S, S_d, opt_pi_lp_agg)
-    _, vbar_policy, _ = val_policy(S, A, pi_dis_agg, P, C, beta, gamma)
-    # print(f"Disaggregated Policy: {pi_dis_agg}")
-    print(f'vbar_dis_policy = {vbar_policy:.4f}')
-    print(f"Run Time: {time_lp_agg:.4f}")
-
-    rel_err = (vbar_policy - v_star_lp)/v_star_lp*100
-    print(f'\nRelative error = {rel_err:.2f}%')
-
-    for i in range(3):
-        print(f'\nIteration: {i}')
+    # solve by various algorithms
+    algos = {
+        'Value Iteration': 'value_iteration',
+        'Policy Iteration': 'policy_iteration',
+        'Linear Programming': 'lin_prog'
+    }
+    for algo_name in list(algos.keys()):
+        print('\n--------------------')
+        print(f'{algo_name}:')
         print('--------------------')
-        S_d, P_d, C_d, gamma_d, run_time = state_agg(S, A, P, C, gamma, d, rnd, None, pi_dis_agg)
-        print(f'S_d: {S_d}')
-        opt_pi_lp_agg, v_star_lp_agg, time_lp_agg = lin_prog(S_d, A, P_d, C_d, beta, gamma_d)
-        pi_dis_agg = dis_agg_pi(S, S_d, opt_pi_lp_agg)
-        v_policy, vbar_policy, v_policy_time = val_policy(S, A, pi_dis_agg, P, C, beta, gamma)
-        # print(f"Disaggregated Policy: {pi_dis_agg}")
-        print(f'vbar_dis_policy = {vbar_policy:.4f}')
-        print(f"Run Time: {time_lp:.4f}")
+        print('\nOriginal MDP:')
+        opt_pi, v_star, run_time = getattr(mdp, algos[algo_name])()
+        print(f'Optimal Policy: {opt_pi}')
+        print(f'Optimal Value: {v_star}')
+        print(f'Run Time: {run_time:.4f}s')
 
-        rel_err = (vbar_policy - v_star_lp) / v_star_lp * 100
-        print(f'\nRelative error = {rel_err:.2f}%')
+        print(f'\nAggregated MDP:')
+        opt_pi_agg, v_star_agg, run_time_agg = getattr(mdp_d, algos[algo_name])()
+        print(f'Optimal Policy: {opt_pi_agg}')
+        print(f'Optimal Value: {v_star_agg}')
+        print(f'Run Time: {run_time_agg:.4f}')
+        pi_dis_agg = dis_agg_pi(mdp, mdp_d, opt_pi_agg)
+        vbar_policy = mdp.eval_policy(pi_dis_agg)[1]
+        print(f'Disaggregated Policy: {pi_dis_agg}')
+        print(f'vbar_dis_policy: {vbar_policy}')
+        rel_err = (vbar_policy - v_star) / v_star
+        print(f'Relative error: {rel_err}')
+
