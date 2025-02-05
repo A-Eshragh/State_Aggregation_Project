@@ -8,44 +8,29 @@ Date: 26 Jan 2025
 """
 # -------------------------------------------
 
-import random
 from mdp import *
+from utils import *
+from functools import partial
 from state_aggregation_alg import state_agg, dis_agg_pi
-
-
-def set_seed(seed):
-    # Set Python built-in random seed
-    random.seed(seed)
-
-    # Set NumPy seed
-    np.random.seed(seed)
-
-    # Set PyTorch seed
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    # Ensure deterministic behavior (PyTorch only)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 if __name__ == '__main__':
     set_seed(42)
     # generate the MDP of the input birth and death process
-    n = 50  # number of states: |S|
-    k = 10  # number of actions: |A|
-    c0 = 0.1  # constant for calculating transition probabilities
-    c1 = 0.2  # constant for calculating transition probabilities
+    n = 500  # number of states: |S|
+    k = 50  # number of actions: |A|
     pow1 = 0.8  # constant for calculating cost function
     pow2 = 1  # constant for calculating cost function
-    beta = 0.9  # discount factor
-    mdp = BirthDeath(n, k, [c0, c1], pow1, pow2, beta)
+    beta = 0.95  # discount factor
 
     print('\n--------------------')
     print('State Aggregation:')
     print('--------------------')
 
-    d = 5
+    c0 = 0.1  # constant for calculating transition probabilities
+    c1 = 0.2  # constant for calculating transition probabilities
+    d = 5  # the number of states in the cluster set
+    mdp = BirthDeath(n, k, [c0, c1], pow1, pow2, beta, partial(expon_mdl, n=n, k=k))
     mdp_d, time_sa = state_agg(mdp, d)
     print(f'Aggregated States: {mdp_d.states}')
     print(f'Run Time: {time_sa: .4f}s')
@@ -77,4 +62,3 @@ if __name__ == '__main__':
         print(f'vbar_dis_policy: {vbar_policy}')
         rel_err = (vbar_policy - v_star) / v_star
         print(f'Relative error: {rel_err}')
-
