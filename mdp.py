@@ -1,7 +1,5 @@
-import torch
 import time
-import numpy as np
-from nn_mdl import *
+from utils import *
 from gurobipy import Model, GRB, quicksum
 
 
@@ -54,8 +52,8 @@ class MDP:
         if v_old is None:
             v_old = torch.zeros(n)  # Initialize value function if not provided
 
-        policy = np.zeros((n_samples, n))
-        v_star = np.zeros(n_samples)
+        policy = torch.zeros(n_samples, n)
+        v_star = torch.zeros(n_samples)
         for s in range(n_samples):
             while True:
                 v_new, v_new_index = torch.min(obj_fun[s] + beta * torch.sum(trans_probs[s] * v_old.reshape(1, -1, 1), dim=1), dim=1)
@@ -65,7 +63,7 @@ class MDP:
                 else:
                     v_old = v_new.clone()
 
-            policy[s] = actions[v_new_index]
+            policy[s] = torch.tensor(actions[v_new_index])
 
             # optimal value
             v_star[s] = torch.sum(gamma[s] * v_new).item()
@@ -96,17 +94,17 @@ class MDP:
 
         n_instances = len(instance_indices)
         n = self.trans_probs.shape[1]
-        v_pi = np.zeros((n_instances, n))
-        v_star = np.zeros(n_instances)
-        for s in instance_indices:
-            indices = torch.tensor([self.action_indices[action] for action in policy[s]])
+        v_pi = torch.zeros(n_instances, n)
+        v_star = torch.zeros(n_instances)
+        for idx, s in enumerate(instance_indices):
+            indices = torch.tensor([self.action_indices[action] for action in policy[idx]])
             p_pi = torch.gather(self.trans_probs[s], dim=2, index=indices[:, None, None].expand(n, n, 1)).squeeze(2)
             c_pi = torch.gather(self.obj_fun[s], dim=1, index=indices[:, None]).squeeze(1)
             coeff_matrix = torch.eye(n) - self.disc_factor * p_pi
-            v_pi[s] = torch.linalg.solve(coeff_matrix, c_pi)
-            v_star[s] = torch.sum(self.init_dist[s] * v_pi).item()
+            v_pi[idx] = torch.linalg.solve(coeff_matrix, c_pi)
+            v_star[idx] = torch.sum(self.init_dist[s] * v_pi).item()
 
-        return np.squeeze(v_pi), np.squeeze(v_star)
+        return torch.squeeze(v_pi), torch.squeeze(v_star)
 
     def policy_iteration(self, pi_old=None):
         """
@@ -134,8 +132,8 @@ class MDP:
         if pi_old is None:
             pi_old = actions[torch.randint(0, k, (n,))]  # Initialize the policy randomly if not provided
 
-        policy = np.zeros((n_samples, n))
-        v_star = np.zeros(n_samples)
+        policy = torch.zeros((n_samples, n))
+        v_star = torch.zeros(n_samples)
         for s in range(n_samples):
             while True:
                 v_pi = self.eval_policy(pi_old, [s])[0]
@@ -149,7 +147,7 @@ class MDP:
                 else:
                     pi_old = pi_new.copy()
 
-            policy[s] = pi_new
+            policy[s] = torch.tensor(pi_new)
 
             # optimal value
             v_star[s] = torch.sum(gamma[s] * v_pi).item()
@@ -180,8 +178,8 @@ class MDP:
         beta = self.disc_factor
 
         n_samples, n, _, k = trans_probs.shape
-        policy = np.zeros((n_samples, n))
-        v_star = np.zeros(n_samples)
+        policy = torch.zeros(n_samples, n)
+        v_star = torch.zeros(n_samples)
         for s in range(n_samples):
             # construct the model
             m = Model('linear program for solving discounted MDP')
@@ -211,8 +209,8 @@ class MDP:
             m.optimize()
 
             v_star[s] = m.ObjVal
-            y_opt = np.array([[y[i, a].X for a in range(k)] for i in range(n)])
-            policy[s] = actions[np.argmax(y_opt, axis=1)]
+            y_opt = torch.tensor([[y[i, a].X for a in range(k)] for i in range(n)])
+            policy[s] = torch.tensor(actions[torch.argmax(y_opt, dim=1)])
 
         run_time = time.time() - start_time
 
@@ -220,32 +218,22 @@ class MDP:
 
 
 class BirthDeath(MDP):
-    def __init__(self, n, k, feats, pow1, pow2, beta, gt_mdl='exp'):
-        feats = torch.tensor(feats)
-        self.feats = feats.unsqueeze(0).expand(1, -1) if feats.ndim == 1 else feats
+    def __init__(self, n, k, feats, pow1, pow2, beta, mdl):
+        feats = torch.tensor(feats) if not isinstance(feats, torch.Tensor) else feats
+        self.feats = feats.unsqueeze(0) if feats.ndim == 1 else feats
         self.n_samples, self.n_feats = self.feats.shape
         self.pow1 = pow1
         self.pow2 = pow2
-        self.gt_mdl = gt_mdl
+        self.mdl = mdl
         states = np.arange(1, n + 1)
         actions = np.arange(1, k + 1)
-        trans_probs = self.gen_trans_probs(n, k)
+        trans_probs = self.gen_trans_probs(n, k, mdl)
         obj_fun = self.gen_obj_fun(n, k)
         gamma = torch.ones(self.n_samples, n) / n
         super().__init__(states, actions, trans_probs, obj_fun, gamma, beta)
 
-    def gen_trans_probs(self, n, k):
-        if self.gt_mdl == 'exp':
-            assert self.n_feats == 2
-            transform_matrix = torch.stack([torch.ones(n - 1), torch.arange(2, n + 1)])
-            numerator = torch.repeat_interleave(torch.matmul(self.feats, transform_matrix), repeats=k, dim=1)
-            denominator = torch.arange(1, k + 1).repeat(n - 1)
-            expon = torch.exp(- numerator / denominator)  # avoid numerical overflow when n is large
-            thetas = expon / (expon + 1)
-        else:
-            mdl = GTNN(self.n_feats, (n - 1) * k)
-            thetas = mdl(self.feats)
-
+    def gen_trans_probs(self, n, k, mdl):
+        thetas = mdl(self.feats)
         theta_array = thetas.reshape(self.n_samples, n - 1, k)
         trans_probs = torch.zeros(self.n_samples, n, n, k)
         trans_probs[:, 0, 1, :] = 1
