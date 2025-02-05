@@ -18,71 +18,6 @@ from mdp import MDP
 # import math
 
 
-# # --------------------------------------------
-# def find_max_pair(trans_probs):
-#     max_value = float('-inf')  # statestart with the smallest possible value
-#     max_pair = (None, None)    # Initialize max_pair as a tuple of Nones
-#
-#     # Iterate over each key-value pair in the dictionary
-#     for s in trans_probs:
-#         for s_prime in trans_probs[s]:
-#             # If the current value is greater than the max_value, update max_value and max_pair
-#             if trans_probs[s][s_prime] > max_value:
-#                 max_value = trans_probs[s][s_prime]
-#                 max_pair = (s, s_prime)
-#
-#     return max_pair, max_value
-#
-#
-# # --------------------------------------------
-# def choose_d_deterministic(states, actions, trans_probs, gamma, d, initial_s=None, policy=None):
-#     if policy is None:
-#         policy = {s: random.choice(actions) for s in states}
-#
-#     states_d = []
-#     if initial_s is None:
-#         s = random.choices(states, weights = [gamma[s] for s in states], k=1)[0]
-#     else:
-#         s = initial_s
-#
-#     states_d.append(s)
-#     trans_probs_temp = {s: {s_prime: trans_probs[s][policy[s]][s_prime]
-#                  for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}}
-#     for _ in range(d-1):
-#         max_pair, max_value = find_max_pair(trans_probs_temp)
-#         s = max_pair[1]
-#         states_d.append(s)
-#         trans_probs_temp[s] = {}
-#         trans_probs_temp[s] = {s_prime: trans_probs[s][policy[s]][s_prime]
-#                      for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}
-#         if not trans_probs_temp[s]:  # Checks if trans_probs_temp[s] is empty
-#             del trans_probs_temp[s]  #
-#             # y
-#
-#         for s_prime in states_d:
-#             if trans_probs_temp.get(s_prime, {}).get(s, 0) > 0:
-#                 del trans_probs_temp[s_prime][s]  # Remove the key s from the inner dictionary
-#                 if not trans_probs_temp[s_prime]:  # If the inner dictionary is empty
-#                     del trans_probs_temp[s_prime]  # Remove s_prime from trans_probs_temp
-#
-#     return  states_d
-
-
-# --------------------------------------------
-# def select_s_s_prime(trans_probs):
-#     # Flatten the dictionary into a list of tuples (s, s', trans_probs[s][s'])
-#     flat_list = [(s, s_prime, trans_probs[s][s_prime]) for s in trans_probs for s_prime in trans_probs[s]]
-#
-#     # Extract s_prime, weights, and create a list of tuples (s, s_prime)
-#     pairs = [(s, s_prime) for s, s_prime, weight in flat_list]
-#     weights = [weight for s, s_prime, weight in flat_list]
-#
-#     # Randomly select a pair (s, s_prime) based on weights
-#     selected_pair = random.choices(pairs, weights=weights, k=1)[0]
-#
-#     return selected_pair
-
-
 # --------------------------------------------
 def gen_cluster_set(mdp, d, rnd=True, initial_s=None, policy=None):
     states = mdp.states
@@ -118,7 +53,7 @@ def gen_cluster_set(mdp, d, rnd=True, initial_s=None, policy=None):
                     # pick the second element of the state pair as the next state and add it to the cluster set
                     next_state = state_pair[1]
                 else:
-                    next_state = torch.multinomial(gamma, num_samples=1).item()
+                    next_state = states[torch.multinomial(gamma[s], num_samples=1).item()]
 
             states_d[s].append(next_state)
             # update the candidate pairs dictionary
@@ -189,6 +124,26 @@ def state_agg(mdp, d, rnd=True, initial_s=None, policy=None):
     return mdp_d, run_time
 
 
+def dis_agg_pi(mdp, mdp_d, pi_d):
+    states = mdp.states
+    state_indices = mdp.state_indices
+    states_d = mdp_d.states
+    n_samples = pi_d.shape[0]
+    n = len(states)
+    pi = np.zeros((n_samples, n))
+    for s in range(n_samples):
+        # Initialize pi with the action corresponding to the super state, i.e., the last one in pi_d
+        pi[s] = np.full(n, pi_d[s, -1])
+
+        # Find the indices where states_d are in states
+        original_indices = [state_indices[state] for state in states_d[s, :-1]]
+
+        # Assign the corresponding pi_d values to these positions in `pi`
+        pi[s, original_indices] = pi_d[s, :-1]
+
+    return pi
+
+
 # --------------------------------------------
 # def state_agg_det(states, actions, trans_probs, cost_fun, gamma, d, states_d):
 #
@@ -227,24 +182,69 @@ def state_agg(mdp, d, rnd=True, initial_s=None, policy=None):
 #     return trans_probs_d, C_d, gamma_d, run_time
 
 
-def dis_agg_pi(mdp, mdp_d, pi_d):
-    states = mdp.states
-    state_indices = mdp.state_indices
-    states_d = mdp_d.states
-    n_samples = pi_d.shape[0]
-    n = len(states)
-    pi = np.zeros((n_samples, n))
-    for s in range(n_samples):
-        # Initialize pi with the action corresponding to the super state, i.e., the last one in pi_d
-        pi[s] = np.full(n, pi_d[s, -1])
+# # --------------------------------------------
+# def find_max_pair(trans_probs):
+#     max_value = float('-inf')  # statestart with the smallest possible value
+#     max_pair = (None, None)    # Initialize max_pair as a tuple of Nones
+#
+#     # Iterate over each key-value pair in the dictionary
+#     for s in trans_probs:
+#         for s_prime in trans_probs[s]:
+#             # If the current value is greater than the max_value, update max_value and max_pair
+#             if trans_probs[s][s_prime] > max_value:
+#                 max_value = trans_probs[s][s_prime]
+#                 max_pair = (s, s_prime)
+#
+#     return max_pair, max_value
+#
+#
+# # --------------------------------------------
+# def choose_d_deterministic(states, actions, trans_probs, gamma, d, initial_s=None, policy=None):
+#     if policy is None:
+#         policy = {s: random.choice(actions) for s in states}
+#
+#     states_d = []
+#     if initial_s is None:
+#         s = random.choices(states, weights = [gamma[s] for s in states], k=1)[0]
+#     else:
+#         s = initial_s
+#
+#     states_d.append(s)
+#     trans_probs_temp = {s: {s_prime: trans_probs[s][policy[s]][s_prime]
+#                  for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}}
+#     for _ in range(d-1):
+#         max_pair, max_value = find_max_pair(trans_probs_temp)
+#         s = max_pair[1]
+#         states_d.append(s)
+#         trans_probs_temp[s] = {}
+#         trans_probs_temp[s] = {s_prime: trans_probs[s][policy[s]][s_prime]
+#                      for s_prime in states if trans_probs[s][policy[s]][s_prime] > 0 and s_prime not in states_d}
+#         if not trans_probs_temp[s]:  # Checks if trans_probs_temp[s] is empty
+#             del trans_probs_temp[s]  #
+#             # y
+#
+#         for s_prime in states_d:
+#             if trans_probs_temp.get(s_prime, {}).get(s, 0) > 0:
+#                 del trans_probs_temp[s_prime][s]  # Remove the key s from the inner dictionary
+#                 if not trans_probs_temp[s_prime]:  # If the inner dictionary is empty
+#                     del trans_probs_temp[s_prime]  # Remove s_prime from trans_probs_temp
+#
+#     return  states_d
 
-        # Find the indices where states_d are in states
-        original_indices = [state_indices[state] for state in states_d[s, :-1]]
 
-        # Assign the corresponding pi_d values to these positions in `pi`
-        pi[s, original_indices] = pi_d[s, :-1]
-
-    return pi
+# --------------------------------------------
+# def select_s_s_prime(trans_probs):
+#     # Flatten the dictionary into a list of tuples (s, s', trans_probs[s][s'])
+#     flat_list = [(s, s_prime, trans_probs[s][s_prime]) for s in trans_probs for s_prime in trans_probs[s]]
+#
+#     # Extract s_prime, weights, and create a list of tuples (s, s_prime)
+#     pairs = [(s, s_prime) for s, s_prime, weight in flat_list]
+#     weights = [weight for s, s_prime, weight in flat_list]
+#
+#     # Randomly select a pair (s, s_prime) based on weights
+#     selected_pair = random.choices(pairs, weights=weights, k=1)[0]
+#
+#     return selected_pair
 
 
 # def dis_agg_pi_inventory(states, states_d, pi_d):
