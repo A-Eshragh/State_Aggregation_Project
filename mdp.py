@@ -1,4 +1,3 @@
-import time
 from utils import *
 from gurobipy import Model, GRB, quicksum
 
