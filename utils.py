@@ -1,6 +1,7 @@
 import random
-import numpy as np
 import torch
+import time
+import numpy as np
 import torch.nn as nn
 
 
@@ -61,3 +62,48 @@ def expon_mdl(feats, n, k):
     thetas = expon / (expon + 1)
 
     return thetas
+
+
+def solve_qp(mdp, quad_coef, qp_solver):
+    start_time = time.time()
+
+    trans_probs = mdp.trans_probs
+    obj_fun = mdp.obj_fun
+    gamma = mdp.init_dist
+    beta = mdp.disc_factor
+    n_samples, n, k = obj_fun.shape
+
+    # # scale the problem for numerical stability
+    # scale = 1 / torch.max(torch.ones_like(obj_fun), torch.abs(obj_fun)).reshape(n_samples, -1)  # Shape: (n_samples, n*k)
+
+    # Objective: 0.5 z^T P z + q^T z
+    # P = 2 * quad_coef * I
+    # q = flattened obj_fun
+    quad_mat = 2 * quad_coef * torch.eye(n * k).unsqueeze(0).repeat(n_samples, 1, 1)  # Shape: (n_samples, n*k, n*k)
+    # quad_mat = 2 * quad_coef * torch.diag_embed(scale ** 2)
+    lin_coef = obj_fun.reshape(n_samples, -1)
+    # lin_coef = obj_fun.reshape(n_samples, -1) * scale  # Shape: (n_samples, n*k)
+
+    # Gz <= h (inequality constraints): y >= 0 => -I y <= 0
+    ineq_coef = - torch.eye(n * k).unsqueeze(0).repeat(n_samples, 1, 1)  # Shape: (n_samples, n*k, n*k)
+    # ineq_coef = - torch.diag_embed(scale)
+    ineq_rhs = torch.zeros(n_samples, n * k)  # Shape: (n_samples, n*k)
+
+    # Construct the equality coefficient array
+    # A z = b, where A has shape (n_samples, n, n*k)
+    eq_coef = torch.eye(n).unsqueeze(0).unsqueeze(3).repeat(n_samples, 1, 1, k) - beta * trans_probs  # Shape: (n_samples, n, n, k)
+    # permute dimensions 1 and 2 because we need the constraint for each j (dim 2)
+    eq_coef = eq_coef.permute(0, 2, 1, 3).reshape(n_samples, n, n * k)
+    # eq_coef = eq_coef.permute(0, 2, 1, 3).reshape(n_samples, n, n * k) * scale.unsqueeze(1)  # Shape: (n_samples, n, n*k)
+    eq_rhs = gamma  # Shape: (n_samples, n)
+
+    # Solve QP: min 0.5 z^T P z + q^T z
+    # Subject to Az = b and Gz <= h
+    y = qp_solver(quad_mat, lin_coef, ineq_coef, ineq_rhs, eq_coef, eq_rhs)
+    # y = qp_solver(quad_mat, lin_coef, ineq_coef, ineq_rhs, eq_coef, eq_rhs) * scale
+    obj = torch.sum(lin_coef * y, dim=1)
+    # obj = torch.sum(lin_coef * y / scale, dim=1)
+
+    run_time = time.time() - start_time
+
+    return y, obj, run_time
