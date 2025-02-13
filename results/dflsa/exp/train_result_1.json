@@ -1,0 +1,24 @@
+{
+    "config": {
+        "lr": 0.001,
+        "hidden_dim": 64
+    },
+    "params": {
+        "n_states": 500,
+        "n_actions": 20,
+        "pow1": 0.8,
+        "pow2": 1,
+        "beta": 0.9,
+        "cluster_size": 5,
+        "n_feats": 2,
+        "num_epochs": 100,
+        "quad_coef": 5,
+        "gt_mode": "exp",
+        "algo_mode": "dflsa",
+        "n_samples": 100,
+        "batch_size": 16
+    },
+    "eval_time": 0.042290955781936646,
+    "estimation_loss": 0.4367089569568634,
+    "eval_loss": 0.9186913967132568
+}
