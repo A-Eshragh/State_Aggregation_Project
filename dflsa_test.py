@@ -12,15 +12,15 @@ def collect_tune_results(path, algo_mode):
     return best_config
 
 
-def main():
+def main(args):
     set_seed(42)
-    params, hyperparams = set_params()
+    params, hyperparams = set_params(args)
     params['batch_size'] = int(0.2 * params['n_samples'])
     train_loader, test_loader = split_data(params, 'test')
 
-    algo_mode = params['algo_mode']
     gt_mode = params['gt_mode']
-    tune_results_path = Path(f'results/{algo_mode}/{gt_mode}')
+    algo_mode = params['algo_mode']
+    tune_results_path = Path(f'results/{gt_mode}/{algo_mode}')
     config = collect_tune_results(tune_results_path, algo_mode)
 
     test_result = train_eval(config, params, train_loader, test_loader)
@@ -31,4 +31,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # Parse input arguments
+    parser = argparse.ArgumentParser(description='Process input parameters.')
+    parser.add_argument('n_states', type=int, help='the number of states')
+    parser.add_argument('n_actions', type=int, help='the number of actions')
+    parser.add_argument('gt_mode', type=str, help='exp or nn')
+    parser.add_argument('algo_mode', type=str, help='dflsa or twostage')
+    main(parser.parse_args())
