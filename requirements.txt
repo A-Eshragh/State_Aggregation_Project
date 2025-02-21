@@ -1,0 +1,17 @@
+clarabel==0.10.0
+cvxpy==1.6.0
+filelock==3.17.0
+fsspec==2025.2.0
+Jinja2==3.1.5
+MarkupSafe==3.0.2
+mpmath==1.3.0
+networkx==3.4.2
+numpy==1.26.4
+osqp==0.6.7.post3
+qdldl==0.1.7.post5
+qpth==0.0.18
+scipy==1.15.2
+scs==3.2.7.post2
+sympy==1.13.3
+torch==2.2.2
+typing_extensions==4.12.2
