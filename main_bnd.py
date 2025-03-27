@@ -18,8 +18,8 @@ from qpth.qp import QPFunction
 if __name__ == '__main__':
     set_seed(42)
     # generate the MDP of the input birth and death process
-    n = 2000  # number of states: |S|
-    k = 20  # number of actions: |A|
+    n = 5000  # number of states: |S|
+    k = 10  # number of actions: |A|
     pow1 = 0.8  # constant for calculating cost function
     pow2 = 1  # constant for calculating cost function
     beta = 0.9  # discount factor
@@ -36,16 +36,17 @@ if __name__ == '__main__':
     print('State Aggregation:')
     print('--------------------')
 
-    d = 5  # the number of states in the cluster set
+    d = 15  # the number of states in the cluster set
     mdp = BirthDeath(n, k, [c0, c1], pow1, pow2, beta, gt_mdl)
     mdp_d, time_sa = state_agg(mdp, d)
     print(f'Aggregated States: {mdp_d.states}')
     print(f'Run Time: {time_sa:.4f}s')
 
-    # use QP to approximate the MDP
-    quad_coef = 5
+    # use QP to solve the MDP approximately
+    regularize_coef = 2
     qp_solver = QPFunction()
-    opt_qp, obj_qp, qp_run_time = solve_qp(mdp_d, quad_coef, qp_solver)
+    # opt_qp_full, obj_qp_full, qp_run_time_full = solve_qp(mdp, regularize_coef, qp_solver)
+    opt_qp, obj_qp, qp_run_time = solve_qp(mdp_d, regularize_coef, qp_solver)
     print(f'QP Solution: {opt_qp}')
     print(f'QP Objective: {obj_qp}')
     print(f'QP Run Time: {qp_run_time:.4f}')
