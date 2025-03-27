@@ -3,6 +3,8 @@ import torch
 import time
 import numpy as np
 import torch.nn as nn
+import cvxpy as cp
+from cvxpylayers.torch import CvxpyLayer
 
 
 class GTNN(nn.Module):
@@ -107,3 +109,40 @@ def solve_qp(mdp, quad_coef, qp_solver):
     run_time = time.time() - start_time
 
     return y, obj, run_time
+
+
+def solve_intpoint(mdp, regularize_coef):
+    start_time = time.time()
+
+    trans_probs = mdp.trans_probs
+    obj_fun = mdp.obj_fun
+    gamma = mdp.init_dist
+    beta = mdp.disc_factor
+    n_samples, n, k = obj_fun.shape
+
+    # Define LP variables in CVXPY
+    y = cp.Variable(n * k)  # Decision variable
+    a_param = cp.Parameter((n, n * k))  # Constraints matrix
+    b_param = cp.Parameter(n)  # RHS vector
+    c_param = cp.Parameter(n * k)  # Objective coefficients
+    # Define LP problem
+    objective = cp.Minimize(c_param.T @ y - regularize_coef * cp.sum(cp.log(y)))
+    constraints = [a_param @ y == b_param, y >= 0]
+    problem = cp.Problem(objective, constraints)
+    # Convert to a differentiable layer
+    cvxpylayer = CvxpyLayer(problem, parameters=[a_param, b_param, c_param], variables=[y])
+
+    y_opt = torch.zeros(n_samples, n * k)
+    obj = torch.zeros(n_samples)
+    for s in range(n_samples):
+        a_input = torch.eye(n).unsqueeze(2).repeat(1, 1, k) - beta * trans_probs[s]
+        a_input = a_input.permute(1, 0, 2).reshape(n, n * k)
+        b_input = gamma[s]
+        c_input = obj_fun[s].reshape(-1)
+
+        y_opt[s], = cvxpylayer(a_input, b_input, c_input)
+        obj[s] = torch.sum(c_input * y_opt[s])
+
+    run_time = time.time() - start_time
+
+    return y_opt, obj, run_time
