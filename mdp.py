@@ -243,7 +243,8 @@ class BirthDeath(MDP):
         return trans_probs
 
     def gen_obj_fun(self, n, k):
-        obj_fun = torch.exp((torch.arange(1, k + 1).reshape(1, -1)) ** self.pow1 /
-                            (torch.arange(1, n + 1).reshape(-1, 1)) ** self.pow2)
+        obj_fun = (torch.arange(1, k + 1).reshape(1, -1)) ** self.pow1 / (torch.arange(1, n + 1).reshape(-1, 1)) ** self.pow2
+        # obj_fun = torch.exp((torch.arange(1, k + 1).reshape(1, -1)) ** self.pow1 /
+        #                     (torch.arange(1, n + 1).reshape(-1, 1)) ** self.pow2)
 
         return obj_fun.unsqueeze(0).expand(self.n_samples, -1, -1)
