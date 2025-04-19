@@ -7,10 +7,10 @@ def plot_epoch(n, k, d):
     sa_dir = Path(f'results/n={n};k={k};d={d}/{gt_mode}')
     full_dir = Path(f'results/n={n};k={k};d={-1}/{gt_mode}')
     dflsa_path = sa_dir / Path(f'dfl/test_result.json')
-    # twostagesa_path = sa_dir / Path(f'twostage/test_result.json')
+    twostagesa_path = sa_dir / Path(f'twostage/test_result.json')
     twostage_path = full_dir / Path(f'twostage/test_result.json')
 
-    paths = [dflsa_path, twostage_path]
+    paths = [dflsa_path, twostagesa_path, twostage_path]
     losses = []
     times = []
     for path in paths:
@@ -22,12 +22,12 @@ def plot_epoch(n, k, d):
     # Plot the optimality gap
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     ax.plot(epochs, losses[0], label='DFL+SA', linewidth=2, color='blue')
-    # ax.plot(epochs, losses[1], label='Two-stage+SA', linewidth=2, linestyle='dashed', color='red')
-    ax.plot(epochs, losses[1], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
+    ax.plot(epochs, losses[1], label='Two-stage+SA', linewidth=2, linestyle='dashed', color='red')
+    ax.plot(epochs, losses[2], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
     # Labels and title
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Optimality Gap')
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -39,12 +39,12 @@ def plot_epoch(n, k, d):
     # Plot the training time
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     ax.plot(epochs, times[0], label='DFL+SA', linewidth=2, color='blue')
-    # ax.plot(epochs, times[1], label='Two-stage+SA', linewidth=2, linestyle='dashed', color='red')
-    ax.plot(epochs, times[1], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
+    ax.plot(epochs, times[1], label='Two-stage+SA', linewidth=2, linestyle='dashed', color='red')
+    ax.plot(epochs, times[2], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
     # Labels and title
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Computation Time')
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -77,7 +77,7 @@ def plot_d(n, k, d_list):
     # Labels and title
     ax.set_xlabel('d')
     ax.set_ylabel('Optimality Gap')
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -94,7 +94,7 @@ def plot_d(n, k, d_list):
     # Labels and title
     ax.set_xlabel('d')
     ax.set_ylabel('Computation Time')
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -105,9 +105,9 @@ def plot_d(n, k, d_list):
 
 
 if __name__ == '__main__':
-    n_states = 30
-    n_actions = 5
-    cluster_size = 5
+    n_states = 2000
+    n_actions = 10
+    cluster_size = 10
     gt_mode = 'nn'
     plot_epoch(n_states, n_actions, cluster_size)
-    plot_d(n_states, n_actions, [5, 10, 15, 20, 25])
+    plot_d(n_states, n_actions, [10, 20, 30, 40, 50])
