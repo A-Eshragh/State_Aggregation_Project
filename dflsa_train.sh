@@ -3,7 +3,7 @@
 #SBATCH -o log/train_%a.log
 #SBATCH -p parallel
 #SBATCH -N 1
-#SBATCH --mem=100G
+#SBATCH --mem=36G
 #SBATCH --ntasks-per-node=1
 #SBATCH --array=0-15
 #SBATCH -t 48:00:00
