@@ -1,4 +1,6 @@
 import json
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 
@@ -33,7 +35,7 @@ def plot_epoch(n, k, d):
     ax.spines['right'].set_visible(False)
     # Save the figure
     plt.savefig(sa_dir / Path('optimality_gap.png'), dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
     # Plot the training time
@@ -50,7 +52,7 @@ def plot_epoch(n, k, d):
     ax.spines['right'].set_visible(False)
     # Save the figure
     plt.savefig(sa_dir / Path('computation_time.png'), dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
 
@@ -68,7 +70,7 @@ def plot_d(n, k, d_list):
     for path in paths:
         losses.append(json.loads(path.read_text())['eval_loss'])
         times.append(json.loads(path.read_text())['eval_time'])
-
+    losses = [loss * 100 for loss in losses]  # convert to percentage scale
     # Plot the optimality gap
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     ax.plot(d_list, losses[:-1], label='DFL+SA', linewidth=2, color='blue')
@@ -76,14 +78,14 @@ def plot_d(n, k, d_list):
     ax.set_xticks(d_list)
     # Labels and title
     ax.set_xlabel('d')
-    ax.set_ylabel('Optimality Gap')
+    ax.set_ylabel('Optimality Gap (%)')
     ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     # Save the figure
     plt.savefig(Path(f'results/n={n}_k={k}_optimality_gap.png'), dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
     # Plot the computation time
@@ -100,14 +102,14 @@ def plot_d(n, k, d_list):
     ax.spines['right'].set_visible(False)
     # Save the figure
     plt.savefig(Path(f'results/n={n}_k={k}_computation_time.png'), dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
 
 if __name__ == '__main__':
-    n_states = 2000
+    n_states = 5000
     n_actions = 10
     cluster_size = 10
     gt_mode = 'nn'
-    plot_epoch(n_states, n_actions, cluster_size)
-    plot_d(n_states, n_actions, [10, 20, 30, 40, 50])
+    # plot_epoch(n_states, n_actions, cluster_size)
+    plot_d(n_states, n_actions, [10, 15, 20, 25, 30])
