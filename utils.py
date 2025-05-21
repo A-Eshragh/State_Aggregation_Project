@@ -3,8 +3,8 @@ import torch
 import time
 import numpy as np
 import torch.nn as nn
-import cvxpy as cp
-from cvxpylayers.torch import CvxpyLayer
+# import cvxpy as cp
+# from cvxpylayers.torch import CvxpyLayer
 
 
 class GTNN(nn.Module):
@@ -75,20 +75,14 @@ def solve_qp(mdp, quad_coef, qp_solver):
     beta = mdp.disc_factor
     n_samples, n, k = obj_fun.shape
 
-    # # scale the problem for numerical stability
-    # scale = 1 / torch.max(torch.ones_like(obj_fun), torch.abs(obj_fun)).reshape(n_samples, -1)  # Shape: (n_samples, n*k)
-
     # Objective: 0.5 z^T P z + q^T z
     # P = 2 * quad_coef * I
     # q = flattened obj_fun
     quad_mat = 2 * quad_coef * torch.eye(n * k).unsqueeze(0).repeat(n_samples, 1, 1)  # Shape: (n_samples, n*k, n*k)
-    # quad_mat = 2 * quad_coef * torch.diag_embed(scale ** 2)
     lin_coef = obj_fun.reshape(n_samples, -1)
-    # lin_coef = obj_fun.reshape(n_samples, -1) * scale  # Shape: (n_samples, n*k)
 
     # Gz <= h (inequality constraints): y >= 0 => -I y <= 0
     ineq_coef = - torch.eye(n * k).unsqueeze(0).repeat(n_samples, 1, 1)  # Shape: (n_samples, n*k, n*k)
-    # ineq_coef = - torch.diag_embed(scale)
     ineq_rhs = torch.zeros(n_samples, n * k)  # Shape: (n_samples, n*k)
 
     # Construct the equality coefficient array
@@ -96,53 +90,50 @@ def solve_qp(mdp, quad_coef, qp_solver):
     eq_coef = torch.eye(n).unsqueeze(0).unsqueeze(3).repeat(n_samples, 1, 1, k) - beta * trans_probs  # Shape: (n_samples, n, n, k)
     # permute dimensions 1 and 2 because we need the constraint for each j (dim 2)
     eq_coef = eq_coef.permute(0, 2, 1, 3).reshape(n_samples, n, n * k)
-    # eq_coef = eq_coef.permute(0, 2, 1, 3).reshape(n_samples, n, n * k) * scale.unsqueeze(1)  # Shape: (n_samples, n, n*k)
     eq_rhs = gamma  # Shape: (n_samples, n)
 
     # Solve QP: min 0.5 z^T P z + q^T z
     # Subject to Az = b and Gz <= h
     y = qp_solver(quad_mat, lin_coef, ineq_coef, ineq_rhs, eq_coef, eq_rhs)
-    # y = qp_solver(quad_mat, lin_coef, ineq_coef, ineq_rhs, eq_coef, eq_rhs) * scale
     obj = torch.sum(lin_coef * y, dim=1)
-    # obj = torch.sum(lin_coef * y / scale, dim=1)
 
     run_time = time.time() - start_time
 
     return y, obj, run_time
 
 
-def solve_intpoint(mdp, regularize_coef):
-    start_time = time.time()
-
-    trans_probs = mdp.trans_probs
-    obj_fun = mdp.obj_fun
-    gamma = mdp.init_dist
-    beta = mdp.disc_factor
-    n_samples, n, k = obj_fun.shape
-
-    # Define LP variables in CVXPY
-    y = cp.Variable(n * k)  # Decision variable
-    a_param = cp.Parameter((n, n * k))  # Constraints matrix
-    b_param = cp.Parameter(n)  # RHS vector
-    c_param = cp.Parameter(n * k)  # Objective coefficients
-    # Define LP problem
-    objective = cp.Minimize(c_param.T @ y - regularize_coef * cp.sum(cp.log(y)))
-    constraints = [a_param @ y == b_param, y >= 0]
-    problem = cp.Problem(objective, constraints)
-    # Convert to a differentiable layer
-    cvxpylayer = CvxpyLayer(problem, parameters=[a_param, b_param, c_param], variables=[y])
-
-    y_opt = torch.zeros(n_samples, n * k)
-    obj = torch.zeros(n_samples)
-    for s in range(n_samples):
-        a_input = torch.eye(n).unsqueeze(2).repeat(1, 1, k) - beta * trans_probs[s]
-        a_input = a_input.permute(1, 0, 2).reshape(n, n * k)
-        b_input = gamma[s]
-        c_input = obj_fun[s].reshape(-1)
-
-        y_opt[s], = cvxpylayer(a_input, b_input, c_input)
-        obj[s] = torch.sum(c_input * y_opt[s])
-
-    run_time = time.time() - start_time
-
-    return y_opt, obj, run_time
+# def solve_intpoint(mdp, regularize_coef):
+#     start_time = time.time()
+#
+#     trans_probs = mdp.trans_probs
+#     obj_fun = mdp.obj_fun
+#     gamma = mdp.init_dist
+#     beta = mdp.disc_factor
+#     n_samples, n, k = obj_fun.shape
+#
+#     # Define LP variables in CVXPY
+#     y = cp.Variable(n * k)  # Decision variable
+#     a_param = cp.Parameter((n, n * k))  # Constraints matrix
+#     b_param = cp.Parameter(n)  # RHS vector
+#     c_param = cp.Parameter(n * k)  # Objective coefficients
+#     # Define LP problem
+#     objective = cp.Minimize(c_param.T @ y - regularize_coef * cp.sum(cp.log(y)))
+#     constraints = [a_param @ y == b_param, y >= 0]
+#     problem = cp.Problem(objective, constraints)
+#     # Convert to a differentiable layer
+#     cvxpylayer = CvxpyLayer(problem, parameters=[a_param, b_param, c_param], variables=[y])
+#
+#     y_opt = torch.zeros(n_samples, n * k)
+#     obj = torch.zeros(n_samples)
+#     for s in range(n_samples):
+#         a_input = torch.eye(n).unsqueeze(2).repeat(1, 1, k) - beta * trans_probs[s]
+#         a_input = a_input.permute(1, 0, 2).reshape(n, n * k)
+#         b_input = gamma[s]
+#         c_input = obj_fun[s].reshape(-1)
+#
+#         y_opt[s], = cvxpylayer(a_input, b_input, c_input)
+#         obj[s] = torch.sum(c_input * y_opt[s])
+#
+#     run_time = time.time() - start_time
+#
+#     return y_opt, obj, run_time
