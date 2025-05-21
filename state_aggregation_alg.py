@@ -31,7 +31,7 @@ def gen_cluster_set(mdp, d, rnd=True, initial_s=None, policy=None):
 
     # initial policy
     if policy is None:
-        policy = np.random.default_rng(42).choice(actions, size=n, replace=True)
+        policy = np.random.choice(actions, size=n, replace=True)
 
     initial_s = set() if initial_s is None else set(initial_s)
     assert len(initial_s) <= d
