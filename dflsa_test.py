@@ -1,5 +1,5 @@
+import ast
 from dflsa_train import *
-
 
 def collect_tune_results(path, algo_mode):
     files = list(path.glob('*.json'))
@@ -7,7 +7,7 @@ def collect_tune_results(path, algo_mode):
     if algo_mode == 'dfl':
         best_config = min(all_results, key=lambda x: x['eval_loss'])['config']
     else:
-        best_config = min(all_results, key=lambda x: x['estimation_loss'])['config']
+        best_config = min(all_results, key=lambda x: x['pred_loss'])['config']
 
     return best_config
 
@@ -24,7 +24,7 @@ def main(args):
     gt_mode = params['gt_mode']
     algo_mode = params['algo_mode']
     tune_results_path = Path(f'results/n={n};k={k};d={d}/{gt_mode}/{algo_mode}')
-    config = collect_tune_results(tune_results_path, algo_mode)
+    config = collect_tune_results(tune_results_path, algo_mode) if args.hyperparam is None else ast.literal_eval(args.hyperparam)
 
     test_result = train_eval(config, params, train_loader, test_loader)
 
@@ -41,4 +41,5 @@ if __name__ == '__main__':
     parser.add_argument('cluster_size', type=int, help='the cluster size of the aggregated MDP; -1 means no aggregation')
     parser.add_argument('gt_mode', type=str, help='exp or nn')
     parser.add_argument('algo_mode', type=str, help='dfl or twostage')
+    parser.add_argument('--hyperparam', type=str, default=None, help='hyperparameter of user choice')
     main(parser.parse_args())
