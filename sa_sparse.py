@@ -130,8 +130,6 @@ def state_agg(mdp, d, rnd=True, initial_s=None, policy=None):
         # --- Last column: 1 - row sum ---
         trans_probs_d[s, :, -1, :] = 1.0 - trans_probs_d[s, :, :d, :].sum(dim=1)
 
-    # trans_probs_d = torch.clamp(trans_probs_d, 0.0, 1.0)  # avoid invalid values due to rounding
-
     # cost function
     # use advanced indexing to gather the rows corresponding to the cluster set
     # for row s of states_d, get the rows of obj_fun corresponding states_d[s]
