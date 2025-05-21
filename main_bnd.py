@@ -36,14 +36,14 @@ if __name__ == '__main__':
     print('State Aggregation:')
     print('--------------------')
 
-    d = 15  # the number of states in the cluster set
+    d = 10  # the number of states in the cluster set
     mdp = BirthDeath(n, k, [c0, c1], pow1, pow2, beta, gt_mdl)
     mdp_d, time_sa = state_agg(mdp, d)
     print(f'Aggregated States: {mdp_d.states}')
     print(f'Run Time: {time_sa:.4f}s')
 
     # use QP to solve the MDP approximately
-    regularize_coef = 2
+    regularize_coef = 0.5
     qp_solver = QPFunction()
     # opt_qp_full, obj_qp_full, qp_run_time_full = solve_qp(mdp, regularize_coef, qp_solver)
     opt_qp, obj_qp, qp_run_time = solve_qp(mdp_d, regularize_coef, qp_solver)
