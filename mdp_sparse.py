@@ -39,7 +39,7 @@ class MDP:
             row_indices, col_indices, probs = self.trans_probs
             row_indices = row_indices.numpy()
             col_indices = col_indices.numpy()
-            probs = {s: probs[s].detach().numpy() for s in range(len(probs))}
+            probs = probs.detach().numpy()
             for idx, s in enumerate(instance_indices):
                 # get the actions of the policy corresponding to the row indices of the nnz
                 action_indices = policy[idx][row_indices]  # Shape: (nnz, )
@@ -94,7 +94,7 @@ class MDP:
             n_samples = len(probs)
             row_indices = row_indices.numpy()
             col_indices = col_indices.numpy()
-            probs = {s: probs[s].detach().numpy() for s in range(n_samples)}
+            probs = probs.detach().numpy()
         else:
             row_indices = None
             col_indices = None
@@ -138,49 +138,53 @@ class MDP:
 
 
 class BirthDeath(MDP):
-    def __init__(self, n_states, n_actions, params, pow1, pow2, beta):
+    def __init__(self, n_states, n_actions, n_neighbors, params, pow1, pow2, beta):
         self.pow1 = pow1
         self.pow2 = pow2
         self.params = params
         states = np.arange(n_states)
         actions = np.arange(n_actions)
-        trans_probs = self.gen_trans_probs(n_states, n_actions)
+        trans_probs = self.gen_trans_probs(n_states, n_neighbors)
         obj_fun = self.gen_obj_fun(n_states, n_actions)
         gamma = 1 / n_states * torch.ones(n_states)
         super().__init__(states, actions, trans_probs, obj_fun, gamma, beta)
 
-    def gen_trans_probs(self, n_states, n_actions):
-        thetas = self.params  # torch.Tensor
-        thetas = thetas.view(1, -1) if thetas.ndim == 1 else thetas
-        n_samples = thetas.shape[0]
-        theta_array = thetas.view(n_samples, n_states - 1, n_actions)
+    def gen_trans_probs(self, n_states, n_neighbors):
+        """
+        Vectorized, construction of sparse birth-death transition probability
+        Each state transitions to at most m neighbors to the left and right (within bounds)
 
-        # Sparse indices as torch.LongTensor
-        row_indices = torch.cat((
-            torch.tensor([0], dtype=torch.long),
-            torch.arange(1, n_states, dtype=torch.long),
-            torch.arange(1, n_states, dtype=torch.long)
-        ))
+        Returns:
+            row_indices: (nnz, ) LongTensor
+            col_indices: (nnz, ) LongTensor
+            probs: (n_samples, nnz, n_actions)
+        """
 
-        col_indices = torch.cat((
-            torch.tensor([1], dtype=torch.long),
-            torch.arange(2, n_states, dtype=torch.long),
-            torch.tensor([n_states - 1], dtype=torch.long),
-            torch.zeros(n_states - 1, dtype=torch.long)
-        ))
+        # Step 1: Compute neighbor candidates
+        base = torch.arange(n_states).unsqueeze(1)  # (n_states, 1)
+        offsets = torch.arange(-n_neighbors, n_neighbors + 1).unsqueeze(0)  # (1, 2*n_neighbors + 1)
+        neighbors = base + offsets  # (n_states, 2*n_neighbors + 1)
 
-        # Construct probs dict with differentiable tensors
-        probs = {
-            s: torch.cat((
-                torch.ones((1, n_actions), dtype=theta_array.dtype),
-                theta_array[s],
-                1 - theta_array[s]
-            ), dim=0)
-            for s in range(n_samples)
-        }
+        # Step 2: Boolean mask for valid neighbors (exclude 0 for now and append it to each row later to avoid duplicate)
+        valid_mask = (neighbors > 0) & (neighbors < n_states)  # shape (n_states, 2*n_neighbors + 1)
+
+        # Step 3: Prepend 0 to all rows: state 0 can be visited from any state with positive probability
+        zero_col = torch.zeros(n_states, 1, dtype=torch.long)  # (n_states, 1)
+        successors = torch.cat([zero_col, neighbors], dim=1)  # (n_states, 2*n_neighbors + 2)
+
+        # Step 4: Prepend True to the mask to keep the appended zeros
+        true_col = torch.ones(n_states, 1, dtype=torch.bool)
+        final_mask = torch.cat([true_col, valid_mask], dim=1)  # (n_states, 2*n_neighbors + 2)
+
+        # Step 5: Flatten and filter using mask
+        row_ids = torch.arange(n_states).unsqueeze(1).expand_as(successors)
+        row_indices = row_ids.flatten()[final_mask.flatten()]
+        col_indices = successors.flatten()[final_mask.flatten()]
+
+        probs = self.params  # shape: (n_samples, nnz, n_actions)
 
         return row_indices, col_indices, probs
 
     def gen_obj_fun(self, n_states, n_actions):
-        obj_fun = (torch.arange(1, n_actions + 1).view(1, -1)) ** self.pow1 / (torch.arange(1, n_states + 1).view(-1, 1)) ** self.pow2
+        obj_fun = (torch.arange(1, n_actions + 1).reshape(1, -1)) ** self.pow1 / (torch.arange(1, n_states + 1).reshape(-1, 1)) ** self.pow2
         return obj_fun
