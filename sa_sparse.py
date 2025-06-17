@@ -72,17 +72,17 @@ def state_agg(mdp, d, rnd=True, initial_s=None, policy=None):
     # transition probability
     # aggregated transition probs are in dense format, assuming d << n
     trans_probs_d = torch.zeros((n_samples, d + 1, d + 1, k))
+    packed_sparse = row_indices * n + col_indices  # linearized indexes for the pairs of the nonzero entries
     for s in range(n_samples):
         # get the indices of the cluster states in the set of all states
         # the states in the complement set of the cluster set are indexed by -1
-        state_to_cluster_idx = -torch.ones(n, dtype=torch.long)
+        state_to_cluster_idx = - torch.ones(n, dtype=torch.long)
         state_to_cluster_idx[states_d[s]] = torch.arange(d)
 
         # ---top-left block of the aggregated transition probability: cluster-to-cluster transitions---
         # create all (i, j) pairs in cluster_set × cluster_set
         ii, jj = torch.meshgrid(states_d[s], states_d[s], indexing='ij')
         top_left_pairs = ii.ravel() * n + jj.ravel()  # linearized indexes for the top-left pairs (cluster pairs)
-        packed_sparse = row_indices * n + col_indices  # linearized indexes for the pairs of the nonzero entries
 
         # get the boolean mask for the sparse pairs that are in the top-left cluster pairs
         # If both input arrays are unique in values, setting assume_unique=True can speed up the calculation.
@@ -125,10 +125,11 @@ def state_agg(mdp, d, rnd=True, initial_s=None, policy=None):
             matched_vals_nc.reshape(-1),
             accumulate=True
         )
-        trans_probs_d[s, -1] /= (n - d)
 
+        # --- Last row: divide by (n - d)
+        trans_probs_d[s, -1] /= (n - d)
         # --- Last column: 1 - row sum ---
-        trans_probs_d[s, :, -1, :] = 1.0 - trans_probs_d[s, :, :d, :].sum(dim=1)
+        trans_probs_d[s, :, -1, :] = 1.0 - torch.clamp(trans_probs_d[s, :, :d, :].sum(dim=1), max=1)
 
     # cost function
     # use advanced indexing to gather the rows corresponding to the cluster set
