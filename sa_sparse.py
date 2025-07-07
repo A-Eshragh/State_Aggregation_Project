@@ -2,7 +2,7 @@ import random
 import time
 import torch
 import numpy as np
-from mdp_sparse import MDP
+from mdp_base import MDP
 
 
 def gen_cluster_set(mdp, d, rnd=True, initial_s=None, policy=None):
