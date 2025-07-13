@@ -133,7 +133,7 @@ if __name__ == '__main__':
                         help='whether two-way transitions are allowed')
     parser.add_argument('--base_cluster_size', type=int, default=20,
                         help='the base cluster size of the aggregated MDP for training comparison')
-    parser.add_argument('--cluster_size_list', type=int, nargs='+', default=[10, 20, 30, 40, 50, 60, 70, 80],
+    parser.add_argument('--cluster_size_list', type=int, nargs='+', default=[10, 15, 20, 25, 30, 35, 40, 45, 50],
                         help='list of cluster sizes of the aggregated MDP for test comparison')
 
     main(parser.parse_args())
