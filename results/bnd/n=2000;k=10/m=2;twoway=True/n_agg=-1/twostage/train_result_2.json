@@ -1,0 +1,29 @@
+{
+    "mdp_type": "bnd",
+    "beta": 0.9,
+    "n_agg": -1,
+    "algo": "twostage",
+    "mode": "train",
+    "n_feats": 2,
+    "n_epochs": 100,
+    "n_samples": 100,
+    "reg_coef": 0.5,
+    "loss_weight": 0.5,
+    "hyperparam": {
+        "lr": 0.001,
+        "hidden_dim": 32
+    },
+    "train_log": false,
+    "n_states": 2000,
+    "n_actions": 10,
+    "n_neighbors": 2,
+    "two_way": true,
+    "pow1": 0.5,
+    "pow2": 1.5,
+    "n_params": 100000,
+    "eval_time": 1.2333729416131973,
+    "pred_loss": 0.05095954239368439,
+    "eval_loss": 0.07270927047702314,
+    "obj_loss": [],
+    "train_time": []
+}
