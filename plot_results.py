@@ -28,7 +28,7 @@ def plot_epoch(mdp_type, n, k, m, two_way, d):
     ax.plot(epochs, losses[2], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
     # Labels and title
     ax.set_xlabel('Epochs')
-    ax.set_ylabel('Optimality Gap')
+    ax.set_ylabel('Optimality Gap (%)')
     ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
@@ -79,7 +79,7 @@ def plot_d(mdp_type, n, k, m, two_way, d_list):
     ax.plot([min(d_list), max(d_list)], [losses[-1], losses[-1]], label='Two-stage', linewidth=2, linestyle='dotted', color='green')
     ax.set_xticks(d_list)
     # Labels and title
-    ax.set_xlabel('d')
+    ax.set_xlabel('n_agg')
     ax.set_ylabel('Optimality Gap (%)')
     ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
@@ -97,8 +97,8 @@ def plot_d(mdp_type, n, k, m, two_way, d_list):
     ax.set_xticks(d_list)
     ax.set_yscale('log')
     # Labels and title
-    ax.set_xlabel('d')
-    ax.set_ylabel('Log-Scale Time')
+    ax.set_xlabel('n_agg')
+    ax.set_ylabel('Log-Scale Time (s)')
     ax.legend(frameon=False, fontsize='small')
     # Remove only the top and right spines
     ax.spines['top'].set_visible(False)
