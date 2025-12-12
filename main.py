@@ -33,7 +33,6 @@ def main(args):
     train_loader, test_loader = prepare_data(args)
 
     tune_result = train_eval(args, train_loader, test_loader)
-
     # Save results to a file
     result_file.write_text(json.dumps(tune_result, indent=4))
 
