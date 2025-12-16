@@ -25,11 +25,10 @@ A PyTorch-based library for solving discounted Markov Decision Processes (MDPs) 
 
 ### Key Features
 
-- ✅ **Batch processing**: Handle multiple MDPs simultaneously
-- ✅ **Multiple solvers**: Dense (Gurobi), Sparse (COO format), Differentiable (autograd)
-- ✅ **Two training strategies**: Direct Feedback Learning (DFL) and Two-Stage training
-- ✅ **Modular design**: Use any PyTorch neural network as predictor
-- ✅ **Gradient support**: End-to-end differentiable optimization
+- **Multiple solvers**: Dense (Gurobi), Sparse (COO format), Differentiable (autograd)
+- **Two training strategies**: Direct Feedback Learning (DFL) and Two-Stage training
+- **Modular design**: Use any PyTorch neural network as predictor
+- **Gradient support**: End-to-end differentiable optimization
 
 ## Architecture
 
@@ -525,25 +524,5 @@ class TwoStageTrainer:
 - **Sparse**: O(nnz) memory, where nnz = number of non-zeros
 
 For large MDPs (S=1000, A=10), sparse solver can be 100× more memory efficient.
-
-## Contributing
-
-This is a research codebase. For questions or issues, please contact the maintainers.
-
-## License
-
-[Specify your license here]
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{mdp_lp,
-  title = {mdp_lp: MDP Linear Programming Solver},
-  author = {[Your Name]},
-  year = {2024},
-  url = {[Your URL]}
-}
 ```
 
