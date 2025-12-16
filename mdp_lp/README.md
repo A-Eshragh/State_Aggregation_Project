@@ -511,27 +511,6 @@ class TwoStageTrainer:
     def eval_step(self, x) -> Tensor
 ```
 
-## Why No Neural Networks in mdp_lp?
-
-`mdp_lp` is designed with **separation of concerns**:
-
-- **`mdp_lp` provides**: MDP/LP infrastructure, solvers, training wrappers
-- **You provide**: Neural network architecture (predictor)
-
-This design:
-- ✅ **Flexibility**: Use any architecture (MLP, CNN, Transformer, etc.)
-- ✅ **Reusability**: Same LP infrastructure works with different predictors
-- ✅ **Testability**: Easy to test with simple predictors
-- ✅ **Clean API**: Library doesn't assume specific network design
-
-The trainers accept any `nn.Module` that implements:
-```python
-def forward(self, x) -> Tuple[P, r]:
-    # P: (batch, S, A, S) - transition probabilities
-    # r: (batch, S, A) - rewards
-    return P, r
-```
-
 ## Performance Considerations
 
 ### When to Use Each Solver
