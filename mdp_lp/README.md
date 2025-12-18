@@ -509,20 +509,3 @@ class TwoStageTrainer:
     def train_step(self, x, P_true, r_true) -> float
     def eval_step(self, x) -> Tensor
 ```
-
-## Performance Considerations
-
-### When to Use Each Solver
-
-- **Dense Solver**: Small problems (< 1000 variables), dense H matrices
-- **Sparse Solver**: Large problems (> 1000 variables), sparse H matrices
-- **Differentiable Solver**: When you need gradients (used automatically by DFL trainer)
-
-### Memory Usage
-
-- **Dense**: O(S × S×A) memory for H matrix
-- **Sparse**: O(nnz) memory, where nnz = number of non-zeros
-
-For large MDPs (S=1000, A=10), sparse solver can be 100× more memory efficient.
-```
-
