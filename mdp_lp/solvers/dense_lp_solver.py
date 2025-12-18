@@ -63,7 +63,6 @@ class DenseLPSolver:
         # VBasis[j] != 0 → nonbasic
         vb = y.VBasis
 
-        # There should be EXACTLY S basic vars (square basis matrix)
         basis_idx = torch.tensor(
             [j for j in range(SA) if vb[j] == 0][:S],
             dtype=torch.long
@@ -134,6 +133,7 @@ def solve_lp_gurobi(H, r, gamma):
         y_star: (batch, SA)
     """
     solver = DenseLPSolver()
-    y_star, _ = solver.solve(H, r, gamma)
-    return y_star
+    y_star, basis = solver.solve(H, r, gamma)
+    return y_star, basis
+
 
