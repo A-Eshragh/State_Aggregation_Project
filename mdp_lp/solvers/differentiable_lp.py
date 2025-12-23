@@ -37,8 +37,7 @@ class DifferentiableLPSolver(autograd.Function):
         """
         with torch.no_grad():
             y_star, basis = solve_lp_gurobi(H, r, gamma)
-
-        # Save everything needed for backward
+            
         ctx.save_for_backward(H, r, gamma, y_star, basis)
 
         return y_star
@@ -75,8 +74,7 @@ class DifferentiableLPSolver(autograd.Function):
             r_B = r[b, B]                # (S,)
             y_B = y_star[b, B]           # (S,)
 
-            # Solve H_B^T x = r_B   =>   x = H_B^{-T} r_B
-            # Never explicitly invert
+            # Solve H_B^T x = r_B  for  x = H_B^{-T} r_B instead of inverting explicitly
             x = torch.linalg.solve(H_B.T, r_B)
 
             # ∂v/∂gamma = H_B^{-T} r_B

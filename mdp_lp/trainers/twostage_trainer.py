@@ -25,6 +25,6 @@ class TwoStageTrainer:
         with torch.no_grad():
             P, r = self.predictor(x)
             H, r_flat, gamma = self.mdp.lp_formulation(P, r)
-            y_star = solve_lp_gurobi(H, r_flat, gamma)
+            y_star, basis = solve_lp_gurobi(H, r_flat, gamma)  # Unpack tuple
             v_star = torch.sum(r_flat * y_star, dim=1)
         return v_star
