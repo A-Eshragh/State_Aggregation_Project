@@ -28,14 +28,37 @@ def config(args):
 
 
 def main(args):
+    print("=" * 70)
+    print("STARTING MDP TRAINING/EVALUATION")
+    print("=" * 70)
+    print(f"MDP Type: {args.mdp_type}")
+    print(f"Algorithm: {args.algo}")
+    print(f"Mode: {args.mode}")
+    print(f"Hyperparameters: {args.hyperparam if hasattr(args, 'hyperparam') and args.hyperparam else 'TBD'}")
+    if args.mdp_type == 'bnd':
+        print(f"States: {args.n_states}, Actions: {args.n_actions}, Neighbors: {args.n_neighbors}")
+    print(f"Aggregation: {'None' if args.n_agg == -1 else f'{args.n_agg} states'}")
+    print(f"Epochs: {args.n_epochs}, Samples: {args.n_samples}")
+    print("=" * 70)
+    
     set_seed(42)
     args, result_file = config(args)
+    print(f"Results will be saved to: {result_file}")
+    print("\n[1/3] Preparing data (generating MDPs and solving them)...")
     train_loader, test_loader = prepare_data(args)
-
+    print(f"[1/3] ✓ Data preparation complete!")
+    print(f"  - Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
+    
+    print("\n[2/3] Starting training/evaluation...")
     tune_result = train_eval(args, train_loader, test_loader)
+    print("[2/3] ✓ Training/evaluation complete!")
 
-    # Save results to a file
+    print("\n[3/3] Saving results...")
     result_file.write_text(json.dumps(tune_result, indent=4))
+    print(f"[3/3] ✓ Results saved to: {result_file}")
+    print("=" * 70)
+    print("COMPLETE!")
+    print("=" * 70)
 
 
 if __name__ == '__main__':

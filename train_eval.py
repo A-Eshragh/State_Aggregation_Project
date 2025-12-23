@@ -43,6 +43,7 @@ def train_eval(args, train_loader, eval_loader):
 
     train_time_list = []
     obj_loss_list = []  # list of optimality gaps
+    print(f"[Training] Starting training: {args.n_epochs} epochs, algo={args.algo}, n_agg={args.n_agg}")
     start_time = time.time()
     for epoch in range(args.n_epochs):
         train_loss = 0.0
@@ -119,6 +120,7 @@ def train_eval(args, train_loader, eval_loader):
         if (epoch + 1) % 10 == 0:
             print(f'Epoch {epoch + 1} / {args.n_epochs}, Training Loss: {avg_train_loss:.4f}')
 
+    print(f"[Training] Training complete. Starting evaluation...")
     pred_model.eval()
     pred_loss = 0.0
     eval_loss = 0.0
@@ -159,6 +161,7 @@ def train_eval(args, train_loader, eval_loader):
     eval_loss /= len(eval_loader)
     true_values /= len(eval_loader)
     eval_loss /= true_values  # this is essentially the WAPE
+    print(f'[Evaluation] Complete!')
     print(f'Average Runtime: {eval_time:.4f}s')
     print(f'Evaluation Loss: {eval_loss * 100:.2f}%')
 
@@ -167,9 +170,11 @@ def train_eval(args, train_loader, eval_loader):
 
 
 def prepare_data(args):
+    print(f"[Data Prep] Generating {args.n_samples} feature vectors...")
     feats_clean = torch.distributions.Cauchy(loc=0.0, scale=1.0).sample(torch.Size([args.n_samples, args.n_feats]))
     # clip the feature values for numerical stability of neural networks
     feats_clean = torch.clamp(feats_clean, min=-50, max=50)
+    print(f"[Data Prep] Features generated. Creating MDPs...")
     mdp_true = None
     match args.mdp_type:
         case 'bnd':
@@ -185,7 +190,9 @@ def prepare_data(args):
                                  args.hc, args.bc, args.beta, gt_mdl(feats_clean))
         case _:
             raise ValueError('No such MDP type!')
+    print(f"[Data Prep] MDPs created. Solving {args.n_samples} MDPs with policy iteration (this may take a while)...")
     obj_true = torch.from_numpy(mdp_true.policy_iteration()[1]).float()
+    print(f"[Data Prep] All MDPs solved. Creating data loaders...")
 
     train_size = int(0.8 * args.n_samples)
     test_size = args.n_samples - train_size

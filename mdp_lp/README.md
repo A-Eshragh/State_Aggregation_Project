@@ -32,15 +32,6 @@ A PyTorch-based library for solving discounted Markov Decision Processes (MDPs) 
 
 ## Architecture
 
-### Design Philosophy
-
-`mdp_lp` follows a **modular, separation-of-concerns** design:
-
-- **`mdp_lp` provides**: MDP→LP conversion, LP solvers, training infrastructure
-- **You provide**: Neural network architecture (predictor model)
-
-This keeps the library focused on MDP/LP solving while giving you full control over the neural network design.
-
 ### Directory Structure
 
 ```

@@ -84,9 +84,9 @@ class DenseLPSolver:
         bases = []
 
         for b in range(batch):
-            y_b, B_b = self.solve_single(H[b].cpu().numpy(),
-                                         r[b].cpu().numpy(),
-                                         gamma[b].cpu().numpy())
+            y_b, B_b = self.solve_single(H[b].detach().cpu().numpy(),
+                                         r[b].detach().cpu().numpy(),
+                                         gamma[b].detach().cpu().numpy())
             ys.append(y_b)
             bases.append(B_b)
 
@@ -109,14 +109,14 @@ def solve_lp_dense(H, r, gamma):
     # Handle both single and batched inputs
     if H.dim() == 3:
         # Batched - solve first element
-        y_star, basis = solver.solve_single(H[0].cpu().numpy(),
-                                           r[0].cpu().numpy(),
-                                           gamma[0].cpu().numpy())
+        y_star, basis = solver.solve_single(H[0].detach().cpu().numpy(),
+                                           r[0].detach().cpu().numpy(),
+                                           gamma[0].detach().cpu().numpy())
     else:
         # Single instance
-        y_star, basis = solver.solve_single(H.cpu().numpy(),
-                                           r.cpu().numpy(),
-                                           gamma.cpu().numpy())
+        y_star, basis = solver.solve_single(H.detach().cpu().numpy(),
+                                           r.detach().cpu().numpy(),
+                                           gamma.detach().cpu().numpy())
     return y_star, basis
 
 
