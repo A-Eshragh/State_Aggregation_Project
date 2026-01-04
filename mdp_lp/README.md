@@ -1,502 +1,149 @@
 # mdp_lp: MDP Linear Programming Solver
 
-A PyTorch-based library for solving discounted Markov Decision Processes (MDPs) via Linear Programming (LP), with support for differentiable optimization and multiple training strategies.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Core Components](#core-components)
-  - [MDP Class](#mdp-class)
-  - [LP Solvers](#lp-solvers)
-  - [Trainers](#trainers)
-- [Usage Examples](#usage-examples)
-- [Mathematical Background](#mathematical-background)
-- [API Reference](#api-reference)
+PyTorch implementation for solving discounted Markov Decision Processes via Linear Programming, with support for differentiable optimization and decision-focused learning.
 
 ## Overview
 
-`mdp_lp` provides a complete framework for:
-1. **Converting MDPs to LP formulations**: Transform transition probabilities and rewards into linear programming constraints
-2. **Solving LPs**: Multiple solver backends (dense, sparse, differentiable)
-3. **Training predictors**: Two training strategies (DFL and TwoStage) for learning MDP parameters
-
-### Key Features
-
-- **Multiple solvers**: Dense (Gurobi), Sparse (COO format), Differentiable (autograd)
-- **Two training strategies**: Direct Feedback Learning (DFL) and Two-Stage training
-- **Modular design**: Use any PyTorch neural network as predictor
-- **Gradient support**: End-to-end differentiable optimization
-
-## Architecture
-
-### Directory Structure
-
-```
-mdp_lp/
-├── mdp.py              # MDP → LP formulation
-├── solvers/
-│   ├── dense_lp_solver.py      # Dense LP solver (Gurobi)
-│   ├── sparse_lp_solver.py     # Sparse LP solver (COO format)
-│   └── differentiable_lp.py    # Differentiable LP (autograd)
-├── trainers/
-│   ├── dfl_trainer.py          # Direct Feedback Learning trainer
-│   └── twostage_trainer.py     # Two-stage training trainer
-└── tests/
-    └── tests.py                # Comprehensive test suite
-```
+This library implements:
+1. MDP to LP formulation: Converts transition probabilities and rewards into linear programming constraints
+2. LP solvers: Dense (Gurobi), differentiable (basis-restricted sensitivity analysis)
+3. Training methods: Direct Feedback Learning (DFL) and Two-Stage training for learning MDP parameters
 
 ## Installation
 
-### Prerequisites
-
+**Prerequisites:**
 - Python 3.7+
 - PyTorch
-- Gurobi Optimizer (with license)
-- scipy (for sparse matrices)
+- Gurobi Optimizer (academic license available)
+- scipy
 
-### Install Dependencies
-
+**Install:**
 ```bash
 pip install torch scipy gurobipy
 ```
 
-**Note**: Gurobi requires a license. Academic licenses are free. See [Gurobi License](https://www.gurobi.com/academia/academic-program-and-licenses/) for details.
+Gurobi academic licenses are free. See [Gurobi Academic Program](https://www.gurobi.com/academia/academic-program-and-licenses/).
 
-## Quick Start
+## Running Experiments
 
-### Basic Usage: Solve an MDP
+### Elasticity-Based Inventory Experiments
 
-```python
-import torch
-from mdp_lp.mdp import MDP
-from mdp_lp.solvers import solve_lp_dense
-
-# Define a simple MDP: 2 states, 2 actions
-beta = 0.9  # discount factor
-mdp = MDP(beta)
-
-# Transition probabilities: P[batch, state, action, next_state]
-P = torch.tensor([[
-    [[1.0, 0.0], [0.0, 1.0]],  # state 0: a0→s0, a1→s1
-    [[0.0, 1.0], [1.0, 0.0]],  # state 1: a0→s1, a1→s0
-]])
-
-# Rewards: r[batch, state, action]
-r = torch.tensor([[[1.0, 1.0], [0.0, 0.0]]])
-
-# Convert to LP formulation
-H, r_flat, gamma = mdp.lp_formulation(P, r)
-
-# Solve LP
-y_star, basis = solve_lp_dense(H[0], r_flat[0], gamma[0])
-
-# Compute optimal value
-v_star = (y_star * r_flat[0]).sum()
-print(f"Optimal value: {v_star.item():.4f}")
+**Run all experiments (parallel execution):**
+```bash
+python -m mdp_lp.run_all_elasticity
 ```
 
-### Training with a Predictor
-
-```python
-import torch
-import torch.nn as nn
-from mdp_lp.trainers import DFLTrainer
-
-# Define your predictor (any PyTorch module)
-class MyPredictor(nn.Module):
-    def __init__(self, input_dim, S, A):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, S * A * S + S * A)
-        )
-        self.S, self.A = S, A
-    
-    def forward(self, x):
-        batch = x.size(0)
-        out = self.net(x)
-        # Split into P and r
-        P_flat = out[:, :self.S * self.A * self.S]
-        r_flat = out[:, self.S * self.A * self.S:]
-        P = torch.softmax(P_flat.view(batch, self.S, self.A, self.S), dim=-1)
-        r = r_flat.view(batch, self.S, self.A)
-        return P, r
-
-# Create trainer
-predictor = MyPredictor(input_dim=10, S=5, A=3)
-optimizer = torch.optim.Adam(predictor.parameters(), lr=1e-3)
-trainer = DFLTrainer(predictor, beta=0.9, optimizer=optimizer)
-
-# Training step
-x = torch.randn(1, 10)  # input features
-v_true = torch.tensor([5.0])  # target value (optional)
-
-loss, v_pred = trainer.train_step(x, v_true=v_true)
-print(f"Loss: {loss:.4f}, Predicted value: {v_pred.item():.4f}")
+**Run single experiment:**
+```bash
+python -m mdp_lp.run_elasticity_experiments \
+    --experiment_type a \
+    --cost_case high_margin \
+    --algo dfl \
+    --n_epochs 100 \
+    --n_samples 100
 ```
 
-## Core Components
-
-### MDP Class
-
-The `MDP` class converts MDPs into LP formulations.
-
-#### LP Formulation
-
-For a discounted MDP with:
-- States: `S`
-- Actions: `A`
-- Transition probabilities: `P[s, a, s']`
-- Rewards: `r[s, a]`
-- Discount factor: `β`
-
-The LP formulation is:
-
-```
-maximize:    r^T y
-subject to:  H y = γ
-             y ≥ 0
+**Generate comparison plots:**
+```bash
+python -m mdp_lp.create_comparison_plots
 ```
 
-Where:
-- `y ∈ R^{S×A}` is the **occupancy measure** (decision variables)
-- `H ∈ R^{S × (S×A)}` is the constraint matrix: `H[s', (s,a)] = δ[s'=s] - β·P[s,a,s']`
-- `γ ∈ R^S` is the initial state distribution
-- `r ∈ R^{S×A}` is the flattened reward vector
+### Experiment Configuration
 
-#### API
+**16 total experiments:**
+- Experiment (a): β₂=0, p constant → 4 experiments (2 cost cases × 2 algorithms)
+- Experiment (b): β₂=0, p lognormal → 4 experiments (2 cost cases × 2 algorithms)
+- Experiment (c): β₂≠0, p and p_related lognormal → 8 experiments (2 cost cases × 2 algorithms × 2 β₂ values)
 
-```python
-mdp = MDP(beta, gamma=None)
+**Elasticity model:** `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε`
 
-# Build components
-H = mdp.build_H(P)              # (batch, S, S*A)
-r_flat = mdp.build_r(r)         # (batch, S*A)
-gamma = mdp.build_gamma(...)    # (batch, S)
+**Output files per experiment:**
+- `results.json`: Complete metrics and data
+- `train_reward_per_epoch.png`: Training cost over epochs
+- `lambda_histograms.png`: Predicted vs true lambda distributions
+- `test_obj_boxplot.png`: Test set optimal values (single method)
+- `comparison_boxplot.png`: DFL vs Two-stage comparison (parent directory)
 
-# Or get all at once
-H, r_flat, gamma = mdp.lp_formulation(P, r)
+## Results Interpretation
+
+### Plot Descriptions
+
+**train_reward_per_epoch.png**: Training cost over epochs (negative values represent costs). Decreasing cost indicates improving performance.
+
+**lambda_histograms.png**: Predicted vs true lambda distributions. Overlapping histograms indicate accurate predictions.
+
+**test_obj_boxplot.png**: Distribution of optimal values on test set. Higher values (less negative) indicate better performance.
+
+**comparison_boxplot.png**: Side-by-side comparison of DFL vs Two-stage on test set. Primary metric for method comparison.
+
+### Key Metrics
+
+- **Lambda prediction error**: `|λ_pred - λ_true|`, should decrease over epochs
+- **obj_loss**: `|obj_hat - obj_true|`, measures prediction quality
+- **Test optimal values**: Compare mean/std between DFL and Two-stage
+
+## Performance
+
+**Bottlenecks:**
+- LP solving (Gurobi): ~70% of time, CPU-only
+- Neural network training: ~20% of time
+- Data preparation: ~10% of time
+
+**Recommended:** Use parallel execution via `run_all_elasticity.py` which automatically distributes experiments across CPU cores.
+
+**Expected runtime:**
+- Per experiment (100 samples, 100 epochs): 1-2 hours
+- All 16 experiments in parallel (10 workers): 2-3 hours total
+
+**GPU:** Not used. Sparse tensors require CPU, and LP solving is CPU-only.
+
+## Parameters
+
+**Elasticity model:**
+- `beta_0 = 2.0`, `beta_1 = -1.5`, `beta_2 = 0.0` (varies by experiment), `sigma_epsilon = 0.1`
+- Price: `p_constant = 10.0` (exp a), or lognormal(mean=10.0, std=0.5) (exp b, c)
+- Related price: lognormal(mean=8.0, std=0.5) (exp c only)
+
+**MDP structure:**
+- States: 151 (b_max=50, s_max=100, inventory range -50 to +100)
+- Actions: 21 (q_max=20, order quantities 0 to 20)
+- Demand: Poisson with max d_max=30
+
+**Cost parameters:**
+- High margin: `foc=1.0, voc=0.5, hc=0.1, bc=0.2` (holding cost << revenue)
+- Low margin: `foc=1.0, voc=0.5, hc=20.0, bc=0.2` (holding cost >> revenue)
+
+**Training:**
+- Epochs: 100, Samples: 100, Train/test split: 80/20
+- Learning rate: 0.001, Hidden dimension: 32
+
+## Notes
+
+**Negative values in results:** Represent costs, not rewards. More negative indicates higher costs. High margin experiments show ~-300 to -400, low margin ~-37,000.
+
+**Training cost trends:** Cost may decrease as the model learns the true cost structure. Monitor lambda prediction error and obj_loss to confirm learning.
+
+**Elasticity model:** Ground truth lambda is generated from `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε`. The neural network does not know this functional form and learns a black-box mapping from prices to lambda.
+
+## Code Structure
+
+**Core modules:**
+- `mdp.py`: MDP to LP formulation
+- `solvers/`: LP solvers (dense, differentiable)
+- `inventory_elasticity.py`: Inventory MDP creation from lambda
+- `elasticity_model.py`: Ground truth model and neural network predictor
+- `train_elasticity.py`: Training and evaluation logic
+
+**Experiment scripts:**
+- `run_all_elasticity.py`: Run all 16 experiments in parallel
+- `run_elasticity_experiments.py`: Run single experiment
+- `create_comparison_plots.py`: Generate comparison plots
+
+## Results Location
+
+Results are stored in `mdp_lp/results_elasticity/` with structure:
+```
+exp_X/cost_case/algorithm/epochs_100/
 ```
 
-**Parameters:**
-- `beta` (float): Discount factor (0 < β < 1)
-- `gamma` (Tensor, optional): Initial state distribution. If `None`, uses uniform distribution.
-
-**Input shapes:**
-- `P`: `(batch, S, A, S)` - transition probabilities
-- `r`: `(batch, S, A)` - rewards
-
-**Output shapes:**
-- `H`: `(batch, S, S*A)` - constraint matrix
-- `r_flat`: `(batch, S*A)` - flattened rewards
-- `gamma`: `(batch, S)` - initial distribution
-
-### LP Solvers
-
-Three solver implementations are available:
-
-#### 1. Dense LP Solver
-
-Uses Gurobi with dense matrix representation. Best for small to medium problems.
-
-```python
-from mdp_lp.solvers import DenseLPSolver, solve_lp_dense
-
-# Class interface
-solver = DenseLPSolver()
-y_star, basis = solver.solve(H, r, gamma)
-
-# Function interface
-y_star, basis = solve_lp_dense(H, r, gamma)
-```
-
-**Returns:**
-- `y_star`: `(batch, S*A)` - optimal occupancy measure
-- `basis`: `(batch, S)` - basis column indices
-
-#### 2. Sparse LP Solver
-
-Uses Gurobi with COO (Coordinate) sparse format. Efficient for large, sparse problems.
-
-```python
-from mdp_lp.solvers import SparseLPSolver, solve_lp_sparse
-
-# Class interface
-solver = SparseLPSolver()
-y_star, basis = solver.solve(H, r, gamma)
-
-# Function interface
-y_star, basis = solve_lp_sparse(H, r, gamma)
-```
-
-**Benefits:**
-- Memory efficient: Only stores non-zero entries
-- Faster for sparse H matrices (common in MDPs)
-- Same API as dense solver
-
-#### 3. Differentiable LP Solver
-
-PyTorch autograd function for end-to-end differentiation. Used by DFL trainer.
-
-```python
-from mdp_lp.solvers import DifferentiableLPSolver
-
-# Used as autograd Function
-y_star = DifferentiableLPSolver.apply(H, r, gamma)
-```
-
-**Current implementation:**
-- Computes `∂v/∂r = y*` (gradient w.r.t. rewards)
-- `∂v/∂H` and `∂v/∂gamma` are placeholders (return zeros)
-
-**Note**: Full gradient computation for H is planned for future versions.
-
-### Trainers
-
-Two training strategies are provided:
-
-#### 1. DFL Trainer (Direct Feedback Learning)
-
-End-to-end differentiable training. Solves LP during forward pass and backpropagates through it.
-
-```python
-from mdp_lp.trainers import DFLTrainer
-
-trainer = DFLTrainer(predictor, beta=0.9, optimizer=optimizer)
-
-# Forward pass
-v_star, y_star, P, r = trainer.forward(x)
-
-# Training step (supervised)
-loss, v_pred = trainer.train_step(x, v_true=target_values)
-
-# Training step (unsupervised - maximize)
-loss, v_pred = trainer.train_step(x, v_true=None)
-```
-
-**Loss functions:**
-- **Supervised**: `loss = MSE(v_star, v_true)` when `v_true` is provided
-- **Unsupervised**: `loss = -v_star.mean()` to maximize value
-
-**Use when:**
-- You want end-to-end gradients
-- You have target values or want to maximize value
-- You need differentiable optimization
-
-#### 2. TwoStage Trainer
-
-Two-stage training: first learn P and r, then solve LP at evaluation.
-
-```python
-from mdp_lp.trainers import TwoStageTrainer
-
-trainer = TwoStageTrainer(predictor, beta=0.9, optimizer=optimizer)
-
-# Training step (supervised on P, r)
-loss = trainer.train_step(x, P_true, r_true)
-
-# Evaluation step (solve LP)
-v_star = trainer.eval_step(x)
-```
-
-**Loss function:**
-- `loss = L1(P_pred, P_true) + L1(r_pred, r_true)`
-
-**Use when:**
-- You have ground truth P and r
-- You want faster training (no LP solve during training)
-- You only need LP solution at evaluation time
-
-**Trade-off:**
-- ✅ Faster training (no LP solve)
-- ❌ No end-to-end gradients through LP
-- ❌ Requires ground truth P and r
-
-## Usage Examples
-
-### Example 1: Compare Dense vs Sparse Solvers
-
-```python
-import torch
-from mdp_lp.mdp import MDP
-from mdp_lp.solvers import solve_lp_dense, solve_lp_sparse
-
-mdp = MDP(beta=0.9)
-P = torch.tensor([[...]])  # your MDP
-r = torch.tensor([[...]])
-
-H, r_flat, gamma = mdp.lp_formulation(P, r)
-
-# Dense solver
-y_dense, basis_dense = solve_lp_dense(H[0], r_flat[0], gamma[0])
-
-# Sparse solver
-y_sparse, basis_sparse = solve_lp_sparse(H[0], r_flat[0], gamma[0])
-
-# Should match (within numerical precision)
-assert torch.allclose(y_dense, y_sparse, atol=1e-5)
-```
-
-### Example 2: Full Training Loop (DFL)
-
-```python
-import torch
-import torch.nn as nn
-from mdp_lp.trainers import DFLTrainer
-
-# Setup
-predictor = MyPredictor(input_dim=10, S=5, A=3)
-optimizer = torch.optim.Adam(predictor.parameters(), lr=1e-3)
-trainer = DFLTrainer(predictor, beta=0.9, optimizer=optimizer)
-
-# Training loop
-for epoch in range(100):
-    for x, v_true in dataloader:
-        loss, v_pred = trainer.train_step(x, v_true=v_true)
-        
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Loss: {loss:.4f}, v_pred: {v_pred.mean().item():.4f}")
-```
-
-### Example 3: Two-Stage Training
-
-```python
-from mdp_lp.trainers import TwoStageTrainer
-
-trainer = TwoStageTrainer(predictor, beta=0.9, optimizer=optimizer)
-
-# Training phase: learn P and r
-for epoch in range(100):
-    for x, P_true, r_true in dataloader:
-        loss = trainer.train_step(x, P_true, r_true)
-
-# Evaluation phase: solve LP
-with torch.no_grad():
-    for x in eval_dataloader:
-        v_star = trainer.eval_step(x)
-        print(f"Optimal value: {v_star.item():.4f}")
-```
-
-### Example 4: Custom Predictor Architecture
-
-```python
-import torch
-import torch.nn as nn
-from mdp_lp.trainers import DFLTrainer
-
-class TransformerPredictor(nn.Module):
-    """Example: Transformer-based predictor"""
-    def __init__(self, input_dim, S, A, d_model=128):
-        super().__init__()
-        self.encoder = nn.TransformerEncoder(...)
-        self.P_head = nn.Linear(d_model, S * A * S)
-        self.r_head = nn.Linear(d_model, S * A)
-        self.S, self.A = S, A
-    
-    def forward(self, x):
-        # Your architecture here
-        encoded = self.encoder(x)
-        P_flat = self.P_head(encoded)
-        r_flat = self.r_head(encoded)
-        # Reshape and normalize...
-        return P, r
-
-# Use with trainer
-predictor = TransformerPredictor(input_dim=10, S=5, A=3)
-trainer = DFLTrainer(predictor, beta=0.9, optimizer=optimizer)
-```
-
-## Mathematical Background
-
-### MDP to LP Conversion
-
-For a discounted MDP `(S, A, P, r, β, γ)`, the optimal value function can be found by solving:
-
-**Bellman Equation:**
-```
-v*(s) = max_a [r(s,a) + β Σ_{s'} P(s'|s,a) v*(s')]
-```
-
-**LP Formulation:**
-```
-maximize:    Σ_{s,a} r(s,a) · y(s,a)
-subject to:  Σ_a y(s',a) = γ(s') + β Σ_{s,a} P(s'|s,a) y(s,a)  ∀s'
-             y(s,a) ≥ 0  ∀s,a
-```
-
-Where `y(s,a)` is the **occupancy measure**: the expected discounted time spent in state `s` taking action `a`.
-
-### Constraint Matrix H
-
-The constraint matrix `H` encodes the flow balance:
-
-```
-H[s', (s,a)] = δ[s'=s] - β · P(s'|s,a)
-```
-
-This ensures:
-- **Identity term** `δ[s'=s]`: Occupancy in state `s'` from being in `s'`
-- **Transition term** `-β·P(s'|s,a)`: Discounted flow out of `s'` via transitions
-
-### Optimality
-
-The LP solution `y*` gives:
-- **Optimal value**: `v* = Σ_{s,a} r(s,a) · y*(s,a)`
-- **Optimal policy**: `π*(s) = argmax_a y*(s,a)` (deterministic)
-
-## API Reference
-
-### MDP
-
-```python
-class MDP:
-    def __init__(self, beta, gamma=None)
-    def build_H(self, P) -> Tensor  # (batch, S, S*A)
-    def build_r(self, r) -> Tensor  # (batch, S*A)
-    def build_gamma(self, batch, S, device) -> Tensor  # (batch, S)
-    def lp_formulation(self, P, r) -> Tuple[Tensor, Tensor, Tensor]
-```
-
-### Solvers
-
-```python
-# Dense
-class DenseLPSolver:
-    def solve_single(self, H_i, r_i, gamma_i) -> Tuple[Tensor, Tensor]
-    def solve(self, H, r, gamma) -> Tuple[Tensor, Tensor]
-
-def solve_lp_dense(H, r, gamma) -> Tuple[Tensor, Tensor]
-def solve_lp_gurobi(H, r, gamma) -> Tensor  # Returns only y_star
-
-# Sparse
-class SparseLPSolver:
-    def solve_single(self, H_i, r_i, gamma_i) -> Tuple[Tensor, Tensor]
-    def solve(self, H, r, gamma) -> Tuple[Tensor, Tensor]
-
-def solve_lp_sparse(H, r, gamma) -> Tuple[Tensor, Tensor]
-
-# Differentiable
-class DifferentiableLPSolver(autograd.Function):
-    @staticmethod
-    def forward(ctx, H, r, gamma) -> Tensor
-    @staticmethod
-    def backward(ctx, grad_y) -> Tuple[Tensor, Tensor, Tensor]
-```
-
-### Trainers
-
-```python
-class DFLTrainer:
-    def __init__(self, predictor, beta, gamma=None, optimizer=None)
-    def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor]
-    def train_step(self, x, v_true=None) -> Tuple[float, Tensor]
-
-class TwoStageTrainer:
-    def __init__(self, predictor, beta, gamma=None, optimizer=None)
-    def train_step(self, x, P_true, r_true) -> float
-    def eval_step(self, x) -> Tensor
-```
+Final organized results are copied to `mdp_lp/final_results/` (see `final_results/README.md`).
