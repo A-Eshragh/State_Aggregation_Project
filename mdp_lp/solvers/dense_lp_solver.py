@@ -39,15 +39,10 @@ class DenseLPSolver:
         S, SA = H_i.shape
 
         model = gp.Model()
-        model.Params.OutputFlag = 0  # silence logs
+        model.Params.OutputFlag = 0
 
-        # Variables y_j >= 0
         y = model.addMVar(shape=SA, lb=0.0, vtype=GRB.CONTINUOUS)
-
-        # Objective: maximize r^T y
         model.setObjective(r_i @ y, GRB.MAXIMIZE)
-
-        # Equality constraints: H y = gamma
         model.addMConstr(H_i, y, '=', gamma_i)
 
         model.optimize()
@@ -55,12 +50,7 @@ class DenseLPSolver:
         if model.status != GRB.OPTIMAL:
             raise RuntimeError("Gurobi failed to solve LP.")
 
-        # Extract y*
-        y_star = y.X  # numpy array
-
-        # Extract basis:
-        # VBasis[j] == 0  → basic variable
-        # VBasis[j] != 0 → nonbasic
+        y_star = y.X
         vb = y.VBasis
 
         basis_idx = torch.tensor(
@@ -106,14 +96,11 @@ def solve_lp_dense(H, r, gamma):
         basis:  (S,)
     """
     solver = DenseLPSolver()
-    # Handle both single and batched inputs
     if H.dim() == 3:
-        # Batched - solve first element
         y_star, basis = solver.solve_single(H[0].detach().cpu().numpy(),
                                            r[0].detach().cpu().numpy(),
                                            gamma[0].detach().cpu().numpy())
     else:
-        # Single instance
         y_star, basis = solver.solve_single(H.detach().cpu().numpy(),
                                            r.detach().cpu().numpy(),
                                            gamma.detach().cpu().numpy())
@@ -121,17 +108,7 @@ def solve_lp_dense(H, r, gamma):
 
 
 def solve_lp_gurobi(H, r, gamma):
-    """
-    Alias for solve_lp_dense for backward compatibility.
-    Solves batched LP and returns only y_star (no basis).
-    
-    H:     (batch, S, SA)
-    r:     (batch, SA)
-    gamma: (batch, S)
-    
-    Returns:
-        y_star: (batch, SA)
-    """
+    """Solve batched LP and return y_star and basis."""
     solver = DenseLPSolver()
     y_star, basis = solver.solve(H, r, gamma)
     return y_star, basis

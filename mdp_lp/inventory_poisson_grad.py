@@ -6,7 +6,6 @@ All functions are pure and do not rely on PyTorch's automatic differentiation.
 """
 
 import torch
-import math
 
 
 def poisson_pmf(lambda_param, max_d):
@@ -83,8 +82,8 @@ def dH_dlambda(lambda_param, b_max, s_max, a_max, beta):
     - For s' = 1..s+a: ∂H/∂λ = −β · (f_λ(s + a − s' − 1) − f_λ(s + a − s'))
     - Else: 0
     
-    Note: States are indexed 0..S-1 where state s corresponds to inventory level s - b_max.
-          Actions are indexed 0..a_max where action a corresponds to order quantity a.
+    States are indexed 0..S-1 where state s corresponds to inventory level s - b_max.
+    Actions are indexed 0..a_max where action a corresponds to order quantity a.
     """
     # Handle batch vs scalar
     is_batch = lambda_param.dim() > 0
@@ -129,30 +128,13 @@ def dH_dlambda(lambda_param, b_max, s_max, a_max, beta):
                 # Demand required: d = inv_after_order - inv_s_prime = (s - b_max) + a - (s' - b_max) = s + a - s'
                 d_required = inv_after_order - inv_s_prime
                 
-                # Appendix B formula (notation: s, a, s' refer to inventory levels, not code indices):
-                # - For s' = 0: ∂H/∂λ = −β · f_λ(s + a − 1)
-                # - For s' = 1..s+a: ∂H/∂λ = −β · (f_λ(s + a − s' − 1) − f_λ(s + a − s'))
-                # - Else: 0
-                #
-                # Conversion to code indices:
-                # - State s (code) has inventory inv_s = s - b_max
-                # - Action a (code) is order quantity a  
-                # - State s' (code) has inventory inv_s_prime = s' - b_max
-                # - After ordering: inv_after_order = inv_s + a
-                
                 if inv_s_prime == 0:
-                    # Case: s' = 0 (inventory level 0, corresponds to state index s' = b_max)
-                    # Appendix B: ∂H/∂λ = −β · f_λ(s + a − 1)
-                    # In inventory terms: f_λ(inv_s + a - 1)
                     d_idx = inv_s + a - 1
                     if 0 <= d_idx < f_lambda.shape[1]:
                         dH_dlambda[:, s_prime, col_idx] = -beta * f_lambda[:, d_idx]
                 elif 1 <= inv_s_prime <= inv_after_order:
-                    # Case: s' = 1..s+a (inventory levels from 1 to inv_after_order)
-                    # Appendix B: ∂H/∂λ = −β · (f_λ(s + a − s' − 1) − f_λ(s + a − s'))
-                    # In inventory terms: f_λ(inv_s + a - inv_s_prime - 1) - f_λ(inv_s + a - inv_s_prime)
-                    d_idx1 = inv_s + a - inv_s_prime - 1  # demand index for (s + a - s' - 1)
-                    d_idx2 = inv_s + a - inv_s_prime       # demand index for (s + a - s')
+                    d_idx1 = inv_s + a - inv_s_prime - 1
+                    d_idx2 = inv_s + a - inv_s_prime
                     
                     term1 = torch.zeros(batch_size, device=device, dtype=dtype)
                     term2 = torch.zeros(batch_size, device=device, dtype=dtype)
@@ -163,7 +145,6 @@ def dH_dlambda(lambda_param, b_max, s_max, a_max, beta):
                         term2 = f_lambda[:, d_idx2]
                     
                     dH_dlambda[:, s_prime, col_idx] = -beta * (term1 - term2)
-                # Else: 0 (already initialized)
     
     if not is_batch:
         dH_dlambda = dH_dlambda.squeeze(0)  # (S, S*A)
@@ -194,8 +175,8 @@ def dr_dlambda(lambda_param, b_max, s_max, a_max, p, h):
     This represents the gradient of reward w.r.t. lambda for state-action pair (s, a).
     The sum is over demand values x from 0 to s+a-1 (inclusive).
     
-    Note: States are indexed 0..S-1 where state s corresponds to inventory level s - b_max.
-          Actions are indexed 0..a_max where action a corresponds to order quantity a.
+    States are indexed 0..S-1 where state s corresponds to inventory level s - b_max.
+    Actions are indexed 0..a_max where action a corresponds to order quantity a.
     """
     # Handle batch vs scalar
     is_batch = lambda_param.dim() > 0
@@ -232,19 +213,10 @@ def dr_dlambda(lambda_param, b_max, s_max, a_max, p, h):
             # Compute s + a (in terms of inventory levels)
             inv_after_order = inv_s + a
             
-            # Appendix B formula: sum_{x=0}^{s+a-1} f_λ(x)
-            # In terms of inventory: sum over x from 0 to inv_s + a - 1
-            # But we need to be careful: the sum is over demand values x
-            # x ranges from 0 to (inv_s + a - 1), but we need to ensure x >= 0
-            max_x = max(0, inv_after_order - 1)  # s + a - 1 in inventory terms
-            
-            # Sum f_λ(x) for x = 0, 1, ..., max_x
+            max_x = max(0, inv_after_order - 1)
             if max_x >= 0:
-                # Sum probabilities from x=0 to x=max_x (inclusive)
-                # f_lambda[:, 0:max_x+1] gives P(D=0), P(D=1), ..., P(D=max_x)
                 dr_dlambda[:, idx] = (p + h) * torch.sum(f_lambda[:, :max_x + 1], dim=1)
             else:
-                # If max_x < 0, sum is empty (0)
                 dr_dlambda[:, idx] = 0.0
     
     if not is_batch:

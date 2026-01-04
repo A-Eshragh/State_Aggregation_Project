@@ -58,32 +58,20 @@ class DifferentiableLPSolver(autograd.Function):
         device = H.device
         dtype = H.dtype
 
-        # Initialize gradients
         grad_H = torch.zeros_like(H)
         grad_r = torch.zeros_like(r)
         grad_gamma = torch.zeros_like(gamma)
 
-        # Gradient w.r.t. r is always valid:
-        # v = r^T y*  =>  ∂v/∂r = y*
         grad_r = y_star * grad_y
-
-        # Basis-restricted gradients
         for b in range(batch):
             B = basis[b]                 # (S,)
             H_B = H[b, :, B]             # (S, S)
             r_B = r[b, B]                # (S,)
             y_B = y_star[b, B]           # (S,)
 
-            # Solve H_B^T x = r_B  for  x = H_B^{-T} r_B instead of inverting explicitly
             x = torch.linalg.solve(H_B.T, r_B)
-
-            # ∂v/∂gamma = H_B^{-T} r_B
             grad_gamma[b] = x
-
-            # ∂v/∂H_B = - (H_B^{-T} r_B) y_B^T
             grad_H_B = -torch.outer(x, y_B)
-
-            # Scatter basis gradients into full H
             for i, col_idx in enumerate(B):
                 grad_H[b, :, col_idx] = grad_H_B[:, i]
 
