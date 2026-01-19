@@ -15,6 +15,8 @@ from mdp_lp.inventory_elasticity import create_inventory_from_lambda
 from mdp_lp.utils import solve_lp
 from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
+from mdp_lp.soft_state_aggregation import SoftAggDense
+from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 
 
 def prepare_elasticity_data(args):
@@ -48,6 +50,12 @@ def prepare_elasticity_data(args):
         sigma_epsilon=args.sigma_epsilon
     )
     lambda_true = gt_elasticity(p, p_related)
+    # Sanity check: Poisson rate must be strictly positive.
+    if not torch.all(torch.isfinite(lambda_true)):
+        raise ValueError("lambda_true contains non-finite values (NaN/Inf)")
+    if torch.any(lambda_true <= 0):
+        min_val = float(lambda_true.min().item())
+        raise ValueError(f"lambda_true must be > 0, but min(lambda_true)={min_val}")
     
     solver_obj = DenseLPSolver()
     def lp_solver(H, r, gamma):
@@ -92,9 +100,25 @@ def prepare_elasticity_data(args):
         val_size = train_size - train_tune_size
         train_dataset, test_dataset = random_split(train_dataset, [train_tune_size, val_size])
     
-    batch_size = int(0.8 * 0.2 * args.n_samples) if args.mode == 'train' else int(0.2 * args.n_samples)
+    # Use batching for speed (DFL remains correct; this only reduces Python/optimizer-step overhead).
+    #
+    # IMPORTANT for qpth/no-aggregation:
+    #   The occupancy QP has SA variables where S=(b_max+s_max+1) and A=(q_max+1).
+    #   qpth solves dense KKT systems whose cost/memory blows up quickly with SA, especially when batching.
+    #   So we intentionally keep batch size very small for dfl_qpth when n_agg=-1.
+    default_bs = 32
+    if getattr(args, "algo", None) == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
+        # Heuristic: for SA in the thousands (e.g., 151*21=3171), even B=2 can be painful on CPU.
+        S = int(args.b_max + args.s_max + 1)
+        A = int(args.q_max + 1)
+        SA = int(S * A)
+        default_bs = 1 if SA >= 1500 else 2
+        print(f"[Data Prep] qpth no-agg detected (SA={SA}). Using small batch_size={default_bs} for feasibility/speed.")
+
+    batch_size = min(default_bs, len(train_dataset)) if len(train_dataset) > 0 else 1
+    test_batch_size = min(default_bs, len(test_dataset)) if len(test_dataset) > 0 else 1
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False)
     
     mean_lambda = lambda_true[:train_size].mean().item()
     print(f"[Data Prep] Data preparation complete")
@@ -120,8 +144,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     
     init_mean_lambda = mean_lambda if mean_lambda is not None else 1.0
     pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda).to(device)
-    optimizer = optim.Adam(pred_model.parameters(), lr=learning_rate)
-    loss_fn = nn.L1Loss()
+
+    # Optional: learn a soft state aggregation mapping jointly with the predictor under DFL variants.
+    agg = None
+    params = list(pred_model.parameters())
+    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth"):
+        n_states = args.b_max + args.s_max + 1
+        n_actions = args.q_max + 1
+        agg = SoftAggDense(n_states=n_states, n_actions=n_actions, n_clusters=args.n_agg, r_embed=getattr(args, "sa_r_embed", 8)).to(device)
+        params = params + list(agg.parameters())
+
+    optimizer = optim.Adam(params, lr=learning_rate)
+    # Prediction stabilizer loss (used for training signal in both algorithms)
+    pred_loss_fn = nn.MSELoss()
+    # Objective-difference logging loss: keep scale interpretable (MSE would square thousands → millions)
+    obj_diff_fn = nn.L1Loss()
     
     solver_obj = DenseLPSolver()
     def lp_solver(H, r, gamma):
@@ -133,16 +170,47 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     train_lambda_true_list = []
     obj_loss_list = []
     train_time_list = []
+    # Extra timing (for best comparisons across solver/aggregation variants)
+    sa_time_sec_per_epoch = []         # aggregation wall time per epoch (sum over batches)
+    solver_time_sec_per_epoch = []     # LP/QP layer wall time per epoch (sum over batches)
+    # For DFL: track MSE (prediction loss) and full DFL loss separately
+    train_mse_list = []  # MSE (prediction loss) for DFL
+    train_dfl_loss_list = []  # Full DFL loss (-v*_θ + λ·pred_loss)
+    # For two-stage: track prediction loss
+    train_twostage_loss_list = []  # Prediction loss for two-stage
     
     print(f"[Training] Starting: {args.n_epochs} epochs, algo={args.algo}")
     start_time = time.time()
+
+    # qpth solver (only used for dfl_qpth)
+    qp_solver = None
+    if args.algo == "dfl_qpth":
+        try:
+            from qpth.qp import QPFunction, QPSolvers
+            qp_solver = QPFunction(solver=QPSolvers.PDIPM_BATCHED)
+        except Exception as e:
+            raise RuntimeError(f"qpth is required for algo='dfl_qpth' but could not be imported/initialized: {e}")
+
+    # Checkpointing can dominate runtime when we serialize huge arrays every epoch.
+    # Default behavior remains: save every epoch, full partial results.
+    checkpoint_every = int(getattr(args, "checkpoint_every", 1))
+    save_full_partial = bool(getattr(args, "save_full_partial", True))
+    if args.algo == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
+        # qpth no-agg is already very expensive; keep I/O overhead minimal.
+        checkpoint_every = max(checkpoint_every, 10)
+        save_full_partial = False
     
     for epoch in range(args.n_epochs):
         train_loss = 0.0
         obj_loss = 0.0
+        epoch_sa_time = 0.0
+        epoch_solver_time = 0.0
         epoch_rewards = []
         epoch_lambda_pred = []
         epoch_lambda_true = []
+        epoch_mse = []  # For DFL: track MSE per batch
+        epoch_dfl_loss = []  # For DFL: track full loss per batch
+        epoch_twostage_loss = []  # For two-stage: track prediction loss per batch
         pred_model.train()
         
         for batch_data in train_loader:
@@ -150,6 +218,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             batch_size = feats.shape[0]
             
             lambda_pred = pred_model(feats)
+            # Sanity check: predicted rate should be nonnegative (Softplus output).
+            if not torch.all(torch.isfinite(lambda_pred)):
+                raise ValueError("lambda_pred contains non-finite values (NaN/Inf)")
+            if torch.any(lambda_pred < 0):
+                min_val = float(lambda_pred.min().item())
+                raise ValueError(f"lambda_pred must be >= 0, but min(lambda_pred)={min_val}")
             
             if use_p_related:
                 p = prices[:, 0]
@@ -163,52 +237,114 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 p
             )
             
-            if args.algo == 'dfl':
-                H, r_flat, gamma = mdp.lp_formulation(mdp.P, mdp.r)
-                y_star = DifferentiableLPSolver.apply(H, r_flat, gamma)
-                obj_hat = torch.sum(r_flat * y_star, dim=1)
+            if args.algo in ("dfl", "dfl_qpth"):
+                # Build gamma once (InventoryLP uses uniform gamma by default).
+                S = mdp.P.shape[1]
+                gamma = mdp.build_gamma(batch_size, S, device)
+                gamma = torch.clamp(gamma, min=1e-8)
+                gamma = gamma / gamma.sum(dim=1, keepdim=True)
+
+                # Optionally aggregate (P, r, gamma) into M=n_agg clusters.
+                P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
+                if agg is not None:
+                    P_use, r_use, gamma_use, _info = agg(
+                        P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5)
+                    )
+                    epoch_sa_time += float(_info.get("runtime_sec", 0.0))
+
+                H_use = mdp.build_H(P_use)
+                r_flat_use = r_use.reshape(batch_size, -1)
+
+                if args.algo == "dfl":
+                    # Differentiable LP via fixed-basis sensitivity (uses Gurobi to get a basis).
+                    t0 = time.time()
+                    y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                    epoch_solver_time += (time.time() - t0)
+                else:
+                    # Differentiable QP (qpth) with quadratic regularization.
+                    t0 = time.time()
+                    y_star = solve_occupancy_qp_qpth(
+                        H_use, r_flat_use, gamma_use, reg=getattr(args, "qp_reg", 0.5), qp_solver=qp_solver
+                    )
+                    epoch_solver_time += (time.time() - t0)
+
+                v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
+
+                pred_loss = pred_loss_fn(lambda_pred, lambda_true)
+                dfl_loss = -v_star.mean() + args.loss_weight * pred_loss
+
+                # For logging: compare to obj_true (computed from LP on lambda_true)
+                obj_hat = v_star.detach()
+                obj_diff = obj_diff_fn(obj_hat, obj_true)
+                obj_loss += obj_diff.item()
+
+                epoch_mse.append(pred_loss.item())
+                epoch_dfl_loss.append(dfl_loss.item())
+
+                reward = v_star.mean().item()
+                epoch_rewards.append(reward)
+                epoch_lambda_pred.append(lambda_pred.detach())
+                epoch_lambda_true.append(lambda_true)
+
+                optimizer.zero_grad()
+                dfl_loss.backward()
+                train_loss += dfl_loss.item()
+
             else:
+                # Two-stage: only prediction loss (no gradients through LP)
+                # Gamma is already clamped in solve_lp() for non-degeneracy
                 _, obj_hat, _ = solve_lp(mdp, lp_solver)
-                obj_hat = obj_hat.detach()
-            
-            pred_loss = loss_fn(lambda_pred, lambda_true)
-            obj_diff = loss_fn(obj_hat, obj_true)
-            obj_loss += obj_diff.item()
-            
-            reward = -obj_hat.mean().item()
-            epoch_rewards.append(reward)
-            epoch_lambda_pred.append(lambda_pred.detach())
-            epoch_lambda_true.append(lambda_true)
-            
-            if args.algo == 'twostage':
+                obj_hat = obj_hat.detach()  # No gradients through LP
+                
+                pred_loss = pred_loss_fn(lambda_pred, lambda_true)
+                obj_diff = obj_diff_fn(obj_hat, obj_true)
+                obj_loss += obj_diff.item()
+                
+                # Track prediction loss for plotting
+                epoch_twostage_loss.append(pred_loss.item())
+                
+                # For two-stage, reward is the objective value (positive = better)
+                reward = obj_hat.mean().item()
+                epoch_rewards.append(reward)
+                epoch_lambda_pred.append(lambda_pred.detach())
+                epoch_lambda_true.append(lambda_true)
+                
                 loss = pred_loss
-            else:
-                loss = obj_diff + args.loss_weight * pred_loss
-            
-            optimizer.zero_grad()
-            if args.algo == 'dfl':
-                H, r_flat, gamma = mdp.lp_formulation(mdp.P, mdp.r)
-                y_star = DifferentiableLPSolver.apply(H, r_flat, gamma)
-                obj_hat_grad = torch.sum(r_flat * y_star, dim=1)
-                loss_grad = loss_fn(obj_hat_grad, obj_true) + args.loss_weight * pred_loss
-                loss_grad.backward()
-            else:
+                optimizer.zero_grad()
                 loss.backward()
+                train_loss += loss.item()
             
             optimizer.step()
-            train_loss += loss.item()
         
         train_time_list.append(time.time() - start_time)
+        sa_time_sec_per_epoch.append(epoch_sa_time)
+        solver_time_sec_per_epoch.append(epoch_solver_time)
         avg_obj_loss = obj_loss / len(train_loader)
         obj_loss_list.append(avg_obj_loss)
         train_reward_list.append(np.mean(epoch_rewards))
         train_lambda_pred_list.append(torch.cat(epoch_lambda_pred))
         train_lambda_true_list.append(torch.cat(epoch_lambda_true))
         
+        # For DFL variants (LP-based and qpth-based): track average MSE and full DFL loss per epoch
+        if args.algo in ('dfl', 'dfl_qpth') and epoch_mse:
+            train_mse_list.append(np.mean(epoch_mse))
+            train_dfl_loss_list.append(np.mean(epoch_dfl_loss))
+            train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
+        else:
+            # Two-stage (or any other non-DFL mode): no DFL loss/MSE
+            train_mse_list.append(0.0)
+            train_dfl_loss_list.append(0.0)
+            # For two-stage: track prediction loss
+            if epoch_twostage_loss:
+                train_twostage_loss_list.append(np.mean(epoch_twostage_loss))
+            else:
+                train_twostage_loss_list.append(0.0)
+        
         if (epoch + 1) % 10 == 0:
             print(f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}')
         
-        if hasattr(args, 'save_dir') and args.save_dir:
+        should_checkpoint = ((epoch + 1) % checkpoint_every == 0) or (epoch == 0) or ((epoch + 1) == args.n_epochs)
+        if should_checkpoint and hasattr(args, 'save_dir') and args.save_dir:
             checkpoint_file = args.save_dir / 'checkpoint.json'
             model_file = args.save_dir / 'model_state.pt'
             results_partial_file = args.save_dir / 'results_partial.json'
@@ -218,24 +354,33 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     'epoch': epoch + 1,
                     'train_reward_per_epoch': [float(r) for r in train_reward_list],
                     'obj_loss': [float(l) for l in obj_loss_list],
-                    'train_time': train_time_list.copy()
+                    'train_time': train_time_list.copy(),
+                    'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
+                    'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
                 }
                 checkpoint_file.write_text(json.dumps(checkpoint_data, indent=2))
                 torch.save(pred_model.state_dict(), model_file)
-                
+
+                # Avoid rewriting gigantic arrays every checkpoint unless explicitly requested.
                 partial_results = {
                     'epoch': epoch + 1,
                     'n_epochs': args.n_epochs,
                     'status': 'training_in_progress',
                     'train_reward_per_epoch': [float(r) for r in train_reward_list],
-                    'train_lambda_pred': [l.cpu().numpy().tolist() for l in train_lambda_pred_list],
-                    'train_lambda_true': [l.cpu().numpy().tolist() for l in train_lambda_true_list],
                     'obj_loss': [float(l) for l in obj_loss_list],
+                    'train_mse_per_epoch': [float(x) for x in train_mse_list],
+                    'train_dfl_loss_per_epoch': [float(x) for x in train_dfl_loss_list],
+                    'train_twostage_loss_per_epoch': [float(x) for x in train_twostage_loss_list],
                     'train_time': train_time_list.copy(),
+                    'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
+                    'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
                     'test_obj_values': None,
                     'test_lambda_pred': None,
-                    'test_lambda_true': None
+                    'test_lambda_true': None,
                 }
+                if save_full_partial:
+                    partial_results['train_lambda_pred'] = [l.cpu().numpy().tolist() for l in train_lambda_pred_list]
+                    partial_results['train_lambda_true'] = [l.cpu().numpy().tolist() for l in train_lambda_true_list]
                 results_partial_file.write_text(json.dumps(partial_results, indent=2))
             except Exception as e:
                 print(f'[Training] ERROR saving checkpoint: {e}')
@@ -255,6 +400,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 'train_reward_per_epoch': [float(r) for r in train_reward_list],
                 'obj_loss': [float(l) for l in obj_loss_list],
                 'train_time': train_time_list.copy(),
+                'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
+                'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
                 'train_lambda_pred': [l.cpu().numpy().tolist() for l in train_lambda_pred_list],
                 'train_lambda_true': [l.cpu().numpy().tolist() for l in train_lambda_true_list]
             }
@@ -278,6 +425,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             batch_size = feats.shape[0]
             
             lambda_pred = pred_model(feats)
+            if not torch.all(torch.isfinite(lambda_pred)):
+                raise ValueError("lambda_pred contains non-finite values (NaN/Inf) during eval")
+            if torch.any(lambda_pred < 0):
+                min_val = float(lambda_pred.min().item())
+                raise ValueError(f"lambda_pred must be >= 0, but min(lambda_pred)={min_val} during eval")
             
             if use_p_related:
                 p = prices[:, 0]
@@ -323,7 +475,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         'test_lambda_pred': test_lambda_pred.cpu().numpy(),
         'test_lambda_true': test_lambda_true.cpu().numpy(),
         'obj_loss': obj_loss_list,
-        'train_time': train_time_list
+        'train_time': train_time_list,
+        'sa_time_sec_per_epoch': sa_time_sec_per_epoch,
+        'solver_time_sec_per_epoch': solver_time_sec_per_epoch,
+        'train_mse_per_epoch': train_mse_list,  # MSE (prediction loss) for DFL
+        'train_dfl_loss_per_epoch': train_dfl_loss_list,  # Full DFL loss (-v*_θ + λ·pred_loss)
+        'train_twostage_loss_per_epoch': train_twostage_loss_list  # Prediction loss for two-stage
     }
 
 

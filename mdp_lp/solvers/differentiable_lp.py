@@ -59,19 +59,26 @@ class DifferentiableLPSolver(autograd.Function):
         dtype = H.dtype
 
         grad_H = torch.zeros_like(H)
+        # Under the fixed-basis assumption, y_B = H_B^{-1} gamma does NOT depend on r.
+        # The ONLY dependence of the scalar objective v = r^T y on r is the *direct* path,
+        # which is handled outside this LP layer (since v is computed with r explicitly).
+        # Therefore, the sensitivity of y* w.r.t. r is 0 in this layer.
         grad_r = torch.zeros_like(r)
         grad_gamma = torch.zeros_like(gamma)
 
-        grad_r = y_star * grad_y
         for b in range(batch):
             B = basis[b]                 # (S,)
             H_B = H[b, :, B]             # (S, S)
-            r_B = r[b, B]                # (S,)
             y_B = y_star[b, B]           # (S,)
 
-            x = torch.linalg.solve(H_B.T, r_B)
+            # Differentiate y_B = H_B^{-1} gamma with upstream gradient grad_y_B.
+            # If L depends on y_B, then:
+            #   dL/dgamma = H_B^{-T} (dL/dy_B)
+            #   dL/dH_B   = - (H_B^{-T} (dL/dy_B)) (y_B)^T
+            grad_y_B = grad_y[b, B]      # (S,)
+            x = torch.linalg.solve(H_B.T, grad_y_B)  # (S,)
             grad_gamma[b] = x
-            grad_H_B = -torch.outer(x, y_B)
+            grad_H_B = -torch.outer(x, y_B)          # (S,S)
             for i, col_idx in enumerate(B):
                 grad_H[b, :, col_idx] = grad_H_B[:, i]
 

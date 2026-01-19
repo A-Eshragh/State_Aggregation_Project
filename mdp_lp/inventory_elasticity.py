@@ -38,32 +38,67 @@ def create_inventory_from_lambda(lambda_param, b_max, s_max, q_max, d_max,
     # Use mdp.prob_demand (after softmax) for consistency
     prob_demand_final = mdp.prob_demand
     
-    # Modify rewards to include selling price revenue
+    # Compute reward according to the formula:
+    # r_λ(s, a) = p · E_λ[Number of Sales] - ca - h · E_λ[Number of Leftover Items]
+    # where:
+    #   E_λ[Number of Sales] = Σ_{x=1}^{s+a} x·f_λ(x) + (s+a)·Σ_{x=s+a+1}^{∞} f_λ(x)
+    #   E_λ[Number of Leftover Items] = Σ_{x=0}^{s+a} (s+a-x)·f_λ(x)
+    
     n_states = mdp.n_states
     n_actions = mdp.n_actions
     n_demands = mdp.n_demands
     
-    begin_inv = torch.arange(n_states).view(-1, 1, 1) - b_max
-    orders = torch.arange(n_actions).view(1, -1, 1)
-    demands = torch.arange(n_demands).view(1, 1, -1)
+    # State indices: s ∈ [0, n_states-1] where inventory = s - b_max
+    # Action indices: a ∈ [0, n_actions-1] where order quantity = a
+    begin_inv = torch.arange(n_states, dtype=torch.float32).view(-1, 1, 1) - b_max  # (S, 1, 1)
+    orders = torch.arange(n_actions, dtype=torch.float32).view(1, -1, 1)  # (1, A, 1)
+    demands = torch.arange(n_demands, dtype=torch.float32).view(1, 1, -1)  # (1, 1, D)
     
-    available = begin_inv + orders
-    available_clamped = torch.clamp(available, 0, None)
-    sales = torch.min(demands, available_clamped)
+    # Available inventory after ordering: s + a (in inventory units)
+    available = begin_inv + orders  # (S, A, 1)
+    available_clamped = torch.clamp(available, 0, None)  # Can't be negative
     
-    selling_price_expanded = selling_price.view(batch, 1, 1, 1)
-    revenue = selling_price_expanded * sales.unsqueeze(0)
+    # Expand for batch dimension
+    prob_demand_expanded = prob_demand_final.view(batch, 1, 1, n_demands)  # (batch, 1, 1, D)
+    selling_price_expanded = selling_price.view(batch, 1, 1, 1)  # (batch, 1, 1, 1)
     
-    prob_demand_expanded = prob_demand_final.view(batch, 1, 1, n_demands)
-    expected_revenue = (prob_demand_expanded * revenue).sum(dim=3)
+    # Compute E_λ[Number of Sales]
+    # For x = 1 to s+a: sales = x with probability f_λ(x)
+    # For x > s+a: sales = s+a with probability f_λ(x)
+    # So: E[sales] = Σ_{x=1}^{s+a} x·f_λ(x) + (s+a)·Σ_{x=s+a+1}^{∞} f_λ(x)
     
-    overage = torch.clamp(mdp.end_inv, 0, s_max).unsqueeze(0)
-    underage = torch.clamp(mdp.end_inv, -b_max, 0).unsqueeze(0)
-    inventory_cost = (prob_demand_expanded * (hc * overage - bc * underage)).sum(dim=3)
-    orders_tensor = torch.arange(n_actions).view(1, 1, -1)
-    order_cost = foc * (orders_tensor > 0).float() + voc * orders_tensor
+    # Create mask for demands <= available
+    demand_mask = demands <= available_clamped  # (S, A, D)
     
-    mdp.r = -(expected_revenue - inventory_cost - order_cost)
+    # Sales when demand <= available: sales = demand
+    sales_low = demands * demand_mask  # (S, A, D)
+    
+    # Sales when demand > available: sales = available
+    sales_high = available_clamped * (~demand_mask)  # (S, A, D)
+    
+    sales = sales_low + sales_high  # (S, A, D)
+    
+    # Expected sales: Σ_{x} sales(x) · f_λ(x)
+    expected_sales = (prob_demand_expanded * sales.unsqueeze(0)).sum(dim=3)  # (batch, S, A)
+    
+    # Revenue = p · E[sales]
+    expected_revenue = selling_price_expanded.squeeze(-1) * expected_sales  # (batch, S, A)
+    
+    # Compute E_λ[Number of Leftover Items] = Σ_{x=0}^{s+a} (s+a-x)·f_λ(x)
+    # Leftover = max(0, s+a - demand) for demand <= s+a
+    leftover = torch.clamp(available_clamped - demands, 0, None)  # (S, A, D)
+    # Only count leftover when demand <= available (otherwise sold out)
+    leftover = leftover * demand_mask  # (S, A, D)
+    expected_leftover = (prob_demand_expanded * leftover.unsqueeze(0)).sum(dim=3)  # (batch, S, A)
+    
+    # Ordering cost: ca = foc * I(a>0) + voc * a
+    orders_tensor = torch.arange(n_actions, dtype=torch.float32).view(1, 1, -1)  # (1, 1, A)
+    order_cost = foc * (orders_tensor > 0).float() + voc * orders_tensor  # (1, 1, A)
+    order_cost = order_cost.expand(batch, n_states, -1)  # (batch, S, A)
+    
+    # Reward = p · E[sales] - ca - h · E[leftover]
+    # Note: h = hc (holding cost)
+    mdp.r = expected_revenue - order_cost - hc * expected_leftover
     
     return mdp
 

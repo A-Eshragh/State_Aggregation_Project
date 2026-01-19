@@ -56,11 +56,25 @@ class MDP:
     # GAMMA
     # ---------------------------------------------------------------
     def build_gamma(self, batch, S, device):
+        """
+        Build initial state distribution gamma.
+        
+        Non-degeneracy assumption: gamma(s) must be strictly positive for all s.
+        """
         if self.gamma is None:
-            return torch.ones(batch, S, device=device) / S
-        if isinstance(self.gamma, torch.Tensor) and self.gamma.dim() == 1:
-            return self.gamma.unsqueeze(0).expand(batch, -1).to(device)
-        return self.gamma.to(device)
+            # Uniform distribution: 1/S for each state (strictly positive)
+            gamma = torch.ones(batch, S, device=device) / S
+        elif isinstance(self.gamma, torch.Tensor) and self.gamma.dim() == 1:
+            gamma = self.gamma.unsqueeze(0).expand(batch, -1).to(device)
+        else:
+            gamma = self.gamma.to(device)
+        
+        # Ensure strict positivity (non-degeneracy assumption)
+        gamma = torch.clamp(gamma, min=1e-8)
+        # Renormalize to maintain probability distribution
+        gamma = gamma / gamma.sum(dim=1, keepdim=True)
+        
+        return gamma
 
     # ---------------------------------------------------------------
     # WRAPPER

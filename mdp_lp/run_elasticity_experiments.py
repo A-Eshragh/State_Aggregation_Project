@@ -51,33 +51,54 @@ def main():
     parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin'], required=True,
                        help='high_margin: (selling_price - ordering_cost) >> holding_cost, low_margin: vice versa')
     parser.add_argument('--selling_price_base', type=float, default=10.0, help='Base selling price')
+    # Optional cost overrides (useful for controlled hypothetical settings)
+    parser.add_argument('--foc', type=float, default=None, help='Override fixed ordering cost (if set)')
+    parser.add_argument('--voc', type=float, default=None, help='Override variable ordering cost (if set)')
+    parser.add_argument('--hc', type=float, default=None, help='Override holding cost (if set)')
+    parser.add_argument('--bc', type=float, default=None, help='Override backorder cost (if set)')
+    # Optional tag to keep outputs separate without changing experiment_type
+    parser.add_argument('--tag', type=str, default="", help='Optional tag appended to save_dir')
     
     # Training parameters
     parser.add_argument('--n_epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--n_samples', type=int, default=200, help='Number of samples')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
-    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage'], required=True, help='Algorithm')
+    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.5, help='Weight for prediction loss in DFL')
     parser.add_argument('--hyperparam', type=str, default="{'lr': 0.001, 'hidden_dim': 32}",
                        help='Hyperparameters as dict string')
     parser.add_argument('--beta', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
+    parser.add_argument('--results_root', type=str, default='mdp_lp/results_elasticity',
+                        help='Root directory to save results (default: mdp_lp/results_elasticity)')
+
+    # Soft state aggregation (optional; only used for DFL variants)
+    parser.add_argument('--n_agg', type=int, default=-1,
+                        help='Number of aggregated states/clusters (M). -1 disables aggregation.')
+    parser.add_argument('--sa_tau', type=float, default=0.5, help='Soft aggregation temperature τ')
+    parser.add_argument('--sa_r_embed', type=int, default=8, help='Soft aggregation destination embedding dim')
+
+    # qpth QP regularization (only used for dfl_qpth)
+    parser.add_argument('--qp_reg', type=float, default=0.5, help='Quadratic regularization coef for QP-DFL')
     
     args = parser.parse_args()
     
     import ast
     args.hyperparam = ast.literal_eval(args.hyperparam)
     
-    if args.cost_case == 'high_margin':
-        args.foc = 1.0
-        args.voc = 0.5
-        args.hc = 0.1
-        args.bc = 0.2
-    else:
-        args.foc = 1.0
-        args.voc = 0.5
-        args.hc = 20.0
-        args.bc = 0.2
+    # Default costs by case
+    default_costs = {
+        "high_margin": dict(foc=1.0, voc=0.5, hc=0.1, bc=0.2),
+        "low_margin": dict(foc=1.0, voc=0.5, hc=20.0, bc=0.2),
+    }
+    dc = default_costs[args.cost_case]
+    foc_default, voc_default, hc_default, bc_default = dc["foc"], dc["voc"], dc["hc"], dc["bc"]
+
+    # Apply overrides if provided; otherwise use defaults
+    args.foc = foc_default if args.foc is None else float(args.foc)
+    args.voc = voc_default if args.voc is None else float(args.voc)
+    args.hc = hc_default if args.hc is None else float(args.hc)
+    args.bc = bc_default if args.bc is None else float(args.bc)
     
     if args.experiment_type == 'a' or args.experiment_type == 'b':
         args.beta_2 = 0.0
@@ -86,10 +107,21 @@ def main():
     
     train_loader, test_loader, gt_elasticity, p, p_related, mean_lambda = prepare_elasticity_data(args)
     
+    results_root = Path(args.results_root)
     if args.experiment_type == 'c':
-        save_dir = Path('mdp_lp/results_elasticity') / f"exp_{args.experiment_type}" / args.cost_case / args.algo / f"beta2_{args.beta_2}" / f"epochs_{args.n_epochs}"
+        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / args.algo / f"beta2_{args.beta_2}"
     else:
-        save_dir = Path('mdp_lp/results_elasticity') / f"exp_{args.experiment_type}" / args.cost_case / args.algo / f"epochs_{args.n_epochs}"
+        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / args.algo
+    if args.tag:
+        save_dir = save_dir / f"tag_{args.tag}"
+
+    # Add aggregation / QP-specific subfolders only when used to keep backward-compatible paths.
+    if args.n_agg != -1 and args.algo in ('dfl', 'dfl_qpth'):
+        save_dir = save_dir / f"n_agg_{args.n_agg}"
+    if args.algo == 'dfl_qpth':
+        save_dir = save_dir / f"qp_reg_{args.qp_reg}"
+
+    save_dir = save_dir / f"epochs_{args.n_epochs}"
     save_dir.mkdir(parents=True, exist_ok=True)
     args.save_dir = save_dir
     
