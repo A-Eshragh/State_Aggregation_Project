@@ -15,7 +15,7 @@ import os
 
 
 def run_experiment(exp_config):
-    """Run a single elasticity experiment (100 epochs, 100 samples)."""
+    """Run a single elasticity experiment (100 epochs, 200 samples)."""
     experiment_type, cost_case, algo, beta_2 = exp_config
     
     cmd = [
@@ -23,10 +23,15 @@ def run_experiment(exp_config):
         '--experiment_type', experiment_type,
         '--cost_case', cost_case,
         '--algo', algo,
-        '--beta_2', str(beta_2),
+        '--beta_0', '4.0',
+        '--beta_1', '-0.3',
         '--n_epochs', '100',
-        '--n_samples', '100'
+        '--n_samples', '200'
     ]
+    
+    # Add beta_2 only for experiment c
+    if experiment_type == 'c':
+        cmd.extend(['--beta_2', str(beta_2)])
     
     # Create log file for this experiment
     log_dir = Path('mdp_lp/results_elasticity') / 'logs'
@@ -65,19 +70,19 @@ def main():
         ('a', 'low_margin', 'dfl', 0.0),
         ('b', 'high_margin', 'dfl', 0.0),
         ('b', 'low_margin', 'dfl', 0.0),
-        ('c', 'high_margin', 'dfl', 0.5),   # β₂ > 0 (substitute)
-        ('c', 'high_margin', 'dfl', -0.5),  # β₂ < 0 (complement)
-        ('c', 'low_margin', 'dfl', 0.5),
-        ('c', 'low_margin', 'dfl', -0.5),
+        ('c', 'high_margin', 'dfl', 0.09),   # β₂ > 0 (substitute)
+        ('c', 'high_margin', 'dfl', -0.09),  # β₂ < 0 (complement)
+        ('c', 'low_margin', 'dfl', 0.09),
+        ('c', 'low_margin', 'dfl', -0.09),
         # Two-stage experiments
         ('a', 'high_margin', 'twostage', 0.0),
         ('a', 'low_margin', 'twostage', 0.0),
         ('b', 'high_margin', 'twostage', 0.0),
         ('b', 'low_margin', 'twostage', 0.0),
-        ('c', 'high_margin', 'twostage', 0.5),
-        ('c', 'high_margin', 'twostage', -0.5),
-        ('c', 'low_margin', 'twostage', 0.5),
-        ('c', 'low_margin', 'twostage', -0.5),
+        ('c', 'high_margin', 'twostage', 0.09),
+        ('c', 'high_margin', 'twostage', -0.09),
+        ('c', 'low_margin', 'twostage', 0.09),
+        ('c', 'low_margin', 'twostage', -0.09),
     ]
     
     
@@ -87,7 +92,8 @@ def main():
     print("="*70)
     print("RUNNING ALL ELASTICITY EXPERIMENTS")
     print(f"Workers: {num_workers}/{num_cores} cores")
-    print("Parameters: 100 epochs, 100 samples, 151 states")
+    print("Parameters: 100 epochs, 200 samples, β₀=4.0, β₁=-0.3")
+    print("Experiment C: β₂=±0.09")
     print("="*70)
     
     with Pool(processes=num_workers) as pool:
