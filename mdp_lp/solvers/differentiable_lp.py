@@ -60,9 +60,7 @@ class DifferentiableLPSolver(autograd.Function):
 
         grad_H = torch.zeros_like(H)
         # Under the fixed-basis assumption, y_B = H_B^{-1} gamma does NOT depend on r.
-        # The ONLY dependence of the scalar objective v = r^T y on r is the *direct* path,
-        # which is handled outside this LP layer (since v is computed with r explicitly).
-        # Therefore, the sensitivity of y* w.r.t. r is 0 in this layer.
+
         grad_r = torch.zeros_like(r)
         grad_gamma = torch.zeros_like(gamma)
 

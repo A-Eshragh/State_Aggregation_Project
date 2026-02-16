@@ -115,7 +115,7 @@ def main():
     if success_count == len(experiments):
         print("\nGenerating comparison plots...")
         try:
-            from mdp_lp.create_comparison_plots import create_all_comparison_plots
+            from mdp_lp.generate_results import create_all_comparison_plots
             create_all_comparison_plots()
             print("Comparison plots generated")
         except Exception as e:

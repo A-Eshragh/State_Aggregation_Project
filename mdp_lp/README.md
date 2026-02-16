@@ -43,10 +43,14 @@ python -m mdp_lp.run_elasticity_experiments \
     --n_samples 100
 ```
 
-**Generate comparison plots:**
+**Generate comparison plots and reports:**
 ```bash
-python -m mdp_lp.create_comparison_plots
+python -m mdp_lp.generate_results boxplot [base_dir] [epochs]
+python -m mdp_lp.generate_results report --epochs 100
+python -m mdp_lp.generate_results small_test --tag <tag> [--root mdp_lp/small_test]
+python -m mdp_lp.generate_results fourway --epochs 100
 ```
+(See `generate_results.py` docstring for all subcommands.)
 
 ### Experiment Configuration
 
@@ -137,7 +141,7 @@ python -m mdp_lp.create_comparison_plots
 **Experiment scripts:**
 - `run_all_elasticity.py`: Run all 16 experiments in parallel
 - `run_elasticity_experiments.py`: Run single experiment
-- `create_comparison_plots.py`: Generate comparison plots
+- `generate_results.py`: Generate comparison plots and reports (boxplot, report, small_test, fourway)
 
 ## Results Location
 
