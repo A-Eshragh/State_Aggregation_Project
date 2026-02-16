@@ -32,6 +32,7 @@ Gurobi academic licenses are free. See [Gurobi Academic Program](https://www.gur
 ```bash
 python -m mdp_lp.run_all_elasticity
 ```
+Uses 100 epochs, 200 samples, and elasticity defaults β₀=4.0, β₁=-0.3 (β₂=0 for exp a/b, ±0.09 for exp c).
 
 **Run single experiment:**
 ```bash
@@ -40,8 +41,9 @@ python -m mdp_lp.run_elasticity_experiments \
     --cost_case high_margin \
     --algo dfl \
     --n_epochs 100 \
-    --n_samples 100
+    --n_samples 200
 ```
+(Omit `--beta_0`/`--beta_1` to use defaults β₀=4.0, β₁=-0.3; for experiment c, β₂ is set automatically to ±0.09.)
 
 **Generate comparison plots and reports:**
 ```bash
@@ -59,7 +61,7 @@ python -m mdp_lp.generate_results fourway --epochs 100
 - Experiment (b): β₂=0, p lognormal → 4 experiments (2 cost cases × 2 algorithms)
 - Experiment (c): β₂≠0, p and p_related lognormal → 8 experiments (2 cost cases × 2 algorithms × 2 β₂ values)
 
-**Elasticity model:** `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε`
+**Elasticity model:** `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε` with defaults **β₀=4.0**, **β₁=-0.3**, **β₂=0** (exp a/b) or **β₂=±0.09** (exp c), **σ_ε=0.1**.
 
 **Output files per experiment:**
 - `results.json`: Complete metrics and data
@@ -96,29 +98,33 @@ python -m mdp_lp.generate_results fourway --epochs 100
 **Recommended:** Use parallel execution via `run_all_elasticity.py` which automatically distributes experiments across CPU cores.
 
 **Expected runtime:**
-- Per experiment (100 samples, 100 epochs): 1-2 hours
-- All 16 experiments in parallel (10 workers): 2-3 hours total
+- Per experiment (200 samples, 100 epochs): 1–2 hours
+- All 16 experiments in parallel (e.g. 10 workers): 2–3 hours total
 
 **GPU:** Not used. Sparse tensors require CPU, and LP solving is CPU-only.
 
 ## Parameters
 
-**Elasticity model:**
-- `beta_0 = 2.0`, `beta_1 = -1.5`, `beta_2 = 0.0` (varies by experiment), `sigma_epsilon = 0.1`
-- Price: `p_constant = 10.0` (exp a), or lognormal(mean=10.0, std=0.5) (exp b, c)
-- Related price: lognormal(mean=8.0, std=0.5) (exp c only)
+**Elasticity model (defaults used in `run_elasticity_experiments` and `run_all_elasticity`):**
+- **β₀ = 4.0**, **β₁ = -0.3** (price elasticity of demand in log-linear model)
+- **β₂ = 0.0** (exp a, b) or **±0.09** (exp c: substitute vs complement)
+- **σ_ε = 0.1** (additive noise in log(λ))
+- Price: `p_constant = 10.0` (exp a), or lognormal(μ=ln(10), σ=0.5) for p (exp b, c)
+- Related price: lognormal(μ=ln(8), σ=0.5) for p_related (exp c only)
 
-**MDP structure:**
-- States: 151 (b_max=50, s_max=100, inventory range -50 to +100)
-- Actions: 21 (q_max=20, order quantities 0 to 20)
-- Demand: Poisson with max d_max=30
+**MDP structure (script defaults):**
+- **b_max = 50**, **s_max = 50** → inventory level from -50 to +50 → **101 states**
+- **q_max = 20** → order quantities 0..20 → **21 actions**
+- **d_max = 30** → demand support for Poisson
+- Discount factor **β = 0.95** (MDP discount, distinct from elasticity β₀/β₁/β₂)
 
 **Cost parameters:**
-- High margin: `foc=1.0, voc=0.5, hc=0.1, bc=0.2` (holding cost << revenue)
-- Low margin: `foc=1.0, voc=0.5, hc=20.0, bc=0.2` (holding cost >> revenue)
+- **High margin:** `foc=1.0, voc=0.5, hc=0.1, bc=0.2` (holding cost ≪ revenue)
+- **Low margin:** `foc=1.0, voc=0.5, hc=20.0, bc=0.2` (holding cost ≫ revenue)
 
 **Training:**
-- Epochs: 100, Samples: 100, Train/test split: 80/20
+- Epochs: 100; Samples: 200 (in `run_all_elasticity`; override with `--n_samples` for single runs)
+- Train/test split: 80/20
 - Learning rate: 0.001, Hidden dimension: 32
 
 ## Notes
@@ -127,7 +133,7 @@ python -m mdp_lp.generate_results fourway --epochs 100
 
 **Training cost trends:** Cost may decrease as the model learns the true cost structure. Monitor lambda prediction error and obj_loss to confirm learning.
 
-**Elasticity model:** Ground truth lambda is generated from `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε`. The neural network does not know this functional form and learns a black-box mapping from prices to lambda.
+**Elasticity model:** Ground truth λ is generated from `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε` (defaults β₀=4.0, β₁=-0.3, β₂=0 or ±0.09, σ_ε=0.1). The neural network does not see this form and learns a black-box mapping from prices to λ.
 
 ## Code Structure
 
@@ -147,7 +153,9 @@ python -m mdp_lp.generate_results fourway --epochs 100
 
 Results are stored in `mdp_lp/results_elasticity/` with structure:
 ```
-exp_X/cost_case/algorithm/epochs_100/
+exp_X/cost_case/algorithm/epochs_100/           # exp a, b
+exp_c/cost_case/algorithm/beta2_0.09/epochs_100/ # or beta2_-0.09 for exp c
 ```
+Each run produces `results.json`, plots, and (for DFL) optional `n_agg_*` / `qp_reg_*` subdirs when those options are used.
 
-Final organized results are copied to `mdp_lp/final_results/` (see `final_results/README.md`).
+Final organized results can be copied to `mdp_lp/final_results/` (see `final_results/README.md` if present).
