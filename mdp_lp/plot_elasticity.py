@@ -20,6 +20,9 @@ def plot_elasticity_results(results, save_dir, algo):
     if algo.startswith('dfl') and 'train_mse_per_epoch' in results and 'train_dfl_loss_per_epoch' in results:
         plot_dfl_mse(results['train_mse_per_epoch'], save_dir)
         plot_dfl_loss(results['train_dfl_loss_per_epoch'], save_dir)
+    # For DFL: gradient magnitudes for weight balance (||∇_θ v*||, ||∇_θ pred_loss||)
+    if algo.startswith('dfl') and 'train_grad_norm_vstar_per_epoch' in results and 'train_grad_norm_pred_loss_per_epoch' in results:
+        plot_grad_norms(results['train_grad_norm_vstar_per_epoch'], results['train_grad_norm_pred_loss_per_epoch'], save_dir)
     
     # For two-stage: plot prediction loss
     if algo == 'twostage' and 'train_twostage_loss_per_epoch' in results:
@@ -105,7 +108,7 @@ def plot_test_obj_boxplot(test_obj_values, save_dir, algo):
     plt.close()
 
 
-def plot_comparison_boxplot(dfl_values, twostage_values, save_dir):
+def plot_comparison_boxplot(dfl_values, twostage_values, save_dir, filename=None):
     """Plot side-by-side box plot comparing DFL and Two-stage."""
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     ax.boxplot([dfl_values, twostage_values], labels=['DFL', 'Two-stage'])
@@ -113,7 +116,9 @@ def plot_comparison_boxplot(dfl_values, twostage_values, save_dir):
     ax.set_title('Test Set Optimal Values Comparison')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    plt.savefig(save_dir / 'comparison_boxplot.png', dpi=300, bbox_inches='tight')
+    out = save_dir / (filename or 'comparison_boxplot.png')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out, dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -142,6 +147,22 @@ def plot_dfl_loss(train_dfl_loss_per_epoch, save_dir):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     plt.savefig(save_dir / 'train_dfl_loss_per_epoch.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_grad_norms(train_grad_norm_vstar_per_epoch, train_grad_norm_pred_loss_per_epoch, save_dir):
+    """Plot ||∇_θ v*|| and ||∇_θ pred_loss|| per epoch for weight balance (dℓ/dw = MSE)."""
+    fig, ax = plt.subplots(figsize=(6.5, 2))
+    epochs = range(1, len(train_grad_norm_vstar_per_epoch) + 1)
+    ax.plot(epochs, train_grad_norm_vstar_per_epoch, linewidth=2, color='blue', label=r'$\|\nabla_\theta v^*\|$')
+    ax.plot(epochs, train_grad_norm_pred_loss_per_epoch, linewidth=2, color='green', label=r'$\|\nabla_\theta \ell_{\mathrm{pred}}\|$')
+    ax.set_xlabel('Epochs')
+    ax.set_ylabel('Gradient norm')
+    ax.set_title('DFL - Gradient magnitudes (for weight balance)')
+    ax.legend()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.savefig(save_dir / 'train_grad_norms_per_epoch.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 

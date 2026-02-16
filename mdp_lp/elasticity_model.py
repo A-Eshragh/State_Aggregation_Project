@@ -44,30 +44,34 @@ class ElasticityModel:
 
 class LambdaPredictor(nn.Module):
     """Neural network predictor for lambda using price features."""
-    def __init__(self, hidden_dim, use_p_related=True, init_mean_lambda=1.0):
+    def __init__(self, hidden_dim, use_p_related=True, init_mean_lambda=1.0, output_log=False):
         """
         Args:
             hidden_dim: Hidden layer dimension
             use_p_related: Whether to use p_related as input
             init_mean_lambda: Target mean lambda for initialization (default: 1.0)
+            output_log: If True, output log(λ) (unbounded); if False, output λ via Softplus (for DFL).
         """
         super().__init__()
         input_dim = 3 if use_p_related else 2  # [p, p_related, noise] or [p, noise]
         self.use_p_related = use_p_related
         self.init_mean_lambda = init_mean_lambda
-        
-        self.net = nn.Sequential(
+        self.output_log = output_log
+
+        layers = [
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
-            nn.Softplus()  # Ensure positive lambda
-        )
-        
-        # Initialize weights to produce reasonable lambda values
+        ]
+        if not output_log:
+            layers.append(nn.Softplus())  # Ensure positive lambda for DFL
+        self.net = nn.Sequential(*layers)
+
+        # Initialize weights to produce reasonable lambda predictions
         self._initialize_weights()
-    
+
     def _initialize_weights(self):
         """Initialize weights to produce reasonable lambda predictions."""
         for module in self.net:
@@ -75,12 +79,13 @@ class LambdaPredictor(nn.Module):
                 nn.init.xavier_uniform_(module.weight, gain=0.5)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
-        
-        final_layer = self.net[-2]
+
+        # Last Linear is -2 when Softplus present, else -1
+        final_linear = self.net[-2] if isinstance(self.net[-1], nn.Softplus) else self.net[-1]
         with torch.no_grad():
-            final_layer.bias.fill_(torch.log(torch.tensor(self.init_mean_lambda)).item())
-            final_layer.weight.data *= 0.1
-    
+            final_linear.bias.fill_(torch.log(torch.tensor(self.init_mean_lambda)).item())
+            final_linear.weight.data *= 0.1
+
     def forward(self, x):
         """
         Args:
@@ -89,10 +94,10 @@ class LambdaPredictor(nn.Module):
                - x[:, 1] = p_related (if use_p_related) or noise
                - x[:, 2] = noise (if use_p_related)
         Returns:
-            lambda: (batch,) tensor of predicted Poisson rates
+            If output_log: log(λ) (batch,). If not: λ (batch,) predicted Poisson rates.
         """
-        lambda_val = self.net(x).squeeze(-1)
-        return lambda_val
+        out = self.net(x).squeeze(-1)
+        return out
 
 
 

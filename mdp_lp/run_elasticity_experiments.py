@@ -28,10 +28,10 @@ def main():
     parser.add_argument('--experiment_type', type=str, choices=['a', 'b', 'c'], required=True,
                        help='Experiment type: a=β₂=0 p constant, b=β₂=0 p lognormal, c=β₂≠0')
     
-    # Elasticity parameters
-    parser.add_argument('--beta_0', type=float, default=2.0, help='β₀ in elasticity model')
-    parser.add_argument('--beta_1', type=float, default=-1.5, help='β₁ in elasticity model')
-    parser.add_argument('--beta_2', type=float, default=0.0, help='β₂ in elasticity model')
+    # Elasticity parameters (defaults fixed for consistency: λ = exp(β₀ + β₁·log(p) + β₂·log(p_related)))
+    parser.add_argument('--beta_0', type=float, default=4.0, help='β₀ in elasticity model')
+    parser.add_argument('--beta_1', type=float, default=-0.3, help='β₁ in elasticity model')
+    parser.add_argument('--beta_2', type=float, default=0.09, help='β₂ in elasticity model (exp a/b use 0; exp c use ±0.09)')
     parser.add_argument('--sigma_epsilon', type=float, default=0.1, help='σ_ε in elasticity model')
     
     # Price parameters
@@ -43,7 +43,7 @@ def main():
     
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=50, help='Maximum backlog')
-    parser.add_argument('--s_max', type=int, default=100, help='Maximum storage')
+    parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
     parser.add_argument('--q_max', type=int, default=20, help='Maximum order quantity')
     parser.add_argument('--d_max', type=int, default=30, help='Maximum demand')
     

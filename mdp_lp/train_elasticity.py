@@ -140,10 +140,14 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     hyperparam = args.hyperparam
     learning_rate = hyperparam['lr']
     hidden_dim = hyperparam['hidden_dim']
+    if args.algo == 'twostage':
+        hidden_dim = 128  # more capacity for two-stage only (ln(p) feats + log-space loss)
+        learning_rate = 0.0005  # lower LR for two-stage: stabler convergence, better fit
     use_p_related = args.experiment_type == 'c'
     
     init_mean_lambda = mean_lambda if mean_lambda is not None else 1.0
-    pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda).to(device)
+    output_log = args.algo == 'twostage'  # log-space prediction only for two-stage (not DFL)
+    pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda, output_log=output_log).to(device)
 
     # Optional: learn a soft state aggregation mapping jointly with the predictor under DFL variants.
     agg = None
@@ -178,6 +182,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     train_dfl_loss_list = []  # Full DFL loss (-v*_θ + λ·pred_loss)
     # For two-stage: track prediction loss
     train_twostage_loss_list = []  # Prediction loss for two-stage
+    # For DFL: gradient magnitudes for weight balance (||∇_θ v*||, ||∇_θ pred_loss||); dℓ/dw = pred_loss
+    train_grad_norm_vstar_list = []
+    train_grad_norm_pred_loss_list = []
     
     print(f"[Training] Starting: {args.n_epochs} epochs, algo={args.algo}")
     start_time = time.time()
@@ -211,20 +218,30 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         epoch_mse = []  # For DFL: track MSE per batch
         epoch_dfl_loss = []  # For DFL: track full loss per batch
         epoch_twostage_loss = []  # For two-stage: track prediction loss per batch
+        epoch_grad_norm_vstar = []  # For DFL: ||∇_θ v*|| per batch
+        epoch_grad_norm_pred_loss = []  # For DFL: ||∇_θ pred_loss|| per batch
         pred_model.train()
         
         for batch_data in train_loader:
             feats, obj_true, lambda_true, prices = batch_data
             batch_size = feats.shape[0]
-            
-            lambda_pred = pred_model(feats)
-            # Sanity check: predicted rate should be nonnegative (Softplus output).
+
+            if args.algo == 'twostage':
+                # Feed ln(p) [and ln(p_related)] so predictor matches DGP: ln(λ) = β₀ + β₁·ln(p) + ε
+                feats_for_pred = feats.clone()
+                feats_for_pred[:, 0] = torch.log(feats[:, 0] + 1e-10)
+                if use_p_related and feats.shape[1] >= 3:
+                    feats_for_pred[:, 1] = torch.log(feats[:, 1] + 1e-10)
+                log_lambda_pred = pred_model(feats_for_pred)
+                lambda_pred = torch.exp(log_lambda_pred)
+            else:
+                lambda_pred = pred_model(feats)
             if not torch.all(torch.isfinite(lambda_pred)):
                 raise ValueError("lambda_pred contains non-finite values (NaN/Inf)")
             if torch.any(lambda_pred < 0):
                 min_val = float(lambda_pred.min().item())
                 raise ValueError(f"lambda_pred must be >= 0, but min(lambda_pred)={min_val}")
-            
+
             if use_p_related:
                 p = prices[:, 0]
             else:
@@ -271,7 +288,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
 
                 pred_loss = pred_loss_fn(lambda_pred, lambda_true)
-                dfl_loss = -v_star.mean() + args.loss_weight * pred_loss
+                # Maximize (v* - loss_weight * pred_loss); minimize negative of that
+                dfl_objective = v_star.mean() - args.loss_weight * pred_loss
+                dfl_loss = -dfl_objective
 
                 # For logging: compare to obj_true (computed from LP on lambda_true)
                 obj_hat = v_star.detach()
@@ -286,6 +305,20 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 epoch_lambda_pred.append(lambda_pred.detach())
                 epoch_lambda_true.append(lambda_true)
 
+                # Gradient magnitudes for weight balance: ||∇_θ v*|| and ||∇_θ pred_loss|| (dℓ/dw = pred_loss)
+                def _grad_norm(model):
+                    total = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            total += p.grad.data.pow(2).sum().item()
+                    return float(np.sqrt(total)) if total > 0 else 0.0
+
+                optimizer.zero_grad()
+                (-v_star.mean()).backward(retain_graph=True)
+                epoch_grad_norm_vstar.append(_grad_norm(pred_model))
+                optimizer.zero_grad()
+                pred_loss.backward(retain_graph=True)
+                epoch_grad_norm_pred_loss.append(_grad_norm(pred_model))
                 optimizer.zero_grad()
                 dfl_loss.backward()
                 train_loss += dfl_loss.item()
@@ -295,8 +328,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 # Gamma is already clamped in solve_lp() for non-degeneracy
                 _, obj_hat, _ = solve_lp(mdp, lp_solver)
                 obj_hat = obj_hat.detach()  # No gradients through LP
-                
-                pred_loss = pred_loss_fn(lambda_pred, lambda_true)
+                # Log-space MSE for two-stage only (matches DGP: ln(λ) = β₀ + β₁ ln(p) + ε)
+                log_lambda_true = torch.log(lambda_true + 1e-10)
+                pred_loss = pred_loss_fn(log_lambda_pred, log_lambda_true)
                 obj_diff = obj_diff_fn(obj_hat, obj_true)
                 obj_loss += obj_diff.item()
                 
@@ -330,10 +364,14 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             train_mse_list.append(np.mean(epoch_mse))
             train_dfl_loss_list.append(np.mean(epoch_dfl_loss))
             train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
+            train_grad_norm_vstar_list.append(np.mean(epoch_grad_norm_vstar) if epoch_grad_norm_vstar else 0.0)
+            train_grad_norm_pred_loss_list.append(np.mean(epoch_grad_norm_pred_loss) if epoch_grad_norm_pred_loss else 0.0)
         else:
             # Two-stage (or any other non-DFL mode): no DFL loss/MSE
             train_mse_list.append(0.0)
             train_dfl_loss_list.append(0.0)
+            train_grad_norm_vstar_list.append(0.0)
+            train_grad_norm_pred_loss_list.append(0.0)
             # For two-stage: track prediction loss
             if epoch_twostage_loss:
                 train_twostage_loss_list.append(np.mean(epoch_twostage_loss))
@@ -371,6 +409,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     'train_mse_per_epoch': [float(x) for x in train_mse_list],
                     'train_dfl_loss_per_epoch': [float(x) for x in train_dfl_loss_list],
                     'train_twostage_loss_per_epoch': [float(x) for x in train_twostage_loss_list],
+                    'train_grad_norm_vstar_per_epoch': [float(x) for x in train_grad_norm_vstar_list],
+                    'train_grad_norm_pred_loss_per_epoch': [float(x) for x in train_grad_norm_pred_loss_list],
                     'train_time': train_time_list.copy(),
                     'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
                     'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
@@ -423,14 +463,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         for batch_data in test_loader:
             feats, obj_true, lambda_true, prices = batch_data
             batch_size = feats.shape[0]
-            
-            lambda_pred = pred_model(feats)
+
+            if args.algo == 'twostage':
+                feats_for_pred = feats.clone()
+                feats_for_pred[:, 0] = torch.log(feats[:, 0] + 1e-10)
+                if use_p_related and feats.shape[1] >= 3:
+                    feats_for_pred[:, 1] = torch.log(feats[:, 1] + 1e-10)
+                lambda_pred = torch.exp(pred_model(feats_for_pred))
+            else:
+                lambda_pred = pred_model(feats)
             if not torch.all(torch.isfinite(lambda_pred)):
                 raise ValueError("lambda_pred contains non-finite values (NaN/Inf) during eval")
             if torch.any(lambda_pred < 0):
                 min_val = float(lambda_pred.min().item())
                 raise ValueError(f"lambda_pred must be >= 0, but min(lambda_pred)={min_val} during eval")
-            
+
             if use_p_related:
                 p = prices[:, 0]
             else:
@@ -467,7 +514,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             import traceback
             traceback.print_exc()
     
-    return {
+    # For prof: magnitude of dℓ/dw = pred_loss (MSE); dv*/dw = 0 (v* does not depend on w). Weight balance uses ||∇_θ v*|| vs ||∇_θ pred_loss||.
+    result = {
         'train_reward_per_epoch': train_reward_list,
         'train_lambda_pred': [l.cpu().numpy() for l in train_lambda_pred_list],
         'train_lambda_true': [l.cpu().numpy() for l in train_lambda_true_list],
@@ -478,10 +526,20 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         'train_time': train_time_list,
         'sa_time_sec_per_epoch': sa_time_sec_per_epoch,
         'solver_time_sec_per_epoch': solver_time_sec_per_epoch,
-        'train_mse_per_epoch': train_mse_list,  # MSE (prediction loss) for DFL
+        'train_mse_per_epoch': train_mse_list,  # MSE (prediction loss) for DFL; magnitude of dℓ/dw
         'train_dfl_loss_per_epoch': train_dfl_loss_list,  # Full DFL loss (-v*_θ + λ·pred_loss)
-        'train_twostage_loss_per_epoch': train_twostage_loss_list  # Prediction loss for two-stage
+        'train_twostage_loss_per_epoch': train_twostage_loss_list,  # Prediction loss for two-stage
+        'train_grad_norm_vstar_per_epoch': train_grad_norm_vstar_list,  # ||∇_θ v*|| (DFL only)
+        'train_grad_norm_pred_loss_per_epoch': train_grad_norm_pred_loss_list,  # ||∇_θ pred_loss|| (DFL only)
     }
+    # Summary for loss-weight tuning: last-epoch gradient norms and MSE value
+    if train_mse_list and train_grad_norm_vstar_list and train_grad_norm_pred_loss_list:
+        result['mse_last_epoch'] = float(train_mse_list[-1])  # prediction loss value (MSE) at last epoch
+        result['magnitude_grad_vstar_last_epoch'] = float(train_grad_norm_vstar_list[-1])  # ||∇_θ v*||
+        result['magnitude_grad_pred_loss_last_epoch'] = float(train_grad_norm_pred_loss_list[-1])  # ||∇_θ ℓ_pred|| = magnitude of dℓ/dw
+        # Backward compat (deprecated: was misnamed; use magnitude_grad_pred_loss for gradient, mse_last_epoch for loss value)
+        result['magnitude_dl_dw_last_epoch'] = float(train_grad_norm_pred_loss_list[-1])
+    return result
 
 
 
