@@ -83,7 +83,13 @@ class LambdaPredictor(nn.Module):
         # Last Linear is -2 when Softplus present, else -1
         final_linear = self.net[-2] if isinstance(self.net[-1], nn.Softplus) else self.net[-1]
         with torch.no_grad():
-            final_linear.bias.fill_(torch.log(torch.tensor(self.init_mean_lambda)).item())
+            # final_linear.bias.fill_(torch.log(torch.tensor(self.init_mean_lambda)).item())
+            init_mean = max(float(self.init_mean_lambda), 1e-8)
+            if isinstance(self.net[-1], nn.Softplus):
+                bias_init = torch.log(torch.expm1(torch.tensor(init_mean, dtype=torch.float64))).item()
+            else:
+                bias_init = torch.log(torch.tensor(init_mean, dtype=torch.float64)).item()
+            final_linear.bias.fill_(bias_init)
             final_linear.weight.data *= 0.1
 
     def forward(self, x):

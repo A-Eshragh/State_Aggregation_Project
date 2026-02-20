@@ -29,6 +29,7 @@ def main():
                        help='Experiment type: a=β₂=0 p constant, b=β₂=0 p lognormal, c=β₂≠0')
     
     # Elasticity parameters (defaults fixed for consistency: λ = exp(β₀ + β₁·log(p) + β₂·log(p_related)))
+    # ZIHAO
     parser.add_argument('--beta_0', type=float, default=4.0, help='β₀ in elasticity model')
     parser.add_argument('--beta_1', type=float, default=-0.3, help='β₁ in elasticity model')
     parser.add_argument('--beta_2', type=float, default=0.09, help='β₂ in elasticity model (exp a/b use 0; exp c use ±0.09)')
@@ -44,8 +45,9 @@ def main():
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=50, help='Maximum backlog')
     parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
-    parser.add_argument('--q_max', type=int, default=20, help='Maximum order quantity')
-    parser.add_argument('--d_max', type=int, default=30, help='Maximum demand')
+    # ZIHAO
+    parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
+    parser.add_argument('--d_max', type=int, default=100, help='Maximum demand')
     
     # Cost parameters (asymmetric cases)
     parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin'], required=True,
@@ -65,7 +67,7 @@ def main():
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
     parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.5, help='Weight for prediction loss in DFL')
-    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.001, 'hidden_dim': 32}",
+    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.01, 'hidden_dim': 32}",
                        help='Hyperparameters as dict string')
     parser.add_argument('--beta', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
@@ -87,9 +89,10 @@ def main():
     args.hyperparam = ast.literal_eval(args.hyperparam)
     
     # Default costs by case
+    # ZIHAO
     default_costs = {
-        "high_margin": dict(foc=1.0, voc=0.5, hc=0.1, bc=0.2),
-        "low_margin": dict(foc=1.0, voc=0.5, hc=20.0, bc=0.2),
+        "high_margin": dict(foc=1.0, voc=0.5, hc=0.1, bc=0),
+        "low_margin": dict(foc=1.0, voc=0.5, hc=20.0, bc=0),
     }
     dc = default_costs[args.cost_case]
     foc_default, voc_default, hc_default, bc_default = dc["foc"], dc["voc"], dc["hc"], dc["bc"]
