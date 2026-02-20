@@ -5,6 +5,7 @@ Implements DFL and two-stage methods with price-dependent Poisson demand.
 """
 
 import time
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +16,7 @@ from mdp_lp.inventory_elasticity import create_inventory_from_lambda
 from mdp_lp.utils import solve_lp
 from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
+from mdp_lp.solvers.differentiable_qp import DifferentiableQPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 
@@ -202,10 +204,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     # Default behavior remains: save every epoch, full partial results.
     checkpoint_every = int(getattr(args, "checkpoint_every", 1))
     save_full_partial = bool(getattr(args, "save_full_partial", True))
-    if args.algo == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
-        # qpth no-agg is already very expensive; keep I/O overhead minimal.
-        checkpoint_every = max(checkpoint_every, 10)
-        save_full_partial = False
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Zihao
+    # if args.algo == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
+    #     # qpth no-agg is already very expensive; keep I/O overhead minimal.
+    #     checkpoint_every = max(checkpoint_every, 10)
+    #     save_full_partial = False
     
     for epoch in range(args.n_epochs):
         train_loss = 0.0
@@ -277,20 +281,36 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     t0 = time.time()
                     y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
                     epoch_solver_time += (time.time() - t0)
-                else:
-                    # Differentiable QP (qpth) with quadratic regularization.
+                elif args.algo == "dfl_qpth":
                     t0 = time.time()
                     y_star = solve_occupancy_qp_qpth(
-                        H_use, r_flat_use, gamma_use, reg=getattr(args, "qp_reg", 0.5), qp_solver=qp_solver
-                    )
+                            H_use, r_flat_use, gamma_use,
+                            reg=getattr(args, "qp_reg", 0.5),
+                            qp_solver=qp_solver
+                        )                    
                     epoch_solver_time += (time.time() - t0)
+                else:
+                    raise ValueError(f"Invalid algorithm: {args.algo}")
+
+                # ZIHAO
+                # evaluate with true model (reward only)
+                with torch.no_grad():
+                    mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                                                            args.foc, args.voc, args.hc, args.bc, args.beta,
+                                                            p)
+                r_true = mdp_true.r.reshape(batch_size, -1)
+                print(f"r_true: {r_true}, r_flat_use: {r_flat_use}")
 
                 v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
 
+                # v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
+                # r_detach = r_flat_use.detach()
+                # v_star = torch.sum(r_detach * y_star, dim=1)  # (batch,)
+
                 pred_loss = pred_loss_fn(lambda_pred, lambda_true)
                 # Maximize (v* - loss_weight * pred_loss); minimize negative of that
-                dfl_objective = v_star.mean() - args.loss_weight * pred_loss
-                dfl_loss = -dfl_objective
+                # dfl_objective = v_star.mean() - args.loss_weight * pred_loss
+                # dfl_loss = -dfl_objective
 
                 # For logging: compare to obj_true (computed from LP on lambda_true)
                 obj_hat = v_star.detach()
@@ -298,7 +318,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 obj_loss += obj_diff.item()
 
                 epoch_mse.append(pred_loss.item())
-                epoch_dfl_loss.append(dfl_loss.item())
+                
 
                 reward = v_star.mean().item()
                 epoch_rewards.append(reward)
@@ -315,12 +335,28 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
 
                 optimizer.zero_grad()
                 (-v_star.mean()).backward(retain_graph=True)
-                epoch_grad_norm_vstar.append(_grad_norm(pred_model))
+                g_v_star = _grad_norm(pred_model)
+                epoch_grad_norm_vstar.append(g_v_star)
                 optimizer.zero_grad()
                 pred_loss.backward(retain_graph=True)
-                epoch_grad_norm_pred_loss.append(_grad_norm(pred_model))
+                g_pred_loss = _grad_norm(pred_model)
+                epoch_grad_norm_pred_loss.append(g_pred_loss)
                 optimizer.zero_grad()
+
+                # Zihao
+                eps = 1e-12
+                w_raw = g_v_star / (g_pred_loss + eps)
+                beta_ema = 0.9
+                args.loss_weight = beta_ema * args.loss_weight + (1 - beta_ema) * float(w_raw)
+                w_min, w_max = 1e-3, 1e3
+                args.loss_weight = float(np.clip(args.loss_weight, w_min, w_max))
+                print(f"loss_weight: {args.loss_weight:.4f}, g_v_star: {g_v_star:.4f}, g_pred_loss: {g_pred_loss:.4f}")
+                dfl_loss = -(v_star.mean() - args.loss_weight * pred_loss)
+
                 dfl_loss.backward()
+                print(f"lambda_pred: {lambda_pred}, lambda_true: {lambda_true}")
+
+                epoch_dfl_loss.append(dfl_loss.item())
                 train_loss += dfl_loss.item()
 
             else:
@@ -385,7 +421,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         if should_checkpoint and hasattr(args, 'save_dir') and args.save_dir:
             checkpoint_file = args.save_dir / 'checkpoint.json'
             model_file = args.save_dir / 'model_state.pt'
-            results_partial_file = args.save_dir / 'results_partial.json'
+            
+            results_partial_file = args.save_dir / f'results_partial_{run_timestamp}.json'
             try:
                 import json
                 checkpoint_data = {

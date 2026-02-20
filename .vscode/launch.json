@@ -1,0 +1,43 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "all_elasticity",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mdp_lp.run_all_elasticity",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "single_elasticity",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mdp_lp.run_elasticity_experiments",
+            "args": [
+                "--experiment_type",
+                "b",
+                "--cost_case",
+                "high_margin",
+                "--algo",
+                "dfl_qpth",
+                "--n_epochs",
+                "100",
+                "--n_samples",
+                "20",
+                "--n_agg",
+                "-1",
+            ],
+            "console": "integratedTerminal"
+        },
+    ]
+}
