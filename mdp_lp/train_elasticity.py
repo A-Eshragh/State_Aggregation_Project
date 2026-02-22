@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
@@ -109,13 +110,14 @@ def prepare_elasticity_data(args):
     #   qpth solves dense KKT systems whose cost/memory blows up quickly with SA, especially when batching.
     #   So we intentionally keep batch size very small for dfl_qpth when n_agg=-1.
     default_bs = 32
-    if getattr(args, "algo", None) == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
-        # Heuristic: for SA in the thousands (e.g., 151*21=3171), even B=2 can be painful on CPU.
-        S = int(args.b_max + args.s_max + 1)
-        A = int(args.q_max + 1)
-        SA = int(S * A)
-        default_bs = 1 if SA >= 1500 else 2
-        print(f"[Data Prep] qpth no-agg detected (SA={SA}). Using small batch_size={default_bs} for feasibility/speed.")
+    # ZIHAO
+    # if getattr(args, "algo", None) == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
+    #     # Heuristic: for SA in the thousands (e.g., 151*21=3171), even B=2 can be painful on CPU.
+    #     S = int(args.b_max + args.s_max + 1)
+    #     A = int(args.q_max + 1)
+    #     SA = int(S * A)
+    #     default_bs = 1 if SA >= 1500 else 2
+    #     print(f"[Data Prep] qpth no-agg detected (SA={SA}). Using small batch_size={default_bs} for feasibility/speed.")
 
     batch_size = min(default_bs, len(train_dataset)) if len(train_dataset) > 0 else 1
     test_batch_size = min(default_bs, len(test_dataset)) if len(test_dataset) > 0 else 1
@@ -127,6 +129,68 @@ def prepare_elasticity_data(args):
     
     return train_loader, test_loader, gt_elasticity, p, p_related, mean_lambda
 
+
+# ----------------------------------------
+# ZIHAO
+def occupancy_to_policy(y_star, S, A, eps=1e-12, tau_pi=None):
+    y = y_star.view(-1, S, A) # clamp_min(0.0)
+
+    d_pred = y.sum(dim=-1)
+    pi = y / (d_pred.unsqueeze(-1) + eps)
+    return pi, d_pred
+
+# this method leads to small graident
+def eval_pi_on_true_mdp(mdp_true, pi, gamma):
+    B, S, A = pi.shape
+    device, dtype = pi.device, pi.dtype
+    beta = mdp_true.beta
+    eps = 1e-12
+
+    P = mdp_true.P
+    r = mdp_true.r.view(B, S, A)
+
+    P_pi = torch.einsum("bsa,bsan->bsn", pi, P)  # n is next state
+
+    I = torch.eye(S, device=device, dtype=dtype).unsqueeze(0)
+    M = I - beta * P_pi.transpose(-1, -2)
+
+    M = M + eps * I
+
+    d = torch.linalg.solve(M, gamma.unsqueeze(-1)).squeeze(-1)
+
+    y = pi * d.unsqueeze(-1)              # (B,S,A)
+    r_pi = (pi * r).sum(dim=-1)           # (B,S)
+    v = (d * r_pi).sum(dim=-1)            # (B,)
+    return v, y.reshape(B, S*A)
+
+def eval_y_on_true_mdp(mdp_true, y_star, gamma):
+    beta = mdp_true.beta
+    P = mdp_true.P
+    B, S, A, _ = P.shape
+    device, dtype = P.device, P.dtype
+    eps = 1e-12
+    alpha = 1e-6
+    
+    if y_star.dim() == 2:
+        y = y_star.view(B, S, A)
+    else:
+        y = y_star
+
+    d = y.sum(dim=-1, keepdim=True)                     # (B,S,1)
+    w = (y + alpha) / (d + alpha * A + eps)             # (B,S,A)
+
+    P_w = torch.einsum("bsa,bsan->bsn", w, P)           # (B,S,S)
+    I = torch.eye(S, device=device, dtype=dtype).unsqueeze(0)
+    M = I - beta * P_w.transpose(-1, -2)
+    M = M + eps * I
+
+    d_true = torch.linalg.solve(M, gamma.unsqueeze(-1)).squeeze(-1)  # (B,S)
+
+    y_true = w * d_true.unsqueeze(-1)                   # (B,S,A)
+    r = mdp_true.r.view(B, S, A)                        # (B,S,A)
+    v = (y_true * r).sum(dim=(1, 2))                    # (B,)
+
+    return v, y_true.reshape(B, S * A)
 
 def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_lambda=None):
     """Train and evaluate with elasticity-based inventory model.
@@ -292,20 +356,25 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 else:
                     raise ValueError(f"Invalid algorithm: {args.algo}")
 
+
                 # ZIHAO
-                # evaluate with true model (reward only)
+                # Evaluate decision quality with TRUE rewards (standard DFL).
                 with torch.no_grad():
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
                                                             args.foc, args.voc, args.hc, args.bc, args.beta,
                                                             p)
                 r_true = mdp_true.r.reshape(batch_size, -1)
-                print(f"r_true: {r_true}, r_flat_use: {r_flat_use}")
 
-                v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
-
+                # v_star = torch.sum(r_true * y_star, dim=1)  # (batch,)
                 # v_star = torch.sum(r_flat_use * y_star, dim=1)  # (batch,)
-                # r_detach = r_flat_use.detach()
-                # v_star = torch.sum(r_detach * y_star, dim=1)  # (batch,)
+
+                S = mdp.P.shape[1]
+                A = args.q_max + 1
+                pi, d_pred = occupancy_to_policy(y_star, S, A, tau_pi=getattr(args, "tau_pi", 2.0))
+
+                # v_star, _y_pi_true = eval_pi_on_true_mdp(mdp_true, pi, gamma_use)
+                v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
+                # v_star = (v_star - v_star.mean()) / (v_star.std() + 1e-6)
 
                 pred_loss = pred_loss_fn(lambda_pred, lambda_true)
                 # Maximize (v* - loss_weight * pred_loss); minimize negative of that
@@ -333,8 +402,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                             total += p.grad.data.pow(2).sum().item()
                     return float(np.sqrt(total)) if total > 0 else 0.0
 
+                H_use.retain_grad()
+                r_flat_use.retain_grad()
+                # gamma_use.retain_grad()
                 optimizer.zero_grad()
-                (-v_star.mean()).backward(retain_graph=True)
+                (-v_star.mean() * 1e3).backward(retain_graph=True)
+                print("||d v / d H_use|| =", None if H_use.grad is None else float(H_use.grad.norm()))
+                g_pi = torch.autograd.grad(v_star.sum(), pi, retain_graph=True, allow_unused=True)[0]
+                print("||dv/dpi|| =", None if g_pi is None else g_pi.norm().item())
+                print("y_star.requires_grad:", y_star.requires_grad)
+        
                 g_v_star = _grad_norm(pred_model)
                 epoch_grad_norm_vstar.append(g_v_star)
                 optimizer.zero_grad()
@@ -348,10 +425,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 w_raw = g_v_star / (g_pred_loss + eps)
                 beta_ema = 0.9
                 args.loss_weight = beta_ema * args.loss_weight + (1 - beta_ema) * float(w_raw)
-                w_min, w_max = 1e-3, 1e3
+                w_min, w_max = 1e-4, 1e4
                 args.loss_weight = float(np.clip(args.loss_weight, w_min, w_max))
                 print(f"loss_weight: {args.loss_weight:.4f}, g_v_star: {g_v_star:.4f}, g_pred_loss: {g_pred_loss:.4f}")
-                dfl_loss = -(v_star.mean() - args.loss_weight * pred_loss)
+                dfl_loss = -(v_star.mean() * 1e3 - 0.1 * args.loss_weight * pred_loss)
 
                 dfl_loss.backward()
                 print(f"lambda_pred: {lambda_pred}, lambda_true: {lambda_true}")

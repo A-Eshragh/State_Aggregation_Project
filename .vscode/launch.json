@@ -29,7 +29,7 @@
                 "--cost_case",
                 "high_margin",
                 "--algo",
-                "dfl_qpth",
+                "dfl",
                 "--n_epochs",
                 "100",
                 "--n_samples",

@@ -46,7 +46,7 @@ def main():
     parser.add_argument('--b_max', type=int, default=50, help='Maximum backlog')
     parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
     # ZIHAO
-    parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
+    parser.add_argument('--q_max', type=int, default=35, help='Maximum order quantity')
     parser.add_argument('--d_max', type=int, default=100, help='Maximum demand')
     
     # Cost parameters (asymmetric cases)
@@ -67,7 +67,7 @@ def main():
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
     parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.5, help='Weight for prediction loss in DFL')
-    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.01, 'hidden_dim': 32}",
+    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.1, 'hidden_dim': 32}",
                        help='Hyperparameters as dict string')
     parser.add_argument('--beta', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
@@ -81,7 +81,7 @@ def main():
     parser.add_argument('--sa_r_embed', type=int, default=8, help='Soft aggregation destination embedding dim')
 
     # qpth QP regularization (only used for dfl_qpth)
-    parser.add_argument('--qp_reg', type=float, default=0.5, help='Quadratic regularization coef for QP-DFL')
+    parser.add_argument('--qp_reg', type=float, default=1e-5, help='Quadratic regularization coef for QP-DFL')
     
     args = parser.parse_args()
     
@@ -91,8 +91,8 @@ def main():
     # Default costs by case
     # ZIHAO
     default_costs = {
-        "high_margin": dict(foc=1.0, voc=0.5, hc=0.1, bc=0),
-        "low_margin": dict(foc=1.0, voc=0.5, hc=20.0, bc=0),
+        "high_margin": dict(foc=0, voc=0.5, hc=0.1, bc=0.2),
+        "low_margin": dict(foc=0, voc=9.5, hc=50, bc=0.2),
     }
     dc = default_costs[args.cost_case]
     foc_default, voc_default, hc_default, bc_default = dc["foc"], dc["voc"], dc["hc"], dc["bc"]
