@@ -5,19 +5,6 @@ import torch.autograd as autograd
 from .qpth_qp_solver import solve_occupancy_qp_qpth
 
 def extract_basis_from_y(H_b: torch.Tensor, y_b: torch.Tensor, S: int, eps: float = 1e-10) -> torch.Tensor:
-    """
-    Extract a size-S basis indices B for one sample b, from qpth solution y_b.
-
-    Goal: pick B (len=S) such that:
-      - prefer y_b[i] > eps (active)
-      - H_b[:, B] is full-rank (rank S), so invertible square matrix
-
-    Args:
-        H_b: (S, SA)
-        y_b: (SA,)
-    Returns:
-        B: (S,) long tensor
-    """
     SA = y_b.numel()
     device = y_b.device
 
@@ -87,7 +74,6 @@ class DifferentiableQPSolver(autograd.Function):
                 basis[b] = extract_basis_from_y(H[b], y_star[b], S=S)
 
         ctx.reg = float(reg)
-        # IMPORTANT: qp_solver 不是 tensor，不能 save_for_backward；只存 tensor
         ctx.save_for_backward(H, r, gamma, y_star, basis)
         return y_star
 
@@ -103,13 +89,12 @@ class DifferentiableQPSolver(autograd.Function):
         grad_H = torch.zeros_like(H)
         grad_r = torch.zeros_like(r)
         grad_gamma = torch.zeros_like(gamma)
-        grad_reg = None   # 一般不学 reg；要学我可以给你加上
+        grad_reg = None 
         grad_qp_solver = None
 
-        rho = 2.0 * reg  # 对应 KKT 里的 rho（目标是 min (rho/2)||y||^2 - r^T y）
+        rho = 2.0 * reg
 
         if rho <= 0:
-            # reg=0 时退化回 LP；固定 basis 的 QP 公式不再适用
             raise RuntimeError("reg=0 makes Q singular; this backward assumes reg>0. "
                                "Use LP layer or add small reg>0.")
 

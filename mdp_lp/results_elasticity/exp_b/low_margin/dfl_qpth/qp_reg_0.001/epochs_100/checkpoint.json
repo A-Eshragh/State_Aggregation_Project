@@ -1,0 +1,18 @@
+{
+  "epoch": 1,
+  "train_reward_per_epoch": [
+    -5320.15625
+  ],
+  "obj_loss": [
+    8809.3955078125
+  ],
+  "train_time": [
+    31.776900053024292
+  ],
+  "sa_time_sec_per_epoch": [
+    0.0
+  ],
+  "solver_time_sec_per_epoch": [
+    25.458867073059082
+  ]
+}
