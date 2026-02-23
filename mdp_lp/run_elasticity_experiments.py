@@ -43,7 +43,7 @@ def main():
     parser.add_argument('--p_related_lognormal_std', type=float, default=0.5, help='Std of log(p_related) (experiment c)')
     
     # Inventory parameters
-    parser.add_argument('--b_max', type=int, default=50, help='Maximum backlog')
+    parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
     parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
     # ZIHAO
     parser.add_argument('--q_max', type=int, default=35, help='Maximum order quantity')
@@ -91,8 +91,8 @@ def main():
     # Default costs by case
     # ZIHAO
     default_costs = {
-        "high_margin": dict(foc=0, voc=0.5, hc=0.1, bc=0.2),
-        "low_margin": dict(foc=0, voc=9.5, hc=50, bc=0.2),
+        "high_margin": dict(foc=0, voc=0.5, hc=0.1, bc=0),
+        "low_margin": dict(foc=0, voc=0.5, hc=20.0, bc=0),
     }
     dc = default_costs[args.cost_case]
     foc_default, voc_default, hc_default, bc_default = dc["foc"], dc["voc"], dc["hc"], dc["bc"]

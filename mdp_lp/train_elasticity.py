@@ -251,6 +251,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     # For DFL: gradient magnitudes for weight balance (||∇_θ v*||, ||∇_θ pred_loss||); dℓ/dw = pred_loss
     train_grad_norm_vstar_list = []
     train_grad_norm_pred_loss_list = []
+    # Policy analysis: track ordering bias per epoch (predicted-lambda policy vs oracle)
+    train_order_bias_per_epoch = []
+    train_inv_bias_per_epoch = []
+    train_lambda_bias_per_epoch = []
+    train_frac_over_order_per_epoch = []
+    _pa_n_states = args.b_max + args.s_max + 1
+    _pa_n_actions = args.q_max + 1
+    _pa_action_qty = torch.arange(_pa_n_actions, dtype=torch.float32)
+    _pa_inv_level = torch.arange(_pa_n_states, dtype=torch.float32) - args.b_max
     
     print(f"[Training] Starting: {args.n_epochs} epochs, algo={args.algo}")
     start_time = time.time()
@@ -288,6 +297,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         epoch_twostage_loss = []  # For two-stage: track prediction loss per batch
         epoch_grad_norm_vstar = []  # For DFL: ||∇_θ v*|| per batch
         epoch_grad_norm_pred_loss = []  # For DFL: ||∇_θ pred_loss|| per batch
+        epoch_order_pred = []   # policy analysis: E[order] under predicted-λ policy
+        epoch_order_oracle = [] # policy analysis: E[order] under oracle (true-λ) policy
+        epoch_inv_pred = []     # policy analysis: E[inventory] under predicted-λ policy
+        epoch_inv_oracle = []   # policy analysis: E[inventory] under oracle policy
         pred_model.train()
         
         for batch_data in train_loader:
@@ -394,44 +407,33 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 epoch_lambda_pred.append(lambda_pred.detach())
                 epoch_lambda_true.append(lambda_true)
 
-                # Gradient magnitudes for weight balance: ||∇_θ v*|| and ||∇_θ pred_loss|| (dℓ/dw = pred_loss)
-                def _grad_norm(model):
-                    total = 0.0
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            total += p.grad.data.pow(2).sum().item()
+                # Gradient magnitudes for weight balance via autograd.grad (single forward graph, no extra backward)
+                def _grad_norm_from_grads(grads):
+                    total = sum(g.pow(2).sum().item() for g in grads if g is not None)
                     return float(np.sqrt(total)) if total > 0 else 0.0
 
-                H_use.retain_grad()
-                r_flat_use.retain_grad()
-                # gamma_use.retain_grad()
-                optimizer.zero_grad()
-                (-v_star.mean() * 1e3).backward(retain_graph=True)
-                print("||d v / d H_use|| =", None if H_use.grad is None else float(H_use.grad.norm()))
-                g_pi = torch.autograd.grad(v_star.sum(), pi, retain_graph=True, allow_unused=True)[0]
-                print("||dv/dpi|| =", None if g_pi is None else g_pi.norm().item())
-                print("y_star.requires_grad:", y_star.requires_grad)
-        
-                g_v_star = _grad_norm(pred_model)
+                params_list = list(pred_model.parameters())
+                grads_v = torch.autograd.grad(v_star.mean(), params_list,
+                                              retain_graph=True, allow_unused=True)
+                g_v_star = _grad_norm_from_grads(grads_v)
                 epoch_grad_norm_vstar.append(g_v_star)
-                optimizer.zero_grad()
-                pred_loss.backward(retain_graph=True)
-                g_pred_loss = _grad_norm(pred_model)
-                epoch_grad_norm_pred_loss.append(g_pred_loss)
-                optimizer.zero_grad()
 
-                # Zihao
+                grads_p = torch.autograd.grad(pred_loss, params_list,
+                                              retain_graph=True, allow_unused=True)
+                g_pred_loss = _grad_norm_from_grads(grads_p)
+                epoch_grad_norm_pred_loss.append(g_pred_loss)
+
                 eps = 1e-12
                 w_raw = g_v_star / (g_pred_loss + eps)
                 beta_ema = 0.9
                 args.loss_weight = beta_ema * args.loss_weight + (1 - beta_ema) * float(w_raw)
                 w_min, w_max = 1e-4, 1e4
                 args.loss_weight = float(np.clip(args.loss_weight, w_min, w_max))
-                print(f"loss_weight: {args.loss_weight:.4f}, g_v_star: {g_v_star:.4f}, g_pred_loss: {g_pred_loss:.4f}")
-                dfl_loss = -(v_star.mean() * 1e3 - 0.1 * args.loss_weight * pred_loss)
 
+                dfl_loss = -(v_star.mean() - 0.2 * args.loss_weight * pred_loss) # for reg, maybe we need higer reg in the later phase of training
+
+                optimizer.zero_grad()
                 dfl_loss.backward()
-                print(f"lambda_pred: {lambda_pred}, lambda_true: {lambda_true}")
 
                 epoch_dfl_loss.append(dfl_loss.item())
                 train_loss += dfl_loss.item()
@@ -461,6 +463,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 loss.backward()
                 train_loss += loss.item()
             
+            with torch.no_grad():
+                if args.algo not in ("dfl", "dfl_qpth"):
+                    mdp_true = create_inventory_from_lambda(
+                        lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                        args.foc, args.voc, args.hc, args.bc, args.beta, p
+                    )
+                _y_pa_pred, _, _ = solve_lp(mdp, lp_solver)
+                _y_pa_oracle, _, _ = solve_lp(mdp_true, lp_solver)
+                _y_p = _y_pa_pred.view(batch_size, _pa_n_states, _pa_n_actions)
+                _y_o = _y_pa_oracle.view(batch_size, _pa_n_states, _pa_n_actions)
+                epoch_order_pred.append((_y_p * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
+                epoch_order_oracle.append((_y_o * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
+                epoch_inv_pred.append((_y_p.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
+                epoch_inv_oracle.append((_y_o.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
+
             optimizer.step()
         
         train_time_list.append(time.time() - start_time)
@@ -491,8 +508,24 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             else:
                 train_twostage_loss_list.append(0.0)
         
+        # Policy analysis: aggregate per-epoch ordering/inventory bias
+        _ep_ord_pred = torch.cat(epoch_order_pred)
+        _ep_ord_oracle = torch.cat(epoch_order_oracle)
+        _ep_inv_pred = torch.cat(epoch_inv_pred)
+        _ep_inv_oracle = torch.cat(epoch_inv_oracle)
+        _ep_lam_pred = torch.cat(epoch_lambda_pred)
+        _ep_lam_true = torch.cat(epoch_lambda_true)
+        _ep_ord_bias = _ep_ord_pred - _ep_ord_oracle
+        train_order_bias_per_epoch.append(float(_ep_ord_bias.mean()))
+        train_inv_bias_per_epoch.append(float((_ep_inv_pred - _ep_inv_oracle).mean()))
+        train_lambda_bias_per_epoch.append(float((_ep_lam_pred - _ep_lam_true).mean()))
+        train_frac_over_order_per_epoch.append(float((_ep_ord_bias > 0).float().mean()))
+        
         if (epoch + 1) % 10 == 0:
-            print(f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}')
+            print(f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}'
+                  f', λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
+                  f', order_bias={train_order_bias_per_epoch[-1]:+.4f}'
+                  f', frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}')
         
         should_checkpoint = ((epoch + 1) % checkpoint_every == 0) or (epoch == 0) or ((epoch + 1) == args.n_epochs)
         if should_checkpoint and hasattr(args, 'save_dir') and args.save_dir:
@@ -531,6 +564,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     'test_obj_values': None,
                     'test_lambda_pred': None,
                     'test_lambda_true': None,
+                    'train_order_bias_per_epoch': train_order_bias_per_epoch.copy(),
+                    'train_inv_bias_per_epoch': train_inv_bias_per_epoch.copy(),
+                    'train_lambda_bias_per_epoch': train_lambda_bias_per_epoch.copy(),
+                    'train_frac_over_order_per_epoch': train_frac_over_order_per_epoch.copy(),
                 }
                 if save_full_partial:
                     partial_results['train_lambda_pred'] = [l.cpu().numpy().tolist() for l in train_lambda_pred_list]
@@ -645,6 +682,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         'train_twostage_loss_per_epoch': train_twostage_loss_list,  # Prediction loss for two-stage
         'train_grad_norm_vstar_per_epoch': train_grad_norm_vstar_list,  # ||∇_θ v*|| (DFL only)
         'train_grad_norm_pred_loss_per_epoch': train_grad_norm_pred_loss_list,  # ||∇_θ pred_loss|| (DFL only)
+        'train_order_bias_per_epoch': train_order_bias_per_epoch,
+        'train_inv_bias_per_epoch': train_inv_bias_per_epoch,
+        'train_lambda_bias_per_epoch': train_lambda_bias_per_epoch,
+        'train_frac_over_order_per_epoch': train_frac_over_order_per_epoch,
     }
     # Summary for loss-weight tuning: last-epoch gradient norms and MSE value
     if train_mse_list and train_grad_norm_vstar_list and train_grad_norm_pred_loss_list:
