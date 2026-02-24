@@ -132,7 +132,7 @@ def prepare_elasticity_data(args):
 
 # ----------------------------------------
 # ZIHAO
-def occupancy_to_policy(y_star, S, A, eps=1e-12, tau_pi=None):
+def occupancy_to_policy(y_star, S, A, eps=1e-12):
     y = y_star.view(-1, S, A) # clamp_min(0.0)
 
     d_pred = y.sum(dim=-1)
@@ -159,8 +159,8 @@ def eval_pi_on_true_mdp(mdp_true, pi, gamma):
     d = torch.linalg.solve(M, gamma.unsqueeze(-1)).squeeze(-1)
 
     y = pi * d.unsqueeze(-1)              # (B,S,A)
-    r_pi = (pi * r).sum(dim=-1)           # (B,S)
-    v = (d * r_pi).sum(dim=-1)            # (B,)
+    r = mdp_true.r.reshape(B, S, A)      # (B,S,A)
+    v = (y * r).sum(dim=(1, 2))            # (B,)
     return v, y.reshape(B, S*A)
 
 def eval_y_on_true_mdp(mdp_true, y_star, gamma):
@@ -383,7 +383,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
 
                 S = mdp.P.shape[1]
                 A = args.q_max + 1
-                pi, d_pred = occupancy_to_policy(y_star, S, A, tau_pi=getattr(args, "tau_pi", 2.0))
+                pi, d_pred = occupancy_to_policy(y_star, S, A)
 
                 # v_star, _y_pi_true = eval_pi_on_true_mdp(mdp_true, pi, gamma_use)
                 v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)

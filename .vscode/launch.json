@@ -39,5 +39,12 @@
             ],
             "console": "integratedTerminal"
         },
+        {
+            "name": "test_dfl_ope",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mdp_lp.test_dfl_ope",
+            "console": "integratedTerminal"
+        },
     ]
 }
