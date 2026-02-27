@@ -42,12 +42,15 @@ def test_dfl_ope():
     device = torch.device("cpu")
 
     pred_model = LambdaPredictor(model_config["hidden_dim"], model_config["use_p_related"], model_config["init_mean_lambda"], model_config["output_log"]).to(device)
-    optimizer = optim.Adam(pred_model.parameters(), lr=model_config["learning_rate"])
-    # lambda_pred = torch.linspace(0, 100, 101, device=device)
+    # optimizer = optim.Adam(pred_model.parameters(), lr=model_config["learning_rate"])
+
+    lambda_pred = torch.linspace(0, 100, 101, device=device)
 
     S = config["s_max"] + config["b_max"] + 1
     A = config["q_max"] + 1
 
+    batch_size = lambda_pred.shape[0]
+    lambda_true = torch.tensor([30] * batch_size, device=device)
     p = torch.ones(batch_size, device=device) * config["p_constant"]
 
     mdp = create_inventory_from_lambda(
@@ -75,15 +78,17 @@ def test_dfl_ope():
         check_eq = H_true @ _y_pi_true.reshape(batch_size, -1, 1) - gamma_use.unsqueeze(-1)
         print(f"check_eq: {check_eq.abs().max()}")
         # v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
-    return lambda_pred.tolist(), v_star.tolist()
+    return lambda_pred.tolist(), v_star.tolist(), lambda_true[0].item()
 
 if __name__ == "__main__":
-    lambda_pred, v_star = test_dfl_ope()
+    lambda_pred, v_star, lambda_true_val = test_dfl_ope()
     # print(f"v_star: {v_star}")
     
     plt.plot(lambda_pred, v_star)
+    plt.axvline(x=lambda_true_val, color="r", linestyle="--", label=f"lambda_true={lambda_true_val}")
     plt.xlabel("lambda")
     plt.ylabel("v_star")
     plt.title("v_star vs lambda")
+    plt.legend()
     plt.savefig("v_star_vs_lambda.pdf", dpi=300, bbox_inches="tight")
     plt.show()
