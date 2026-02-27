@@ -390,8 +390,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
                                                             args.foc, args.voc, args.hc, args.bc, args.beta,
                                                             p)
-                r_true = mdp_true.r.reshape(batch_size, -1)
-                H_true = mdp_true.build_H(mdp_true.P)
+                    r_true = mdp_true.r.reshape(batch_size, -1)
+                    H_true = mdp_true.build_H(mdp_true.P)
+                    pi_true, _ = occupancy_to_policy(y_star, S, args.q_max + 1)
+                    v_true = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
+                    train_reward_list.append(v_true.mean().item())
+
 
                 violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
                 rho = 100
@@ -459,13 +463,24 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             else:
                 # Two-stage: only prediction loss (no gradients through LP)
                 # Gamma is already clamped in solve_lp() for non-degeneracy
-                _, obj_hat, _ = solve_lp(mdp, lp_solver)
+                y_pred, obj_hat, _, _ = solve_lp(mdp, lp_solver)
                 obj_hat = obj_hat.detach()  # No gradients through LP
                 # Log-space MSE for two-stage only (matches DGP: ln(λ) = β₀ + β₁ ln(p) + ε)
                 log_lambda_true = torch.log(lambda_true + 1e-10)
                 pred_loss = pred_loss_fn(log_lambda_pred, log_lambda_true)
                 obj_diff = obj_diff_fn(obj_hat, obj_true)
                 obj_loss += obj_diff.item()
+                with torch.no_grad():
+                    mdp_true = create_inventory_from_lambda(
+                        lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                        args.foc, args.voc, args.hc, args.bc, args.beta, p
+                    )
+                    S = mdp.P.shape[1]
+                    gamma = mdp.build_gamma(batch_size, S, device)
+    
+                    pi_pred, _ = occupancy_to_policy(y_pred, S, args.q_max + 1)
+                    v_true = eval_pi_on_true_mdp(mdp_true, pi_pred, gamma)
+                    train_reward_list.append(v_true.mean().item())
                 
                 # Track prediction loss for plotting
                 epoch_twostage_loss.append(pred_loss.item())
@@ -502,10 +517,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         sa_time_sec_per_epoch.append(epoch_sa_time)
         solver_time_sec_per_epoch.append(epoch_solver_time)
         avg_obj_loss = obj_loss / len(train_loader)
-        train_reward_list.append(np.mean(epoch_rewards))
         train_lambda_pred_list.append(torch.cat(epoch_lambda_pred))
         train_lambda_true_list.append(torch.cat(epoch_lambda_true))
-        obj_true_list.append(obj_true)
         obj_hat_list.append(obj_hat)
 
         
@@ -678,6 +691,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             eval_backup = args.save_dir / 'evaluation_backup.json'
             import json
             eval_data = {
+                'test_obj_true': test_obj_true,
                 'test_obj_values': test_obj_values.cpu().numpy().tolist(),
                 'test_lambda_pred': test_lambda_pred.cpu().numpy().tolist(),
                 'test_lambda_true': test_lambda_true.cpu().numpy().tolist(),
