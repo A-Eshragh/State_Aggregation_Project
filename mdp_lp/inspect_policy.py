@@ -92,7 +92,8 @@ def main():
 
     lp_solver = DenseLPSolver()
     def solver(H, r, gamma):
-        return lp_solver.solve(H, r, gamma)
+        y, basis, _ = lp_solver.solve(H, r, gamma)
+        return y, basis
 
     lines = []
     def log(s):

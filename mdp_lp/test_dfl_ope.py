@@ -7,6 +7,8 @@ import torch
 from mdp_lp.train_elasticity import occupancy_to_policy, eval_pi_on_true_mdp, eval_y_on_true_mdp
 from mdp_lp.inventory_elasticity import create_inventory_from_lambda
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
+from mdp_lp.elasticity_model import ElasticityModel, LambdaPredictor
+
 import matplotlib.pyplot as plt
 
 config = {
@@ -24,17 +26,24 @@ config = {
     "p_lognormal_std": 0.5,
 }
 
+model_config = {
+    "learning_rate": 0.001,
+    "hidden_dim": 32,
+    "use_p_related": False,
+    "init_mean_lambda": 1.0,
+    "output_log": False,
+}
+
 
 def test_dfl_ope():
     torch.manual_seed(0)
     np.random.seed(0)
 
     device = torch.device("cpu")
-    lambda_pred = torch.linspace(0, 100, 101, device=device)
-    batch_size = lambda_pred.shape[0]
 
-    lambda_true = [30] * batch_size
-    lambda_true = torch.tensor(lambda_true, device=device)
+    pred_model = LambdaPredictor(model_config["hidden_dim"], model_config["use_p_related"], model_config["init_mean_lambda"], model_config["output_log"]).to(device)
+    optimizer = optim.Adam(pred_model.parameters(), lr=model_config["learning_rate"])
+    # lambda_pred = torch.linspace(0, 100, 101, device=device)
 
     S = config["s_max"] + config["b_max"] + 1
     A = config["q_max"] + 1

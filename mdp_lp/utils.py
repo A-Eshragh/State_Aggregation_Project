@@ -39,11 +39,130 @@ def solve_lp(mdp, lp_solver):
     gamma = torch.clamp(gamma, min=1e-8)
     gamma = gamma / gamma.sum(dim=1, keepdim=True)  # Renormalize
     
-    y_star, basis = lp_solver(H, r_flat, gamma)
+    y_star, basis, dual = lp_solver(H, r_flat, gamma)
     
     # Compute objective: r^T y_star
     obj = torch.sum(r_flat * y_star, dim=1)  # (batch,)
     
     run_time = time.time() - start_time
     
-    return y_star, obj, run_time
+    return y_star, obj, dual, run_time
+
+
+# ----------------------------------------
+# Newsvendor base-stock approximation
+def _poisson_cdf_inv_truncated(lambda_param, d_max, target, tol=1e-8):
+    """
+    Inverse CDF: find smallest s in [0, d_max] such that F(s) >= target.
+    F is the Poisson(λ) CDF truncated to 0..d_max (renormalized).
+
+    Args:
+        lambda_param: (batch,) or scalar
+        target: scalar or (batch,) critical ratio in [0, 1]
+    Returns:
+        s_star: int (if scalar) or LongTensor (batch,)
+    """
+    if isinstance(lambda_param, torch.Tensor):
+        lam = lambda_param.flatten()
+        scalar = lam.numel() == 1
+        if scalar:
+            lam = lam.unsqueeze(0)
+    else:
+        lam = torch.tensor([float(lambda_param)])
+        scalar = True
+
+    pmf = poisson_pmf(lam, d_max)
+    if pmf.dim() == 1:
+        pmf = pmf.unsqueeze(0)
+    pmf = pmf / (pmf.sum(dim=-1, keepdim=True) + 1e-12)
+    cdf = torch.cumsum(pmf, dim=-1)  # (batch, d_max+1)
+
+    if isinstance(target, torch.Tensor):
+        target_t = target.flatten().to(device=lam.device, dtype=lam.dtype)
+    else:
+        target_t = torch.full((lam.shape[0],), float(target), device=lam.device, dtype=lam.dtype)
+    if target_t.numel() == 1 and lam.shape[0] > 1:
+        target_t = target_t.expand(lam.shape[0])
+
+    # Find smallest s: cdf[:, s] >= target
+    s_star = torch.full((lam.shape[0],), d_max, dtype=torch.long, device=lam.device)
+    for i in range(lam.shape[0]):
+        idx = (cdf[i] >= target_t[i] - tol).nonzero(as_tuple=True)[0]
+        if len(idx) > 0:
+            s_star[i] = idx[0].item()
+    return s_star[0].item() if scalar else s_star
+
+
+def newsvendor_base_stock(p, voc, hc, bc, lambda_param, d_max, b_max, s_max):
+    """
+    Approximate optimal base-stock level S* via newsvendor critical ratio.
+
+    Critical ratio = (p - voc + bc) / (p - voc + hc + bc)
+    S* ≈ F_λ^{-1}(critical ratio), with F_λ the Poisson(λ) CDF truncated to 0..d_max.
+
+    Args:
+        p: selling price (scalar or tensor)
+        voc: variable ordering cost (scalar)
+        hc: holding cost (scalar)
+        bc: backlog cost (scalar)
+        lambda_param: Poisson rate (scalar or tensor)
+        d_max: max demand for truncation
+        b_max: max backlog (for clamping S*)
+        s_max: max storage (for clamping S*)
+
+    Returns:
+        S*: base-stock level (int or LongTensor), clamped to [0, s_max]
+    """
+    device = lambda_param.device if isinstance(lambda_param, torch.Tensor) else torch.device("cpu")
+    dtype = lambda_param.dtype if isinstance(lambda_param, torch.Tensor) else torch.float32
+
+    p_t = torch.as_tensor(p, device=device, dtype=dtype)
+    if p_t.dim() == 0:
+        p_t = p_t.unsqueeze(0)
+    lam_t = torch.as_tensor(lambda_param, device=device, dtype=dtype)
+    if lam_t.dim() == 0:
+        lam_t = lam_t.unsqueeze(0)
+    if p_t.shape[0] == 1 and lam_t.shape[0] > 1:
+        p_t = p_t.expand(lam_t.shape[0])
+    elif p_t.shape[0] > 1 and lam_t.shape[0] == 1:
+        lam_t = lam_t.expand(p_t.shape[0])
+
+    denom = p_t - voc + hc + bc
+    num = p_t - voc + bc
+    denom = torch.where(denom > 1e-10, denom, torch.ones_like(denom))
+    num = torch.clamp(num, min=0.0)
+    critical_ratio = (num / denom).clamp(0.0, 1.0)
+
+    s_star = _poisson_cdf_inv_truncated(lam_t, d_max, critical_ratio)
+    if isinstance(s_star, torch.Tensor):
+        s_star = torch.clamp(s_star, 0, s_max)
+        return s_star[0].item() if s_star.numel() == 1 else s_star
+    else:
+        return min(max(int(s_star), 0), s_max)
+
+def newsvendor_policy_actions(S_star, b_max, s_max, q_max):
+    """
+    Convert base-stock level S* to per-state optimal actions (order quantities).
+
+    Policy: order min(max(S* - inventory, 0), q_max) in each state.
+
+    Args:
+        S_star: base-stock level (int or LongTensor of shape (batch,))
+        b_max, s_max, q_max: MDP parameters
+
+    Returns:
+        actions: (S,) or (batch, S) tensor of order quantities per state.
+                 State s has inventory = s - b_max.
+    """
+    n_states = b_max + s_max + 1
+    inv_levels = torch.arange(n_states, dtype=torch.float32) - b_max  # (S,)
+
+    if isinstance(S_star, torch.Tensor):
+        S_star = S_star.float().view(-1, 1)
+        order = torch.clamp(S_star - inv_levels.unsqueeze(0), min=0)
+        order = torch.clamp(order, max=q_max)
+        return order.long()
+    else:
+        order = torch.clamp(torch.tensor(S_star, dtype=torch.float32) - inv_levels, min=0)
+        order = torch.clamp(order, max=q_max)
+        return order.long()
