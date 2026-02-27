@@ -94,8 +94,7 @@ def prepare_elasticity_data(args):
         feats = torch.stack([p, p_related, noise], dim=1)
         prices_tensor = torch.stack([p, p_related], dim=1)
     else:
-        # ZIHAO
-        noise = torch.randn(args.n_samples) * 0
+        noise = torch.randn(args.n_samples) * 0.1
         feats = torch.stack([p, noise], dim=1)
         prices_tensor = p
     
@@ -394,12 +393,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 r_true = mdp_true.r.reshape(batch_size, -1)
                 H_true = mdp_true.build_H(mdp_true.P)
 
-                # mu = torch.zeros(S, device=device)  # dual variables
                 violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
-                # aug_lag = (mu * violation.mean(0)).sum() + (rho/2) * violation.pow(2).sum(dim=1).mean()
-                aug_lag =  0.5 * torch.norm(dual_true * violation, p=2)**2
+                rho = 100
+                aug_lag = rho * violation.pow(2).mean()
                 v_star = torch.sum(r_true * y_star, dim=1)
-                dfl_loss = -v_star.sum() + aug_lag
+                dfl_loss = -v_star.mean() + aug_lag
                 # with torch.no_grad():
                 #     mu = mu + rho * violation.mean(0)
 
@@ -448,10 +446,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 w_min, w_max = 1e-4, 1e4
                 args.loss_weight = float(np.clip(args.loss_weight, w_min, w_max))
 
-                dfl_loss_final = dfl_loss + args.loss_weight * pred_loss # for reg, maybe we need higer reg in the later phase of training
-                # dfl_loss = -v_star.mean()
+                # dfl_loss_final = dfl_loss + args.loss_weight * pred_loss
+                dfl_loss_final = dfl_loss + 10000 * pred_loss
                 optimizer.zero_grad()
                 dfl_loss_final.backward()
+
+                torch.nn.utils.clip_grad_norm_(params, max_norm=getattr(args, "grad_clip", 10.0))
 
                 epoch_dfl_loss.append(dfl_loss_final.item())
                 train_loss += dfl_loss_final.item()

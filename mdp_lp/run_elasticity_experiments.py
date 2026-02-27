@@ -83,6 +83,9 @@ def main():
 
     # qpth QP regularization (only used for dfl_qpth)
     parser.add_argument('--qp_reg', type=float, default=1e-5, help='Quadratic regularization coef for QP-DFL')
+    # DFL stability: gradient clipping and augmented Lagrangian
+    parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
+    parser.add_argument('--aug_lag_rho', type=float, default=1.0, help='Augmented Lagrangian penalty coefficient ρ')
     
     args = parser.parse_args()
     
