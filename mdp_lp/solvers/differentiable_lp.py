@@ -36,7 +36,7 @@ class DifferentiableLPSolver(autograd.Function):
             y_star: (batch, SA)
         """
         with torch.no_grad():
-            y_star, basis = solve_lp_gurobi(H, r, gamma)
+            y_star, basis, _ = solve_lp_gurobi(H, r, gamma)
             
         ctx.save_for_backward(H, r, gamma, y_star, basis)
 

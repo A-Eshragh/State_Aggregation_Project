@@ -1,5 +1,6 @@
 # lp/dense_lp_solver.py
 
+import numpy as np
 import torch
 import gurobipy as gp
 from gurobipy import GRB
@@ -22,6 +23,7 @@ class DenseLPSolver:
     Outputs:
         y_star: (batch, SA)
         basis:  (batch, S)   # basis column indices
+        dual:   (batch, S)   # dual values (lambda) for H y = gamma
     """
 
     def __init__(self):
@@ -34,6 +36,11 @@ class DenseLPSolver:
         H_i:     (S, SA)
         r_i:     (SA,)
         gamma_i: (S,)
+
+        Returns:
+            y_star: (SA,) primal solution
+            basis_idx: (S,) basis column indices
+            dual: (S,) dual values for H y = gamma (lambda)
         """
 
         S, SA = H_i.shape
@@ -58,7 +65,19 @@ class DenseLPSolver:
             dtype=torch.long
         )
 
-        return torch.tensor(y_star, dtype=torch.float32), basis_idx
+        # Dual values (Pi) for equality constraints H y = gamma
+        # addMConstr yields one MConstr with Pi as array (S,); addConstr yields S constrs with scalar Pi
+        constrs = model.getConstrs()
+        pi_vals = []
+        for c in constrs:
+            p = c.Pi
+            if hasattr(p, "__len__") and not isinstance(p, str):
+                pi_vals.extend(np.atleast_1d(p).flatten().tolist())
+            else:
+                pi_vals.append(float(p))
+        dual = torch.tensor(pi_vals, dtype=torch.float32)
+
+        return torch.tensor(y_star, dtype=torch.float32), basis_idx, dual
 
     def solve(self, H, r, gamma):
         """
@@ -67,50 +86,54 @@ class DenseLPSolver:
         Returns:
             y_star: (batch, SA)
             basis:  (batch, S)
+            dual:   (batch, S)  dual values for H y = gamma
         """
         batch, S, SA = H.shape
 
         ys = []
         bases = []
+        duals = []
 
         for b in range(batch):
-            y_b, B_b = self.solve_single(H[b].detach().cpu().numpy(),
-                                         r[b].detach().cpu().numpy(),
-                                         gamma[b].detach().cpu().numpy())
+            y_b, B_b, dual_b = self.solve_single(H[b].detach().cpu().numpy(),
+                                                 r[b].detach().cpu().numpy(),
+                                                 gamma[b].detach().cpu().numpy())
             ys.append(y_b)
             bases.append(B_b)
+            duals.append(dual_b)
 
-        return torch.stack(ys, dim=0), torch.stack(bases, dim=0)
+        return torch.stack(ys, dim=0), torch.stack(bases, dim=0), torch.stack(duals, dim=0)
 
 
 def solve_lp_dense(H, r, gamma):
     """
     Solve LP for single instance (not batched).
-    
+
     H:     (S, SA) or (batch, S, SA) - if batched, solves first element
     r:     (SA,) or (batch, SA)
     gamma: (S,) or (batch, S)
-    
+
     Returns:
         y_star: (SA,)
         basis:  (S,)
+        dual:   (S,)  dual values for H y = gamma
     """
     solver = DenseLPSolver()
     if H.dim() == 3:
-        y_star, basis = solver.solve_single(H[0].detach().cpu().numpy(),
-                                           r[0].detach().cpu().numpy(),
-                                           gamma[0].detach().cpu().numpy())
+        y_star, basis, dual = solver.solve_single(H[0].detach().cpu().numpy(),
+                                                 r[0].detach().cpu().numpy(),
+                                                 gamma[0].detach().cpu().numpy())
     else:
-        y_star, basis = solver.solve_single(H.detach().cpu().numpy(),
-                                           r.detach().cpu().numpy(),
-                                           gamma.detach().cpu().numpy())
-    return y_star, basis
+        y_star, basis, dual = solver.solve_single(H.detach().cpu().numpy(),
+                                                 r.detach().cpu().numpy(),
+                                                 gamma.detach().cpu().numpy())
+    return y_star, basis, dual
 
 
 def solve_lp_gurobi(H, r, gamma):
-    """Solve batched LP and return y_star and basis."""
+    """Solve batched LP and return y_star, basis, and dual."""
     solver = DenseLPSolver()
-    y_star, basis = solver.solve(H, r, gamma)
-    return y_star, basis
+    y_star, basis, dual = solver.solve(H, r, gamma)
+    return y_star, basis, dual
 
 

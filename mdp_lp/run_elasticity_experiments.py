@@ -13,6 +13,7 @@ import json
 import sys
 import numpy as np
 import pathlib
+import torch
 from pathlib import Path
 from mdp_lp.train_elasticity import prepare_elasticity_data, train_eval_elasticity
 from mdp_lp.utils import set_seed
@@ -44,9 +45,9 @@ def main():
     
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
-    parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
+    parser.add_argument('--s_max', type=int, default=30, help='Maximum storage')
     # ZIHAO
-    parser.add_argument('--q_max', type=int, default=35, help='Maximum order quantity')
+    parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
     parser.add_argument('--d_max', type=int, default=100, help='Maximum demand')
     
     # Cost parameters (asymmetric cases)
@@ -67,7 +68,7 @@ def main():
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
     parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.5, help='Weight for prediction loss in DFL')
-    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.1, 'hidden_dim': 32}",
+    parser.add_argument('--hyperparam', type=str, default="{'lr': 0.005, 'hidden_dim': 32}",
                        help='Hyperparameters as dict string')
     parser.add_argument('--beta', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
@@ -133,9 +134,11 @@ def main():
     result_file = save_dir / 'results.json'
     results_partial_file = save_dir / 'results_partial.json'
     
-    # Convert numpy arrays to lists for JSON serialization
+    # Convert numpy arrays and tensors to lists for JSON serialization
     def convert_to_json_serializable(obj):
-        if isinstance(obj, np.ndarray):
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu().tolist()
+        elif isinstance(obj, np.ndarray):
             return obj.tolist()
         elif isinstance(obj, (np.integer, np.floating)):
             return obj.item()
