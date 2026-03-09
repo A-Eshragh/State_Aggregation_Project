@@ -34,25 +34,24 @@ def main():
     parser.add_argument('--beta_0', type=float, default=4.0, help='β₀ in elasticity model')
     parser.add_argument('--beta_1', type=float, default=-0.3, help='β₁ in elasticity model')
     parser.add_argument('--beta_2', type=float, default=0.09, help='β₂ in elasticity model (exp a/b use 0; exp c use ±0.09)')
-    parser.add_argument('--sigma_epsilon', type=float, default=0.1, help='σ_ε in elasticity model')
+    parser.add_argument('--sigma_epsilon', type=float, default=0.7, help='σ_ε in elasticity model (higher = more λ variance; can be >1)')
     
     # Price parameters
     parser.add_argument('--p_constant', type=float, default=10.0, help='Constant price (experiment a)')
     parser.add_argument('--p_lognormal_mean', type=float, default=10.0, help='Mean of log(p) (experiments b, c)')
-    parser.add_argument('--p_lognormal_std', type=float, default=0.5, help='Std of log(p) (experiments b, c)')
+    parser.add_argument('--p_lognormal_std', type=float, default=1.0, help='Std of log(p) (higher = wider price spread; can be >1)')
     parser.add_argument('--p_related_lognormal_mean', type=float, default=8.0, help='Mean of log(p_related) (experiment c)')
-    parser.add_argument('--p_related_lognormal_std', type=float, default=0.5, help='Std of log(p_related) (experiment c)')
+    parser.add_argument('--p_related_lognormal_std', type=float, default=1.0, help='Std of log(p_related) (experiment c; can be >1)')
     
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
-    parser.add_argument('--s_max', type=int, default=30, help='Maximum storage')
-    # ZIHAO
+    parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
     parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
-    parser.add_argument('--d_max', type=int, default=100, help='Maximum demand')
+    parser.add_argument('--d_max', type=int, default=50, help='Maximum demand')
     
     # Cost parameters (asymmetric cases)
-    parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin'], required=True,
-                       help='high_margin: (selling_price - ordering_cost) >> holding_cost, low_margin: vice versa')
+    parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin', 'normal_margin'], required=True,
+                       help='high_margin: hc=0.1; low_margin: hc=20; normal_margin: hc=2')
     parser.add_argument('--selling_price_base', type=float, default=10.0, help='Base selling price')
     # Optional cost overrides (useful for controlled hypothetical settings)
     parser.add_argument('--foc', type=float, default=None, help='Override fixed ordering cost (if set)')
@@ -64,10 +63,11 @@ def main():
     
     # Training parameters
     parser.add_argument('--n_epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--n_samples', type=int, default=200, help='Number of samples')
+    parser.add_argument('--n_samples', type=int, default=50, help='Number of samples')
+    parser.add_argument('--train_frac', type=float, default=0.5, help='Fraction for train (rest = test). 0.5 = 50/50 split.')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
     parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
-    parser.add_argument('--loss_weight', type=float, default=0.5, help='Weight for prediction loss in DFL')
+    parser.add_argument('--loss_weight', type=float, default=20.0, help='Weight for prediction loss in DFL (balanced so v* and pred loss have similar gradient scale; no adaptation)')
     parser.add_argument('--hyperparam', type=str, default="{'lr': 0.005, 'hidden_dim': 32}",
                        help='Hyperparameters as dict string')
     parser.add_argument('--beta', type=float, default=0.95, help='Discount factor')
@@ -86,6 +86,7 @@ def main():
     # DFL stability: gradient clipping and augmented Lagrangian
     parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
     parser.add_argument('--aug_lag_rho', type=float, default=1.0, help='Augmented Lagrangian penalty coefficient ρ')
+    parser.add_argument('--policy_analysis', action='store_true', help='If set, run policy analysis (1 extra LP per batch for order/inv bias vs oracle). Default: off (1 solve per batch).')
     
     args = parser.parse_args()
     
@@ -97,6 +98,7 @@ def main():
     default_costs = {
         "high_margin": dict(foc=0, voc=0.5, hc=0.1, bc=0),
         "low_margin": dict(foc=0, voc=0.5, hc=20.0, bc=0),
+        "normal_margin": dict(foc=0, voc=0.5, hc=2.0, bc=0),
     }
     dc = default_costs[args.cost_case]
     foc_default, voc_default, hc_default, bc_default = dc["foc"], dc["voc"], dc["hc"], dc["bc"]

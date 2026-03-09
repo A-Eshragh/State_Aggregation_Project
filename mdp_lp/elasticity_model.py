@@ -43,23 +43,28 @@ class ElasticityModel:
 
 
 class LambdaPredictor(nn.Module):
-    """Neural network predictor for lambda using price features."""
-    def __init__(self, hidden_dim, use_p_related=True, init_mean_lambda=1.0, output_log=False):
+    """
+    Neural network predictor for lambda using price features.
+    DGP is linear in log space, so we use price-only inputs (no noise) and a compact MLP.
+    """
+    def __init__(self, hidden_dim, use_p_related=True, init_mean_lambda=1.0, output_log=False, use_price_only=True):
         """
         Args:
-            hidden_dim: Hidden layer dimension
-            use_p_related: Whether to use p_related as input
+            hidden_dim: Hidden layer dimension (32 recommended for ~100 samples)
+            use_p_related: Whether to use p_related as input (exp c)
             init_mean_lambda: Target mean lambda for initialization (default: 1.0)
-            output_log: If True, output log(λ) (unbounded); if False, output λ via Softplus (for DFL).
+            output_log: If True, output log(λ); if False, output λ via Softplus (for DFL).
+            use_price_only: If True, use only [log(p)] or [log(p), log(p_related)]; drop noise feature.
         """
         super().__init__()
-        input_dim = 3 if use_p_related else 2  # [p, p_related, noise] or [p, noise]
+        # Price-only: 1 (exp b) or 2 (exp c) inputs. Matches DGP: ln(λ) = β₀ + β₁·ln(p) + β₂·ln(p_related) + ε
+        self.input_dim = (2 if use_p_related else 1) if use_price_only else (3 if use_p_related else 2)
         self.use_p_related = use_p_related
         self.init_mean_lambda = init_mean_lambda
         self.output_log = output_log
 
         layers = [
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(self.input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -69,21 +74,18 @@ class LambdaPredictor(nn.Module):
             layers.append(nn.Softplus())  # Ensure positive lambda for DFL
         self.net = nn.Sequential(*layers)
 
-        # Initialize weights to produce reasonable lambda predictions
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """Initialize weights to produce reasonable lambda predictions."""
+        """He init for ReLU; small final-layer scale for stable λ predictions."""
         for module in self.net:
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.5)
+                nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
                 if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
+                    nn.init.zeros_(module.bias)
 
-        # Last Linear is -2 when Softplus present, else -1
         final_linear = self.net[-2] if isinstance(self.net[-1], nn.Softplus) else self.net[-1]
         with torch.no_grad():
-            # final_linear.bias.fill_(torch.log(torch.tensor(self.init_mean_lambda)).item())
             init_mean = max(float(self.init_mean_lambda), 1e-8)
             if isinstance(self.net[-1], nn.Softplus):
                 bias_init = torch.log(torch.expm1(torch.tensor(init_mean, dtype=torch.float64))).item()
@@ -95,15 +97,12 @@ class LambdaPredictor(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: (batch, input_dim) tensor where:
-               - x[:, 0] = p (selling price)
-               - x[:, 1] = p_related (if use_p_related) or noise
-               - x[:, 2] = noise (if use_p_related)
+            x: (batch, *) tensor; first columns are [log(p)] or [log(p), log(p_related)].
         Returns:
-            If output_log: log(λ) (batch,). If not: λ (batch,) predicted Poisson rates.
+            If output_log: log(λ) (batch,). If not: λ (batch,).
         """
-        out = self.net(x).squeeze(-1)
-        return out
+        x = x[:, :self.input_dim]
+        return self.net(x).squeeze(-1)
 
 
 

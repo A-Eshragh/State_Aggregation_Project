@@ -13,8 +13,9 @@ def plot_elasticity_results(results, save_dir, algo):
     """Generate all required plots for elasticity experiments."""
     save_dir = Path(save_dir)
     
-    # 1. Average total discounted reward per epoch
-    plot_reward_per_epoch(results['train_reward_per_epoch'], save_dir, algo)
+    # 1. Average total discounted reward per epoch (with optimal value line if available)
+    optimal_reward = results.get('train_optimal_reward')
+    plot_reward_per_epoch(results['train_reward_per_epoch'], save_dir, algo, optimal_reward=optimal_reward)
     
     # 2. For DFL: plot MSE (prediction loss) and full DFL loss (with regularization)
     if algo.startswith('dfl') and 'train_mse_per_epoch' in results and 'train_dfl_loss_per_epoch' in results:
@@ -40,11 +41,14 @@ def plot_elasticity_results(results, save_dir, algo):
     plot_test_obj_boxplot(results['test_obj_values'], save_dir, algo)
 
 
-def plot_reward_per_epoch(train_reward_per_epoch, save_dir, algo):
-    """Plot average total discounted reward per epoch."""
+def plot_reward_per_epoch(train_reward_per_epoch, save_dir, algo, optimal_reward=None):
+    """Plot average total discounted reward per epoch. First point is epoch 0 (initial); then 1..n_epochs. If optimal_reward is set, draw a horizontal reference line."""
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
-    epochs = range(1, len(train_reward_per_epoch) + 1)
-    ax.plot(epochs, train_reward_per_epoch, linewidth=2, color='blue' if algo.startswith('dfl') else 'red')
+    epochs = range(0, len(train_reward_per_epoch))
+    ax.plot(epochs, train_reward_per_epoch, linewidth=2, color='blue' if algo.startswith('dfl') else 'red', label='Train reward')
+    if optimal_reward is not None:
+        ax.axhline(y=optimal_reward, color='green', linestyle='--', linewidth=1.5, label='Optimal (train)')
+        ax.legend(loc='lower right', fontsize=8)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Avg Discounted Reward')
     ax.set_title(f'{algo.upper()} - Training Reward per Epoch')
@@ -97,11 +101,11 @@ def plot_lambda_histograms(train_lambda_pred, train_lambda_true,
 
 
 def plot_test_obj_boxplot(test_obj_values, save_dir, algo):
-    """Plot box plot of final optimal value on test set."""
+    """Plot box plot: for each test sample, LP optimal value when MDP uses *predicted* λ (not true-MDP value)."""
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
-    ax.boxplot([test_obj_values], labels=[algo.upper()])
-    ax.set_ylabel('Optimal Value')
-    ax.set_title(f'{algo.upper()} - Test Set Optimal Values')
+    ax.boxplot([test_obj_values], tick_labels=[algo.upper()])
+    ax.set_ylabel('LP optimal value')
+    ax.set_title(f'{algo.upper()} - Test: LP optimal under predicted λ (one per sample)')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     plt.savefig(save_dir / 'test_obj_boxplot.png', dpi=300, bbox_inches='tight')
