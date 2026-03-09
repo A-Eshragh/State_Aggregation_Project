@@ -98,16 +98,19 @@ def prepare_elasticity_data(args):
         feats = torch.stack([p, noise], dim=1)
         prices_tensor = p
     
-    # Split into train/test
-    train_size = int(0.8 * args.n_samples) if args.n_samples > 1 else 1
+    # Split into train/test (default 50/50)
+    train_frac = getattr(args, 'train_frac', 0.5)
+    train_size = int(train_frac * args.n_samples) if args.n_samples > 1 else 1
     test_size = args.n_samples - train_size
     if args.n_samples == 1:
         train_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
         test_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
     else:
+        gen = torch.Generator().manual_seed(42)
         train_dataset, test_dataset = random_split(
             TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true),
-            [train_size, test_size]
+            [train_size, test_size],
+            generator=gen,
         )
     # Zihao
     # if args.mode == 'train':
@@ -218,15 +221,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     device = torch.device("cpu")
     hyperparam = args.hyperparam
     learning_rate = hyperparam['lr']
-    hidden_dim = hyperparam['hidden_dim']
+    hidden_dim = hyperparam['hidden_dim']  # 32 default; works well for ~100 samples
     if args.algo == 'twostage':
-        hidden_dim = 128  # more capacity for two-stage only (ln(p) feats + log-space loss)
-        learning_rate = 0.0005  # lower LR for two-stage: stabler convergence, better fit
+        learning_rate = 0.001  # two-stage LR
     use_p_related = args.experiment_type == 'c'
     
-    init_mean_lambda = mean_lambda if mean_lambda is not None else 1.0
+    # Both DFL and two-stage start at λ=1 (neutral) for fair comparison
+    init_mean_lambda = 1.0
     output_log = args.algo == 'twostage'  # log-space prediction only for two-stage (not DFL)
-    pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda, output_log=output_log).to(device)
+    pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda, output_log=output_log, use_price_only=True).to(device)
 
     # Optional: learn a soft state aggregation mapping jointly with the predictor under DFL variants.
     agg = None
@@ -277,6 +280,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     
     print(f"[Training] Starting: {args.n_epochs} epochs, algo={args.algo}")
     start_time = time.time()
+    # Mean optimal value on train set (for plotting reference line on reward graph)
+    train_obj_true_all = []
+    for batch in train_loader:
+        _, obj_true, _, _, _, _ = batch
+        train_obj_true_all.append(obj_true)
+    train_optimal_reward = torch.cat(train_obj_true_all).mean().item()
 
     # qpth solver (only used for dfl_qpth)
     qp_solver = None
@@ -297,7 +306,61 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     #     # qpth no-agg is already very expensive; keep I/O overhead minimal.
     #     checkpoint_every = max(checkpoint_every, 10)
     #     save_full_partial = False
-    
+
+    # Epoch 0: evaluate initial policy (no training step) so DFL and two-stage both start at same point on plot
+    pred_model.eval()
+    initial_rewards = []
+    with torch.no_grad():
+        for batch_data in train_loader:
+            feats, obj_true, lambda_true, prices, y_true, dual_true = batch_data
+            batch_size = feats.shape[0]
+            if args.algo == 'twostage':
+                feats_for_pred = feats.clone()
+                feats_for_pred[:, 0] = torch.log(feats[:, 0] + 1e-10)
+                if use_p_related and feats.shape[1] >= 3:
+                    feats_for_pred[:, 1] = torch.log(feats[:, 1] + 1e-10)
+                lambda_pred = torch.exp(pred_model(feats_for_pred))
+            else:
+                lambda_pred = pred_model(feats)
+            if use_p_related:
+                p = prices[:, 0]
+            else:
+                p = prices if prices.dim() == 1 else prices
+            mdp = create_inventory_from_lambda(
+                lambda_pred, args.b_max, args.s_max, args.q_max, args.d_max,
+                args.foc, args.voc, args.hc, args.bc, args.beta, p
+            )
+            mdp_true = create_inventory_from_lambda(
+                lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                args.foc, args.voc, args.hc, args.bc, args.beta, p
+            )
+            S = mdp.P.shape[1]
+            gamma = mdp.build_gamma(batch_size, S, device)
+            gamma = torch.clamp(gamma, min=1e-8)
+            gamma = gamma / gamma.sum(dim=1, keepdim=True)
+            if args.algo in ("dfl", "dfl_qpth"):
+                P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
+                if agg is not None:
+                    P_use, r_use, gamma_use, _ = agg(P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5))
+                H_use = mdp.build_H(P_use)
+                r_flat_use = r_use.reshape(batch_size, -1)
+                if args.algo == "dfl":
+                    y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                else:
+                    y_star = solve_occupancy_qp_qpth(
+                        H_use, r_flat_use, gamma_use,
+                        reg=getattr(args, "qp_reg", 0.5), qp_solver=qp_solver
+                    )
+                pi_true, _ = occupancy_to_policy(y_star, S, args.q_max + 1)
+            else:
+                y_pred, _, _, _ = solve_lp(mdp, lp_solver)
+                gamma_use = gamma
+                pi_true, _ = occupancy_to_policy(y_pred, S, args.q_max + 1)
+            v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
+            initial_rewards.append(v_true.mean().item())
+    initial_reward = float(np.mean(initial_rewards))
+    pred_model.train()
+
     for epoch in range(args.n_epochs):
         train_loss = 0.0
         obj_loss = 0.0
@@ -393,9 +456,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
                     pi_true, _ = occupancy_to_policy(y_star, S, args.q_max + 1)
-                    v_true = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
-                    train_reward_list.append(v_true.mean().item())
-
+                    v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
+                    epoch_rewards.append(v_true.mean().item())
+                y_occupancy_pred = y_star.detach()  # reuse for policy analysis (no extra solve)
 
                 violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
                 rho = 100
@@ -422,12 +485,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
 
                 epoch_mse.append(pred_loss.item())
 
-                reward = v_star.mean().item()
-                epoch_rewards.append(reward)
                 epoch_lambda_pred.append(lambda_pred.detach())
                 epoch_lambda_true.append(lambda_true)
 
-                # Gradient magnitudes for weight balance via autograd.grad (single forward graph, no extra backward)
+                # Gradient magnitudes for logging (no longer used to adapt loss_weight)
                 def _grad_norm_from_grads(grads):
                     total = sum(g.pow(2).sum().item() for g in grads if g is not None)
                     return float(np.sqrt(total)) if total > 0 else 0.0
@@ -443,15 +504,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 g_pred_loss = _grad_norm_from_grads(grads_p)
                 epoch_grad_norm_pred_loss.append(g_pred_loss)
 
-                eps = 1e-12
-                w_raw = g_v_star / (g_pred_loss + eps)
-                beta_ema = 0.9
-                args.loss_weight = beta_ema * args.loss_weight + (1 - beta_ema) * float(w_raw)
-                w_min, w_max = 1e-4, 1e4
-                args.loss_weight = float(np.clip(args.loss_weight, w_min, w_max))
-
-                # dfl_loss_final = dfl_loss + args.loss_weight * pred_loss
-                dfl_loss_final = dfl_loss + 10000 * pred_loss
+                # Use fixed loss_weight from args (no adaptation)
+                dfl_loss_final = dfl_loss + args.loss_weight * pred_loss
                 optimizer.zero_grad()
                 dfl_loss_final.backward()
 
@@ -479,40 +533,42 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     gamma = mdp.build_gamma(batch_size, S, device)
     
                     pi_pred, _ = occupancy_to_policy(y_pred, S, args.q_max + 1)
-                    v_true = eval_pi_on_true_mdp(mdp_true, pi_pred, gamma)
-                    train_reward_list.append(v_true.mean().item())
+                    v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_pred, gamma)
+                    epoch_rewards.append(v_true.mean().item())
                 
                 # Track prediction loss for plotting
                 epoch_twostage_loss.append(pred_loss.item())
-                
-                # For two-stage, reward is the objective value (positive = better)
-                reward = obj_hat.mean().item()
-                epoch_rewards.append(reward)
                 epoch_lambda_pred.append(lambda_pred.detach())
                 epoch_lambda_true.append(lambda_true)
+                y_occupancy_pred = y_pred  # reuse for policy analysis (no extra solve)
                 
                 loss = pred_loss
                 optimizer.zero_grad()
                 loss.backward()
                 train_loss += loss.item()
             
-            with torch.no_grad():
-                if args.algo not in ("dfl", "dfl_qpth"):
-                    mdp_true = create_inventory_from_lambda(
-                        lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
-                        args.foc, args.voc, args.hc, args.bc, args.beta, p
-                    )
-                _y_pa_pred, _, dual_pred, _ = solve_lp(mdp, lp_solver)
-                _y_pa_oracle, _, dual_oracle, _ = solve_lp(mdp_true, lp_solver)
-                _y_p = _y_pa_pred.view(batch_size, _pa_n_states, _pa_n_actions)
-                _y_o = _y_pa_oracle.view(batch_size, _pa_n_states, _pa_n_actions)
-                epoch_order_pred.append((_y_p * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
-                epoch_order_oracle.append((_y_o * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
-                epoch_inv_pred.append((_y_p.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
-                epoch_inv_oracle.append((_y_o.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
+            if getattr(args, 'policy_analysis', False):
+                with torch.no_grad():
+                    if args.algo not in ("dfl", "dfl_qpth"):
+                        mdp_true = create_inventory_from_lambda(
+                            lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                            args.foc, args.voc, args.hc, args.bc, args.beta, p
+                        )
+                    if agg is None and y_occupancy_pred.shape[1] == _pa_n_states * _pa_n_actions:
+                        _y_pa_pred = y_occupancy_pred
+                    else:
+                        _y_pa_pred, _, dual_pred, _ = solve_lp(mdp, lp_solver)
+                    _y_pa_oracle, _, dual_oracle, _ = solve_lp(mdp_true, lp_solver)
+                    _y_p = _y_pa_pred.view(batch_size, _pa_n_states, _pa_n_actions)
+                    _y_o = _y_pa_oracle.view(batch_size, _pa_n_states, _pa_n_actions)
+                    epoch_order_pred.append((_y_p * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
+                    epoch_order_oracle.append((_y_o * _pa_action_qty.view(1, 1, -1)).sum(dim=(1, 2)))
+                    epoch_inv_pred.append((_y_p.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
+                    epoch_inv_oracle.append((_y_o.sum(-1) * _pa_inv_level.view(1, -1)).sum(1))
 
             optimizer.step()
         
+        train_reward_list.append(float(np.mean(epoch_rewards)))
         train_time_list.append(time.time() - start_time)
         sa_time_sec_per_epoch.append(epoch_sa_time)
         solver_time_sec_per_epoch.append(epoch_solver_time)
@@ -541,24 +597,29 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             else:
                 train_twostage_loss_list.append(0.0)
         
-        # Policy analysis: aggregate per-epoch ordering/inventory bias
-        _ep_ord_pred = torch.cat(epoch_order_pred)
-        _ep_ord_oracle = torch.cat(epoch_order_oracle)
-        _ep_inv_pred = torch.cat(epoch_inv_pred)
-        _ep_inv_oracle = torch.cat(epoch_inv_oracle)
+        # Policy analysis: aggregate per-epoch (or placeholders when --policy_analysis not set)
         _ep_lam_pred = torch.cat(epoch_lambda_pred)
         _ep_lam_true = torch.cat(epoch_lambda_true)
-        _ep_ord_bias = _ep_ord_pred - _ep_ord_oracle
-        train_order_bias_per_epoch.append(float(_ep_ord_bias.mean()))
-        train_inv_bias_per_epoch.append(float((_ep_inv_pred - _ep_inv_oracle).mean()))
         train_lambda_bias_per_epoch.append(float((_ep_lam_pred - _ep_lam_true).mean()))
-        train_frac_over_order_per_epoch.append(float((_ep_ord_bias > 0).float().mean()))
+        if getattr(args, 'policy_analysis', False) and epoch_order_pred:
+            _ep_ord_pred = torch.cat(epoch_order_pred)
+            _ep_ord_oracle = torch.cat(epoch_order_oracle)
+            _ep_inv_pred = torch.cat(epoch_inv_pred)
+            _ep_inv_oracle = torch.cat(epoch_inv_oracle)
+            _ep_ord_bias = _ep_ord_pred - _ep_ord_oracle
+            train_order_bias_per_epoch.append(float(_ep_ord_bias.mean()))
+            train_inv_bias_per_epoch.append(float((_ep_inv_pred - _ep_inv_oracle).mean()))
+            train_frac_over_order_per_epoch.append(float((_ep_ord_bias > 0).float().mean()))
+        else:
+            train_order_bias_per_epoch.append(0.0)
+            train_inv_bias_per_epoch.append(0.0)
+            train_frac_over_order_per_epoch.append(0.0)
         
         if (epoch + 1) % 1 == 0:
-            print(f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}'
-                  f', λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
-                  f', order_bias={train_order_bias_per_epoch[-1]:+.4f}'
-                  f', frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}')
+            msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
+            if getattr(args, 'policy_analysis', False):
+                msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
+            print(msg)
         
         should_checkpoint = ((epoch + 1) % checkpoint_every == 0) or (epoch == 0) or ((epoch + 1) == args.n_epochs)
         if should_checkpoint and hasattr(args, 'save_dir') and args.save_dir:
@@ -570,7 +631,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 import json
                 checkpoint_data = {
                     'epoch': epoch + 1,
-                    'train_reward_per_epoch': [float(r) for r in train_reward_list],
+                    'train_reward_per_epoch': [float(initial_reward)] + [float(r) for r in train_reward_list],
                     'train_time': train_time_list.copy(),
                     'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
                     'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
@@ -583,7 +644,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     'epoch': epoch + 1,
                     'n_epochs': args.n_epochs,
                     'status': 'training_in_progress',
-                    'train_reward_per_epoch': [float(r) for r in train_reward_list],
+                    'train_reward_per_epoch': [float(initial_reward)] + [float(r) for r in train_reward_list],
                     'train_mse_per_epoch': [float(x) for x in train_mse_list],
                     'train_dfl_loss_per_epoch': [float(x) for x in train_dfl_loss_list],
                     'train_twostage_loss_per_epoch': [float(x) for x in train_twostage_loss_list],
@@ -611,6 +672,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 import traceback
                 traceback.print_exc()
                 raise
+
+    train_reward_list = [initial_reward] + train_reward_list
     
     print(f"[Training] Complete. Time: {time.time() - start_time:.2f}s")
     
@@ -691,7 +754,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             eval_backup = args.save_dir / 'evaluation_backup.json'
             import json
             eval_data = {
-                'test_obj_true': test_obj_true,
+                'test_obj_true': torch.cat(test_obj_true).cpu().numpy().tolist(),
                 'test_obj_values': test_obj_values.cpu().numpy().tolist(),
                 'test_lambda_pred': test_lambda_pred.cpu().numpy().tolist(),
                 'test_lambda_true': test_lambda_true.cpu().numpy().tolist(),
@@ -725,6 +788,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         'train_inv_bias_per_epoch': train_inv_bias_per_epoch,
         'train_lambda_bias_per_epoch': train_lambda_bias_per_epoch,
         'train_frac_over_order_per_epoch': train_frac_over_order_per_epoch,
+        'train_optimal_reward': train_optimal_reward,  # mean optimal on train (for reward plot reference)
     }
     # Summary for loss-weight tuning: last-epoch gradient norms and MSE value
     if train_mse_list and train_grad_norm_vstar_list and train_grad_norm_pred_loss_list:
