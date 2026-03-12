@@ -223,12 +223,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     learning_rate = hyperparam['lr']
     hidden_dim = hyperparam['hidden_dim']  # 32 default; works well for ~100 samples
     if args.algo == 'twostage':
-        learning_rate = 0.001  # two-stage LR
+        learning_rate = 0.003  # two-stage: slightly higher LR for better prediction fit
+        hidden_dim = max(hidden_dim, 64)   # more capacity so predictor fits DGP better
     use_p_related = args.experiment_type == 'c'
     
     # Both DFL and two-stage start at λ=1 (neutral) for fair comparison
-    init_mean_lambda = 1.0
-    output_log = args.algo == 'twostage'  # log-space prediction only for two-stage (not DFL)
+    # Init λ at mean train λ for both DFL and twostage when available
+    init_mean_lambda = mean_lambda if mean_lambda is not None else 1.0
+    # Two-stage: net outputs log λ, then lambda_pred = exp(...) for LP and for loss (MSE on raw λ, same as DFL). DFL: net outputs λ via Softplus.
+    output_log = args.algo == 'twostage'
     pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, init_mean_lambda=init_mean_lambda, output_log=output_log, use_price_only=True).to(device)
 
     # Optional: learn a soft state aggregation mapping jointly with the predictor under DFL variants.
@@ -371,6 +374,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         epoch_lambda_true = []
         epoch_mse = []  # For DFL: track MSE per batch
         epoch_dfl_loss = []  # For DFL: track full loss per batch
+        epoch_vstar = []  # For DFL: v* (reward) per batch
+        epoch_aug_lag = []  # For DFL: constraint penalty per batch
         epoch_twostage_loss = []  # For two-stage: track prediction loss per batch
         epoch_grad_norm_vstar = []  # For DFL: ||∇_θ v*|| per batch
         epoch_grad_norm_pred_loss = []  # For DFL: ||∇_θ pred_loss|| per batch
@@ -447,21 +452,20 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     raise ValueError(f"Invalid algorithm: {args.algo}")
 
 
-                # ZIHAO
-                # Evaluate decision quality with TRUE rewards (standard DFL).
+                # Evaluate decision quality: use same formulation as DFL loss (r_true^T y_star) for train_reward metric.
                 with torch.no_grad():
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
                                                             args.foc, args.voc, args.hc, args.bc, args.beta,
                                                             p)
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
+                    v_star_log = (r_true * y_star).sum(dim=1).mean().item()
+                    epoch_rewards.append(v_star_log)
                     pi_true, _ = occupancy_to_policy(y_star, S, args.q_max + 1)
-                    v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
-                    epoch_rewards.append(v_true.mean().item())
                 y_occupancy_pred = y_star.detach()  # reuse for policy analysis (no extra solve)
 
                 violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
-                rho = 100
+                rho = getattr(args, 'aug_lag_rho', 10.0)
                 aug_lag = rho * violation.pow(2).mean()
                 v_star = torch.sum(r_true * y_star, dim=1)
                 dfl_loss = -v_star.mean() + aug_lag
@@ -484,6 +488,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 obj_loss += obj_diff.item()
 
                 epoch_mse.append(pred_loss.item())
+                epoch_vstar.append(v_star.mean().item())
+                epoch_aug_lag.append(aug_lag.item())
 
                 epoch_lambda_pred.append(lambda_pred.detach())
                 epoch_lambda_true.append(lambda_true)
@@ -519,9 +525,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                 # Gamma is already clamped in solve_lp() for non-degeneracy
                 y_pred, obj_hat, _, _ = solve_lp(mdp, lp_solver)
                 obj_hat = obj_hat.detach()  # No gradients through LP
-                # Log-space MSE for two-stage only (matches DGP: ln(λ) = β₀ + β₁ ln(p) + ε)
-                log_lambda_true = torch.log(lambda_true + 1e-10)
-                pred_loss = pred_loss_fn(log_lambda_pred, log_lambda_true)
+                # Raw lambda MSE — same as DFL for consistency (net outputs log λ, lambda_pred = exp(log_lambda_pred) for LP and loss)
+                pred_loss = pred_loss_fn(lambda_pred, lambda_true)
                 obj_diff = obj_diff_fn(obj_hat, obj_true)
                 obj_loss += obj_diff.item()
                 with torch.no_grad():
@@ -529,13 +534,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                         lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
                         args.foc, args.voc, args.hc, args.bc, args.beta, p
                     )
-                    S = mdp.P.shape[1]
-                    gamma = mdp.build_gamma(batch_size, S, device)
-    
-                    pi_pred, _ = occupancy_to_policy(y_pred, S, args.q_max + 1)
-                    v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_pred, gamma)
-                    epoch_rewards.append(v_true.mean().item())
-                
+                    r_true = mdp_true.r.reshape(batch_size, -1)
+                    v_star_log = (r_true * y_pred).sum(dim=1).mean().item()
+                    epoch_rewards.append(v_star_log)
+                    
                 # Track prediction loss for plotting
                 epoch_twostage_loss.append(pred_loss.item())
                 epoch_lambda_pred.append(lambda_pred.detach())
@@ -617,6 +619,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
         
         if (epoch + 1) % 1 == 0:
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
+            if args.algo in ('dfl', 'dfl_qpth') and epoch_vstar and epoch_aug_lag and epoch_mse:
+                msg += f'  |  v*={np.mean(epoch_vstar):.2f}  aug_lag={np.mean(epoch_aug_lag):.2f}  pred_MSE={np.mean(epoch_mse):.4f}'
             if getattr(args, 'policy_analysis', False):
                 msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
             print(msg)
