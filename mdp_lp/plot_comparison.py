@@ -130,7 +130,17 @@ def plot_test_obj_comparison(dfl: dict, ts: dict, cost_case: str, out_dir: Path)
     fig, ax = plt.subplots(figsize=(6, 4))
     data = [x for x in [v_dfl, v_ts] if len(x) > 0]
     labels = (["DFL", "Two-stage"]) if len(v_dfl) and len(v_ts) else (["DFL"] if len(v_dfl) else ["Two-stage"])
-    ax.boxplot(data, tick_labels=labels)
+    bp = ax.boxplot(data, tick_labels=labels)
+    # Annotate median (line in box) value above each box
+    for i, vals in enumerate([v_dfl, v_ts]):
+        if len(vals) == 0:
+            continue
+        med = float(np.median(vals))
+        x_pos = i + 1
+        q75 = float(np.percentile(vals, 75))
+        q25 = float(np.percentile(vals, 25))
+        y_pos = q75 + 0.05 * (q75 - q25) if q75 != q25 else q75 + 0.05 * (np.max(vals) - np.min(vals)) if np.max(vals) != np.min(vals) else q75 + 1
+        ax.text(x_pos, y_pos, f"median = {med:.1f}", va="bottom", ha="center", fontsize=9)
     ax.set_ylabel("LP optimal value")
     ax.set_title(f"Exp B – {cost_case.replace('_', ' ').title()} – Test set: LP optimal under predicted λ\n(one value per test sample)")
     ax.spines["top"].set_visible(False)
@@ -142,29 +152,31 @@ def plot_test_obj_comparison(dfl: dict, ts: dict, cost_case: str, out_dir: Path)
 
 
 def plot_loss_comparison(dfl: dict, ts: dict, cost_case: str, out_dir: Path) -> None:
-    """DFL: MSE and full loss; Two-stage: prediction loss. Two subplots."""
+    """Top: DFL MSE + two-stage pred loss on same axes. Bottom: DFL full loss only."""
     mse = dfl.get("train_mse_per_epoch")
     dfl_loss = dfl.get("train_dfl_loss_per_epoch")
     ts_loss = ts.get("train_twostage_loss_per_epoch")
     if not mse and not dfl_loss and not ts_loss:
         return
     fig, axes = plt.subplots(2, 1, figsize=(7, 5), sharex=True)
+    # Top: prediction loss comparison (DFL MSE vs two-stage pred loss)
     ax = axes[0]
-    if dfl_loss:
-        ax.plot(range(1, len(dfl_loss) + 1), dfl_loss, color="#2E59A8", linewidth=2, label="DFL full loss")
     if mse:
-        ax.plot(range(1, len(mse) + 1), mse, color="green", linewidth=1.5, linestyle="--", label="DFL MSE")
-    ax.set_ylabel("Loss")
-    ax.set_title("DFL losses")
-    ax.legend(loc="best", fontsize=8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax = axes[1]
+        ax.plot(range(1, len(mse) + 1), mse, color="#1B9E77", linewidth=2, label="DFL pred (MSE)")
     if ts_loss:
         ax.plot(range(1, len(ts_loss) + 1), ts_loss, color="#C84B31", linewidth=2, label="Two-stage pred loss")
     ax.set_ylabel("Loss")
+    ax.set_title("Prediction loss (MSE on λ)")
+    ax.legend(loc="best", fontsize=8)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    # Bottom: DFL full loss only
+    ax = axes[1]
+    if dfl_loss:
+        ax.plot(range(1, len(dfl_loss) + 1), dfl_loss, color="#2E59A8", linewidth=2, label="DFL full loss")
+    ax.set_ylabel("Loss")
     ax.set_xlabel("Epoch")
-    ax.set_title("Two-stage loss")
+    ax.set_title("DFL full loss (-v* + aug_lag + w·MSE)")
     ax.legend(loc="best", fontsize=8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
