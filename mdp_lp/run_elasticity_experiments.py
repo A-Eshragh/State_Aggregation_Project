@@ -42,6 +42,7 @@ def main():
     parser.add_argument('--p_lognormal_std', type=float, default=1.0, help='Std of log(p) (higher = wider price spread; can be >1)')
     parser.add_argument('--p_related_lognormal_mean', type=float, default=8.0, help='Mean of log(p_related) (experiment c)')
     parser.add_argument('--p_related_lognormal_std', type=float, default=1.0, help='Std of log(p_related) (experiment c; can be >1)')
+    parser.add_argument('--fixed_p', action='store_true', help='If set, p = [1, 2, ..., n_samples] (no two close p; avoids lognormal)')
     
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
@@ -166,6 +167,8 @@ def main():
         full_data = {**args_dict, **results_serializable}
         full_data['status'] = 'complete'
         full_data['epoch'] = args.n_epochs
+        if getattr(args, 'fixed_p', False) and p is not None:
+            full_data['p_values_used'] = convert_to_json_serializable(p)
         result_file.write_text(json.dumps(full_data, indent=4))
         
         if not result_file.exists() or result_file.stat().st_size == 0:

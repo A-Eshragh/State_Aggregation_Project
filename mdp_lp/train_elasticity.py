@@ -34,9 +34,14 @@ def prepare_elasticity_data(args):
         p = torch.ones(args.n_samples, device=device) * args.p_constant
         p_related = None
     elif args.experiment_type == 'b':
-        p_mean = args.p_lognormal_mean
-        p_std = args.p_lognormal_std
-        p = torch.exp(torch.randn(args.n_samples, device=device) * p_std + np.log(p_mean))
+        if getattr(args, 'fixed_p', False):
+            # Manual p: exactly [1, 2, ..., n_samples]. Sample i gets price p_i = i+1. No randomness, no two close p.
+            p = torch.arange(1, args.n_samples + 1, dtype=torch.float32, device=device)
+            print(f"[Data Prep] Manual p = [1, 2, ..., {args.n_samples}] (one integer price per sample)")
+        else:
+            p_mean = args.p_lognormal_mean
+            p_std = args.p_lognormal_std
+            p = torch.exp(torch.randn(args.n_samples, device=device) * p_std + np.log(p_mean))
         p_related = None
     elif args.experiment_type == 'c':
         p_mean = args.p_lognormal_mean
@@ -310,7 +315,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
     #     checkpoint_every = max(checkpoint_every, 10)
     #     save_full_partial = False
 
-    # Epoch 0: evaluate initial policy (no training step) so DFL and two-stage both start at same point on plot
+    # Epoch 0: same metric as epochs 1+ for both DFL and twostage — (r_true · y_star) at init, so they start at the same point.
     pred_model.eval()
     initial_rewards = []
     with torch.no_grad():
@@ -341,6 +346,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
             gamma = mdp.build_gamma(batch_size, S, device)
             gamma = torch.clamp(gamma, min=1e-8)
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
+            gamma_use = gamma
             if args.algo in ("dfl", "dfl_qpth"):
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 if agg is not None:
@@ -354,13 +360,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                         H_use, r_flat_use, gamma_use,
                         reg=getattr(args, "qp_reg", 0.5), qp_solver=qp_solver
                     )
-                pi_true, _ = occupancy_to_policy(y_star, S, args.q_max + 1)
             else:
-                y_pred, _, _, _ = solve_lp(mdp, lp_solver)
-                gamma_use = gamma
-                pi_true, _ = occupancy_to_policy(y_pred, S, args.q_max + 1)
-            v_true, _ = eval_pi_on_true_mdp(mdp_true, pi_true, gamma_use)
-            initial_rewards.append(v_true.mean().item())
+                y_star, _, _, _ = solve_lp(mdp, lp_solver)
+            r_true = mdp_true.r.reshape(batch_size, -1)
+            v_star_init = (r_true * y_star).sum(dim=1).mean().item()
+            initial_rewards.append(v_star_init)
     initial_reward = float(np.mean(initial_rewards))
     pred_model.train()
 
@@ -452,7 +456,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity, mean_l
                     raise ValueError(f"Invalid algorithm: {args.algo}")
 
 
-                # Evaluate decision quality: use same formulation as DFL loss (r_true^T y_star) for train_reward metric.
+                # Evaluate decision quality: use (r_true^T y_star) for train_reward metric (logged).
                 with torch.no_grad():
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
                                                             args.foc, args.voc, args.hc, args.bc, args.beta,

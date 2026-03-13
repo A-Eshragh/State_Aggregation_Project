@@ -16,9 +16,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def load_results(results_root: Path, cost_case: str, algo: str) -> dict | None:
-    """Load results.json from results_root/exp_b/{cost_case}/{algo}/epochs_100/."""
-    path = results_root / "exp_b" / cost_case / algo / "epochs_100" / "results.json"
+def load_results(results_root: Path, cost_case: str, algo: str, epochs: int = 100) -> dict | None:
+    """Load results.json from results_root/exp_b/{cost_case}/{algo}/epochs_{epochs}/."""
+    path = results_root / "exp_b" / cost_case / algo / f"epochs_{epochs}" / "results.json"
     if not path.exists():
         return None
     with open(path) as f:
@@ -187,14 +187,14 @@ def plot_loss_comparison(dfl: dict, ts: dict, cost_case: str, out_dir: Path) -> 
     print(f"  Saved {out_dir / f'{cost_case}_loss_comparison.png'}")
 
 
-def plot_comparison(results_root: Path, cost_cases: list[str]) -> None:
+def plot_comparison(results_root: Path, cost_cases: list[str], epochs: int = 100) -> None:
     results_root = Path(results_root)
     out_dir = results_root / "comparison_plots"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for cost_case in cost_cases:
-        dfl = load_results(results_root, cost_case, "dfl")
-        ts = load_results(results_root, cost_case, "twostage")
+        dfl = load_results(results_root, cost_case, "dfl", epochs=epochs)
+        ts = load_results(results_root, cost_case, "twostage", epochs=epochs)
         if dfl is None or ts is None:
             continue
         plot_reward_comparison(dfl, ts, cost_case, out_dir)
@@ -205,8 +205,13 @@ def plot_comparison(results_root: Path, cost_cases: list[str]) -> None:
 
 def main():
     project_root = Path(__file__).resolve().parent.parent
-    if len(sys.argv) > 1:
-        roots = [Path(p) if Path(p).is_absolute() else project_root / p for p in sys.argv[1:]]
+    epochs = 100
+    args_list = sys.argv[1:] if len(sys.argv) > 1 else []
+    # Optional: last arg can be epochs (int) for custom run folders
+    if args_list and args_list[-1].isdigit():
+        epochs = int(args_list.pop())
+    if args_list:
+        roots = [Path(p) if Path(p).is_absolute() else project_root / p for p in args_list]
     else:
         roots = [project_root / "lagrangian_results", project_root / "l100"]
 
@@ -218,9 +223,9 @@ def main():
         if not root.exists():
             print(f"Skipping (not found): {root}")
             continue
-        print(f"Comparison plots for {root}")
+        print(f"Comparison plots for {root} (epochs={epochs})")
         cost_cases = cost_cases_l100 if (root / "exp_b" / "normal_margin").exists() else cost_cases_lagrangian
-        plot_comparison(root, cost_cases)
+        plot_comparison(root, cost_cases, epochs=epochs)
 
 
 if __name__ == "__main__":

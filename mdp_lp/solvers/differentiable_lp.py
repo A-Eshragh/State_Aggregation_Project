@@ -59,8 +59,7 @@ class DifferentiableLPSolver(autograd.Function):
         dtype = H.dtype
 
         grad_H = torch.zeros_like(H)
-        # Under the fixed-basis assumption, y_B = H_B^{-1} gamma does NOT depend on r.
-
+        # We only use r_true in the loss, so direct term is 0; no gradient through r.
         grad_r = torch.zeros_like(r)
         grad_gamma = torch.zeros_like(gamma)
 

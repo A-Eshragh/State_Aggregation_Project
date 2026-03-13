@@ -42,13 +42,18 @@ def plot_elasticity_results(results, save_dir, algo):
 
 
 def plot_reward_per_epoch(train_reward_per_epoch, save_dir, algo, optimal_reward=None):
-    """Plot average total discounted reward per epoch. First point is epoch 0 (initial); then 1..n_epochs. If optimal_reward is set, draw a horizontal reference line."""
+    """Plot average total discounted reward per epoch. First point is epoch 0 (initial); then 1..n_epochs. If optimal_reward is set, draw a horizontal reference line. Consistent y scale."""
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     epochs = range(0, len(train_reward_per_epoch))
     ax.plot(epochs, train_reward_per_epoch, linewidth=2, color='blue' if algo.startswith('dfl') else 'red', label='Train reward')
     if optimal_reward is not None:
         ax.axhline(y=optimal_reward, color='green', linestyle='--', linewidth=1.5, label='Optimal (train)')
         ax.legend(loc='lower right', fontsize=8)
+    all_y = list(train_reward_per_epoch) + ([optimal_reward] if optimal_reward is not None else [])
+    if all_y:
+        mn, mx = min(all_y), max(all_y)
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(min(0, mn) - margin, mx + margin)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Avg Discounted Reward')
     ax.set_title(f'{algo.upper()} - Training Reward per Epoch')
@@ -94,16 +99,29 @@ def plot_lambda_histograms(train_lambda_pred, train_lambda_true,
     axes[1].legend()
     axes[1].spines['top'].set_visible(False)
     axes[1].spines['right'].set_visible(False)
-    
+    # Same x scale on both panels
+    parts = [np.asarray(train_lambda_pred).reshape(-1), np.asarray(train_lambda_true).reshape(-1),
+             np.asarray(test_lambda_pred).reshape(-1), np.asarray(test_lambda_true).reshape(-1)]
+    all_lam = np.concatenate([p for p in parts if len(p) > 0]) if any(len(p) > 0 for p in parts) else np.array([])
+    if len(all_lam):
+        lo, hi = float(np.min(all_lam)), float(np.max(all_lam))
+        margin = max((hi - lo) * 0.05, 1e-6)
+        for ax in axes:
+            ax.set_xlim(lo - margin, hi + margin)
     plt.tight_layout()
     plt.savefig(save_dir / 'lambda_histograms.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 
 def plot_test_obj_boxplot(test_obj_values, save_dir, algo):
-    """Plot box plot: for each test sample, LP optimal value when MDP uses *predicted* λ (not true-MDP value)."""
+    """Plot box plot: for each test sample, LP optimal value when MDP uses *predicted* λ (not true-MDP value). Consistent y scale."""
+    test_obj_values = np.asarray(test_obj_values).reshape(-1)
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     ax.boxplot([test_obj_values], tick_labels=[algo.upper()])
+    if len(test_obj_values):
+        mn, mx = float(np.min(test_obj_values)), float(np.max(test_obj_values))
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(mn - margin, mx + margin)
     ax.set_ylabel('LP optimal value')
     ax.set_title(f'{algo.upper()} - Test: LP optimal under predicted λ (one per sample)')
     ax.spines['top'].set_visible(False)
@@ -127,10 +145,15 @@ def plot_comparison_boxplot(dfl_values, twostage_values, save_dir, filename=None
 
 
 def plot_dfl_mse(train_mse_per_epoch, save_dir):
-    """Plot MSE (prediction loss) per epoch for DFL."""
+    """Plot MSE (prediction loss) per epoch for DFL. Consistent y scale."""
+    train_mse_per_epoch = np.asarray(train_mse_per_epoch)
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     epochs = range(1, len(train_mse_per_epoch) + 1)
     ax.plot(epochs, train_mse_per_epoch, linewidth=2, color='green')
+    if len(train_mse_per_epoch):
+        mn, mx = float(np.min(train_mse_per_epoch)), float(np.max(train_mse_per_epoch))
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(max(0, mn - margin), mx + margin)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('MSE (Prediction Loss)')
     ax.set_title('DFL - Prediction Loss (MSE) per Epoch')
@@ -141,10 +164,15 @@ def plot_dfl_mse(train_mse_per_epoch, save_dir):
 
 
 def plot_dfl_loss(train_dfl_loss_per_epoch, save_dir):
-    """Plot full DFL loss (-v*_θ + λ·pred_loss) per epoch."""
+    """Plot full DFL loss (-v*_θ + λ·pred_loss) per epoch. Consistent y scale."""
+    train_dfl_loss_per_epoch = np.asarray(train_dfl_loss_per_epoch)
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     epochs = range(1, len(train_dfl_loss_per_epoch) + 1)
     ax.plot(epochs, train_dfl_loss_per_epoch, linewidth=2, color='purple')
+    if len(train_dfl_loss_per_epoch):
+        mn, mx = float(np.min(train_dfl_loss_per_epoch)), float(np.max(train_dfl_loss_per_epoch))
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(max(0, mn - margin), mx + margin)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('DFL Loss (-v*_θ + λ·MSE)')
     ax.set_title('DFL - Full Loss (with Regularization) per Epoch')
@@ -155,11 +183,18 @@ def plot_dfl_loss(train_dfl_loss_per_epoch, save_dir):
 
 
 def plot_grad_norms(train_grad_norm_vstar_per_epoch, train_grad_norm_pred_loss_per_epoch, save_dir):
-    """Plot ||∇_θ v*|| and ||∇_θ pred_loss|| per epoch for weight balance (dℓ/dw = MSE)."""
+    """Plot ||∇_θ v*|| and ||∇_θ pred_loss|| per epoch for weight balance (dℓ/dw = MSE). Consistent y scale."""
+    vstar = np.asarray(train_grad_norm_vstar_per_epoch)
+    pred = np.asarray(train_grad_norm_pred_loss_per_epoch)
     fig, ax = plt.subplots(figsize=(6.5, 2))
-    epochs = range(1, len(train_grad_norm_vstar_per_epoch) + 1)
-    ax.plot(epochs, train_grad_norm_vstar_per_epoch, linewidth=2, color='blue', label=r'$\|\nabla_\theta v^*\|$')
-    ax.plot(epochs, train_grad_norm_pred_loss_per_epoch, linewidth=2, color='green', label=r'$\|\nabla_\theta \ell_{\mathrm{pred}}\|$')
+    epochs = range(1, len(vstar) + 1)
+    ax.plot(epochs, vstar, linewidth=2, color='blue', label=r'$\|\nabla_\theta v^*\|$')
+    ax.plot(epochs, pred, linewidth=2, color='green', label=r'$\|\nabla_\theta \ell_{\mathrm{pred}}\|$')
+    if len(vstar) or len(pred):
+        all_g = np.concatenate([vstar, pred])
+        mn, mx = float(np.min(all_g)), float(np.max(all_g))
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(max(0, mn - margin), mx + margin)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Gradient norm')
     ax.set_title('DFL - Gradient magnitudes (for weight balance)')
@@ -171,10 +206,15 @@ def plot_grad_norms(train_grad_norm_vstar_per_epoch, train_grad_norm_pred_loss_p
 
 
 def plot_twostage_loss(train_twostage_loss_per_epoch, save_dir):
-    """Plot prediction loss per epoch for two-stage."""
+    """Plot prediction loss per epoch for two-stage. Consistent y scale."""
+    train_twostage_loss_per_epoch = np.asarray(train_twostage_loss_per_epoch)
     fig, ax = plt.subplots(figsize=(6.5, 1.5))
     epochs = range(1, len(train_twostage_loss_per_epoch) + 1)
     ax.plot(epochs, train_twostage_loss_per_epoch, linewidth=2, color='orange')
+    if len(train_twostage_loss_per_epoch):
+        mn, mx = float(np.min(train_twostage_loss_per_epoch)), float(np.max(train_twostage_loss_per_epoch))
+        margin = max((mx - mn) * 0.05, 1e-9)
+        ax.set_ylim(max(0, mn - margin), mx + margin)
     ax.set_xlabel('Epochs')
     ax.set_ylabel('Prediction Loss (MSE)')
     ax.set_title('Two-stage - Prediction Loss per Epoch')
