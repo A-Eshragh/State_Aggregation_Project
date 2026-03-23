@@ -1,0 +1,16 @@
+{
+  "epoch": 1,
+  "train_reward_per_epoch": [
+    -5983.61279296875,
+    -5983.61279296875
+  ],
+  "train_time": [
+    238.7633445262909
+  ],
+  "sa_time_sec_per_epoch": [
+    0.0
+  ],
+  "solver_time_sec_per_epoch": [
+    89.82829284667969
+  ]
+}

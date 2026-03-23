@@ -1,0 +1,67 @@
+{
+  "epoch": 1,
+  "n_epochs": 100,
+  "status": "training_in_progress",
+  "train_reward_per_epoch": [
+    1811.8642578125,
+    1793.356201171875
+  ],
+  "train_mse_per_epoch": [
+    0.0
+  ],
+  "train_dfl_loss_per_epoch": [
+    0.0
+  ],
+  "train_twostage_loss_per_epoch": [
+    1156.442626953125
+  ],
+  "train_grad_norm_vstar_per_epoch": [
+    0.0
+  ],
+  "train_grad_norm_pred_loss_per_epoch": [
+    0.0
+  ],
+  "train_time": [
+    10.805311918258667
+  ],
+  "sa_time_sec_per_epoch": [
+    0.0
+  ],
+  "solver_time_sec_per_epoch": [
+    0.0
+  ],
+  "test_obj_values": null,
+  "test_lambda_pred": null,
+  "test_lambda_true": null,
+  "train_order_bias_per_epoch": [
+    0.0
+  ],
+  "train_inv_bias_per_epoch": [
+    0.0
+  ],
+  "train_lambda_bias_per_epoch": [
+    -28.91374397277832
+  ],
+  "train_frac_over_order_per_epoch": [
+    0.0
+  ],
+  "obj_true": [],
+  "obj_hat": [
+    [
+      -45.30416488647461,
+      -42.01777267456055
+    ]
+  ],
+  "train_lambda_pred": [
+    [
+      0.0008858401561155915,
+      0.03806433081626892
+    ]
+  ],
+  "train_lambda_true": [
+    [
+      11.013843536376953,
+      46.85259246826172
+    ]
+  ]
+}

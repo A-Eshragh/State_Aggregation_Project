@@ -1,0 +1,92 @@
+{
+  "epoch": 2,
+  "n_epochs": 100,
+  "status": "training_in_progress",
+  "train_reward_per_epoch": [
+    1815.033935546875,
+    2610.568359375,
+    2610.568359375
+  ],
+  "train_mse_per_epoch": [
+    3.957465648651123,
+    3.957465648651123
+  ],
+  "train_dfl_loss_per_epoch": [
+    -26051108864.0,
+    -26051108864.0
+  ],
+  "train_twostage_loss_per_epoch": [
+    0.0,
+    0.0
+  ],
+  "train_grad_norm_vstar_per_epoch": [
+    16507.365932080895,
+    16507.365932080895
+  ],
+  "train_grad_norm_pred_loss_per_epoch": [
+    112.32439571944417,
+    112.32439571944417
+  ],
+  "train_time": [
+    16.972508430480957,
+    25.781835079193115
+  ],
+  "sa_time_sec_per_epoch": [
+    0.0,
+    0.0
+  ],
+  "solver_time_sec_per_epoch": [
+    1.083747148513794,
+    2.0932624340057373
+  ],
+  "test_obj_values": null,
+  "test_lambda_pred": null,
+  "test_lambda_true": null,
+  "train_order_bias_per_epoch": [
+    0.0,
+    0.0
+  ],
+  "train_inv_bias_per_epoch": [
+    0.0,
+    0.0
+  ],
+  "train_lambda_bias_per_epoch": [
+    -0.6532025337219238,
+    -0.6532025337219238
+  ],
+  "train_frac_over_order_per_epoch": [
+    0.0,
+    0.0
+  ],
+  "obj_true": [],
+  "obj_hat": [
+    [
+      2563.45361328125,
+      2646.76806640625
+    ],
+    [
+      2563.45361328125,
+      2646.76806640625
+    ]
+  ],
+  "train_lambda_pred": [
+    [
+      48.07843017578125,
+      8.481600761413574
+    ],
+    [
+      48.07843017578125,
+      8.481600761413574
+    ]
+  ],
+  "train_lambda_true": [
+    [
+      46.85259246826172,
+      11.013843536376953
+    ],
+    [
+      46.85259246826172,
+      11.013843536376953
+    ]
+  ]
+}
