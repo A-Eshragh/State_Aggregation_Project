@@ -40,6 +40,17 @@ def plot_elasticity_results(results, save_dir, algo):
     # 4. Side-by-side box plot of final optimal value on test set
     plot_test_obj_boxplot(results['test_obj_values'], save_dir, algo)
 
+    # 5. Oracle vs predicted reward comparison
+    if 'test_oracle_values' in results:
+        plot_oracle_vs_predicted(results['test_obj_values'], results['test_oracle_values'], save_dir, algo)
+
+    # 6. Regret distribution
+    if 'test_regret' in results:
+        plot_regret_histogram(results['test_regret'], save_dir, algo)
+
+    # 7. Lambda scatter (predicted vs true)
+    plot_lambda_scatter(results['test_lambda_pred'], results['test_lambda_true'], save_dir, algo)
+
 
 def plot_reward_per_epoch(train_reward_per_epoch, save_dir, algo, optimal_reward=None):
     """Plot average total discounted reward per epoch. First point is epoch 0 (initial); then 1..n_epochs. If optimal_reward is set, draw a horizontal reference line. Consistent y scale."""
@@ -224,6 +235,138 @@ def plot_twostage_loss(train_twostage_loss_per_epoch, save_dir):
     plt.close()
 
 
+def plot_oracle_vs_predicted(test_obj_values, test_oracle_values, save_dir, algo):
+    """Box plot comparing predicted-lambda reward vs oracle (true-lambda) reward on test set."""
+    pred = np.asarray(test_obj_values).reshape(-1)
+    oracle = np.asarray(test_oracle_values).reshape(-1)
+    fig, ax = plt.subplots(figsize=(6.5, 3))
+    bp = ax.boxplot([oracle, pred], labels=['Oracle (true λ)', f'{algo.upper()} (pred λ)'],
+                    patch_artist=True)
+    bp['boxes'][0].set_facecolor('#a8d5a2')
+    bp['boxes'][1].set_facecolor('#f4a582')
+    ax.set_ylabel('Reward on True MDP')
+    ax.set_title(f'{algo.upper()} — Test Reward: Oracle vs Predicted')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # annotate means
+    for i, vals in enumerate([oracle, pred], start=1):
+        if len(vals):
+            ax.annotate(f'mean={np.mean(vals):.3f}', xy=(i, np.mean(vals)),
+                        xytext=(i + 0.3, np.mean(vals)), fontsize=8, color='black')
+    plt.savefig(save_dir / 'test_oracle_vs_predicted.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_regret_histogram(test_regret, save_dir, algo):
+    """Histogram of per-sample regret (oracle - predicted)."""
+    regret = np.asarray(test_regret).reshape(-1)
+    fig, ax = plt.subplots(figsize=(6.5, 3))
+    ax.hist(regret, bins=30, color='salmon', edgecolor='black', alpha=0.7)
+    ax.axvline(np.mean(regret), color='red', linestyle='--', linewidth=1.5,
+               label=f'Mean={np.mean(regret):.4f}')
+    ax.set_xlabel('Regret (oracle − predicted)')
+    ax.set_ylabel('Frequency')
+    ax.set_title(f'{algo.upper()} — Test Regret Distribution')
+    ax.legend()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.savefig(save_dir / 'test_regret_histogram.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_lambda_scatter(test_lambda_pred, test_lambda_true, save_dir, algo):
+    """Scatter plot of predicted vs true lambda on test set with y=x reference line."""
+    pred = np.asarray(test_lambda_pred).reshape(-1)
+    true = np.asarray(test_lambda_true).reshape(-1)
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(true, pred, alpha=0.4, s=15, color='steelblue')
+    lo = min(float(np.min(true)), float(np.min(pred)))
+    hi = max(float(np.max(true)), float(np.max(pred)))
+    margin = max((hi - lo) * 0.05, 1e-6)
+    ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
+            'k--', linewidth=1, label='y = x')
+    ax.set_xlim(lo - margin, hi + margin)
+    ax.set_ylim(lo - margin, hi + margin)
+    ax.set_xlabel('True λ')
+    ax.set_ylabel('Predicted λ')
+    ax.set_title(f'{algo.upper()} — λ Prediction Accuracy (Test)')
+    ax.legend()
+    ax.set_aspect('equal')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.savefig(save_dir / 'test_lambda_scatter.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_comparison_summary(dfl_results, twostage_results, save_dir):
+    """Side-by-side comparison of DFL vs Two-stage on test set.
+
+    Generates: reward box plot, regret box plot, and a summary bar chart.
+    Call this from the experiment runner after both methods have been evaluated.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    dfl_pred = np.asarray(dfl_results['test_obj_values']).reshape(-1)
+    ts_pred = np.asarray(twostage_results['test_obj_values']).reshape(-1)
+    # Use oracle from either (same test data)
+    oracle = np.asarray(dfl_results.get('test_oracle_values',
+                        twostage_results.get('test_oracle_values', []))).reshape(-1)
+
+    # --- 1. Reward box plot: Oracle / DFL / Two-stage ---
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    data = [oracle, dfl_pred, ts_pred] if len(oracle) else [dfl_pred, ts_pred]
+    labels = (['Oracle', 'DFL', 'Two-stage'] if len(oracle)
+              else ['DFL', 'Two-stage'])
+    colors = (['#a8d5a2', '#7fbfff', '#f4a582'] if len(oracle)
+              else ['#7fbfff', '#f4a582'])
+    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    for box, c in zip(bp['boxes'], colors):
+        box.set_facecolor(c)
+    ax.set_ylabel('Reward on True MDP')
+    ax.set_title('Test Reward Comparison')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.savefig(save_dir / 'comparison_reward_boxplot.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # --- 2. Regret box plot ---
+    if len(oracle):
+        dfl_regret = oracle - dfl_pred
+        ts_regret = oracle - ts_pred
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        bp = ax.boxplot([dfl_regret, ts_regret], labels=['DFL', 'Two-stage'], patch_artist=True)
+        bp['boxes'][0].set_facecolor('#7fbfff')
+        bp['boxes'][1].set_facecolor('#f4a582')
+        ax.set_ylabel('Regret (oracle − predicted)')
+        ax.set_title('Test Regret Comparison')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.savefig(save_dir / 'comparison_regret_boxplot.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # --- 3. Summary bar chart ---
+    metrics = {}
+    metrics['Mean Reward'] = (np.mean(dfl_pred), np.mean(ts_pred))
+    if len(oracle):
+        metrics['Mean Regret'] = (np.mean(oracle - dfl_pred), np.mean(oracle - ts_pred))
+    if 'test_lambda_mse' in dfl_results and 'test_lambda_mse' in twostage_results:
+        metrics['λ MSE'] = (dfl_results['test_lambda_mse'], twostage_results['test_lambda_mse'])
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4 * len(metrics), 3.5))
+    if len(metrics) == 1:
+        axes = [axes]
+    for ax, (name, (dfl_val, ts_val)) in zip(axes, metrics.items()):
+        bars = ax.bar(['DFL', 'Two-stage'], [dfl_val, ts_val], color=['#7fbfff', '#f4a582'])
+        ax.set_title(name)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        for bar, val in zip(bars, [dfl_val, ts_val]):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f'{val:.4f}', ha='center', va='bottom', fontsize=9)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'comparison_summary.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 

@@ -30,7 +30,6 @@ model_config = {
     "learning_rate": 0.001,
     "hidden_dim": 32,
     "use_p_related": False,
-    "init_mean_lambda": 1.0,
     "output_log": False,
 }
 
@@ -41,7 +40,7 @@ def test_dfl_ope():
 
     device = torch.device("cpu")
 
-    pred_model = LambdaPredictor(model_config["hidden_dim"], model_config["use_p_related"], model_config["init_mean_lambda"], model_config["output_log"]).to(device)
+    pred_model = LambdaPredictor(model_config["hidden_dim"], model_config["use_p_related"]).to(device)
     # optimizer = optim.Adam(pred_model.parameters(), lr=model_config["learning_rate"])
 
     lambda_pred = torch.linspace(0, 100, 101, device=device)
