@@ -66,5 +66,7 @@ def solve_occupancy_qp_qpth(
     b = gamma
 
     y = qp_solver(Q, p, G, h, A, b)
+    # PDIPM may return slightly negative values; clamp to maintain feasibility
+    y = y.clamp(min=0.0)
     return y
 

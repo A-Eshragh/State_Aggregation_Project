@@ -122,3 +122,24 @@ class SoftAggDense(nn.Module):
 
         return P_agg, r_agg, gamma_agg, {"W": W, "runtime_sec": time.time() - start}
 
+    @staticmethod
+    def disaggregate_y(y_agg: torch.Tensor, W: torch.Tensor, n_actions: int) -> torch.Tensor:
+        """Map aggregated occupancy back to the original state space.
+
+        Args:
+            y_agg:  (B, M*A) flat occupancy in the aggregated MDP
+            W:      (B, S, M) soft membership matrix from forward()
+            n_actions: number of actions A
+
+        Returns:
+            y_orig: (B, S*A) occupancy in the original state space
+        """
+        B = y_agg.shape[0]
+        S = W.shape[1]
+        M = W.shape[2]
+        A = n_actions
+
+        y_agg_3d = y_agg.view(B, M, A)                       # (B, M, A)
+        # y_orig[b, s, a] = sum_m W[b, s, m] * y_agg[b, m, a]
+        y_orig = torch.einsum("bsm,bma->bsa", W, y_agg_3d)   # (B, S, A)
+        return y_orig.reshape(B, S * A)

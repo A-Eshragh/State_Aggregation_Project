@@ -7,32 +7,42 @@ from mdp_lp.mdp_derived import InventoryLP
 from mdp_lp.inventory_poisson_grad import poisson_pmf
 
 
-def create_inventory_from_lambda(lambda_param, b_max, s_max, q_max, d_max, 
+def create_inventory_from_lambda(lambda_param, b_max, s_max, q_max,
                                   foc, voc, hc, bc, beta, selling_price):
     """
     Create InventoryLP MDP from lambda values (Poisson demand) with selling price.
-    
+
+    d_max is derived as b_max + s_max + q_max (beyond which all demands
+    produce the same MDP transition), so the Poisson is never clipped.
+
     Args:
         lambda_param: (batch,) tensor of Poisson rate parameters
-        b_max, s_max, q_max, d_max: inventory MDP parameters
+        b_max, s_max, q_max: inventory MDP parameters
         foc, voc, hc, bc: cost parameters
         beta: discount factor
         selling_price: (batch,) tensor of selling prices
-        
+
     Returns:
         InventoryLP instance with modified rewards
     """
     batch = lambda_param.shape[0]
-    
+    d_max = b_max + s_max + q_max
+
     # Convert lambda to demand probabilities using Poisson PMF
     prob_demand = poisson_pmf(lambda_param, d_max)  # (batch, d_max+1)
-    
+
+    # Collect tail probability P(D > d_max) into the last bin.
+    tail_prob = 1.0 - prob_demand.sum(dim=1, keepdim=True)
+    tail_prob = torch.clamp(tail_prob, min=0.0)
+    prob_demand = prob_demand.clone()
+    prob_demand[:, -1] = prob_demand[:, -1] + tail_prob.squeeze(1)
+
     # InventoryLP applies softmax internally, so pass logits
     epsilon = 1e-10
     prob_demand_clamped = torch.clamp(prob_demand, min=epsilon)
     prob_demand_normalized = prob_demand_clamped / prob_demand_clamped.sum(dim=1, keepdim=True)
     logits_demand = torch.log(prob_demand_normalized + epsilon)
-    
+
     mdp = InventoryLP(b_max, s_max, q_max, d_max, foc, voc, hc, bc, beta, logits_demand)
     
     # Use mdp.prob_demand (after softmax) for consistency

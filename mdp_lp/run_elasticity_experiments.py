@@ -47,9 +47,8 @@ def main():
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
     parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
-    parser.add_argument('--q_max', type=int, default=30, help='Maximum order quantity')
-    parser.add_argument('--d_max', type=int, default=30, help='Maximum demand')
-    
+    parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
+        
     # Cost parameters (asymmetric cases)
     parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin', 'normal_margin'], required=True,
                        help='high_margin: hc=0.1; low_margin: hc=20; normal_margin: hc=2')
@@ -107,7 +106,7 @@ def main():
     if args.experiment_type == 'a' or args.experiment_type == 'b':
         args.beta_2 = 0.0
     
-    set_seed(42)
+    set_seed(1)
     
     train_loader, test_loader, gt_elasticity, p, p_related = prepare_elasticity_data(args)
     
