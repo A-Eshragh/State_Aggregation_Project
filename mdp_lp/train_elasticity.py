@@ -83,7 +83,7 @@ def prepare_elasticity_data(args):
             print(f"[Data Prep] Solving MDP {i+1}/{args.n_samples}...")
         mdp = create_inventory_from_lambda(
             lambda_true[i:i+1],
-            args.b_max, args.s_max, args.q_max, args.d_max,
+            args.b_max, args.s_max, args.q_max,
             args.foc, args.voc, args.hc, args.bc, args.beta,
             p[i:i+1]
         )
@@ -194,7 +194,7 @@ def eval_y_on_true_mdp(mdp_true, y_star, gamma):
     device, dtype = P.device, P.dtype
     eps = 1e-12
     alpha = 1e-6
-    
+
     if y_star.dim() == 2:
         y = y_star.view(B, S, A)
     else:
@@ -308,7 +308,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         train_obj_true_all.append(obj_true)
     train_optimal_reward = torch.cat(train_obj_true_all).mean().item()
 
-    qp_solver = QPFunction(eps=1e-10, maxIter=10, solver=QPSolvers.CVXPY)
+    qp_solver = QPFunction(eps=1e-10, maxIter=20, solver=QPSolvers.PDIPM_BATCHED)
     checkpoint_every = int(getattr(args, "checkpoint_every", 1))
     save_full_partial = bool(getattr(args, "save_full_partial", True))
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -317,6 +317,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     #     # qpth no-agg is already very expensive; keep I/O overhead minimal.
     #     checkpoint_every = max(checkpoint_every, 10)
     #     save_full_partial = False
+
+    pred_model.train()
+    if args.algo == "dfl" or args.algo == "dfl_qpth":
+        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=0)
 
     # Epoch 0: same metric as epochs 1+ for both DFL and twostage — (r_true · y_star) at init, so they start at the same point.
     pred_model.eval()
@@ -336,11 +340,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 lambda_pred = torch.zeros_like(lambda_pred)
 
             mdp = create_inventory_from_lambda(
-                lambda_pred, args.b_max, args.s_max, args.q_max, args.d_max,
+                lambda_pred, args.b_max, args.s_max, args.q_max,
                 args.foc, args.voc, args.hc, args.bc, args.beta, p
             )
             mdp_true = create_inventory_from_lambda(
-                lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                lambda_true, args.b_max, args.s_max, args.q_max,
                 args.foc, args.voc, args.hc, args.bc, args.beta, p
             )
             S = mdp.P.shape[1]
@@ -350,28 +354,40 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma_use = gamma
             if args.algo in ("dfl", "dfl_qpth"):
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
+                _agg_info = None
                 if agg is not None:
-                    P_use, r_use, gamma_use, _ = agg(P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5))
+                    P_use, r_use, gamma_agg, _agg_info = agg(P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5))
                 H_use = mdp.build_H(P_use)
                 r_flat_use = r_use.reshape(batch_size, -1)
                 if args.algo == "dfl":
-                    y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                    if agg is not None and _agg_info is not None:
+                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                    else:
+                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
                 else:
-                    y_star = solve_occupancy_qp_qpth(
-                        H_use, r_flat_use, gamma_use,
-                        reg=getattr(args, "qp_reg", 0.1), qp_solver=qp_solver
-                    )
+                    if agg is not None and _agg_info is not None:
+                        y_star = solve_occupancy_qp_qpth(
+                            H_use, r_flat_use, gamma_agg,
+                            reg=getattr(args, "qp_reg", 0.1), qp_solver=qp_solver
+                        )
+                    else:
+                        y_star = solve_occupancy_qp_qpth(
+                            H_use, r_flat_use, gamma_use,
+                            reg=getattr(args, "qp_reg", 0.1), qp_solver=qp_solver
+                        )
+                if agg is not None and _agg_info is not None:
+                    y_star = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
             else:
                 y_star, _, _, _ = solve_lp(mdp, lp_solver)
-            r_true = mdp_true.r.reshape(batch_size, -1)
-            v_star_init = (r_true * y_star).sum(dim=1).mean().item()
+
+            with torch.no_grad():
+                v_star_init, _ = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
+            # r_true = mdp_true.r.reshape(batch_size, -1)
+            # v_star_init = (r_true * y_star).sum(dim=1).mean().item()
             initial_rewards.append(v_star_init)
     initial_reward = float(np.mean(initial_rewards))
+
     pred_model.train()
-
-    if args.algo == "dfl" or args.algo == "dfl_qpth":
-        pretrain_lambda_pred(pred_model, train_loader)
-
     for epoch in range(args.n_epochs):
         train_loss = 0.0
         obj_loss = 0.0
@@ -412,25 +428,26 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
             mdp = create_inventory_from_lambda(
                 lambda_pred_pos,
-                args.b_max, args.s_max, args.q_max, args.d_max,
+                args.b_max, args.s_max, args.q_max,
                 args.foc, args.voc, args.hc, args.bc, args.beta,
                 p
             )
             
-            if args.algo in ("dfl", "dfl_qpth"):
-                # Build gamma once (InventoryLP uses uniform gamma by default).
-                S = mdp.P.shape[1]
-                gamma = mdp.build_gamma(batch_size, S, device)
-                gamma = torch.clamp(gamma, min=1e-8)
-                gamma = gamma / gamma.sum(dim=1, keepdim=True)
+            S = mdp.P.shape[1]
+            gamma = mdp.build_gamma(batch_size, S, device)
+            gamma = torch.clamp(gamma, min=1e-8)
+            gamma = gamma / gamma.sum(dim=1, keepdim=True)
+            gamma_use = gamma
 
+            if args.algo in ("dfl", "dfl_qpth"):
                 # Optionally aggregate (P, r, gamma) into M=n_agg clusters.
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
+                _agg_info = None
                 if agg is not None:
-                    P_use, r_use, gamma_use, _info = agg(
+                    P_use, r_use, gamma_agg, _agg_info = agg(
                         P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5)
                     )
-                    epoch_sa_time += float(_info.get("runtime_sec", 0.0))
+                    epoch_sa_time += float(_agg_info.get("runtime_sec", 0.0))
 
                 H_use = mdp.build_H(P_use)
                 r_flat_use = r_use.reshape(batch_size, -1)
@@ -438,11 +455,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 if args.algo == "dfl":
                     # Differentiable LP via fixed-basis sensitivity (uses Gurobi to get a basis).
                     t0 = time.time()
-                    y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                    if agg is not None and _agg_info is not None:
+                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                    else:
+                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
                     epoch_solver_time += (time.time() - t0)
                 elif args.algo == "dfl_qpth":
                     t0 = time.time()
-                    y_star = solve_occupancy_qp_qpth(
+                    if agg is not None and _agg_info is not None:
+                        y_star = solve_occupancy_qp_qpth(
+                            H_use, r_flat_use, gamma_agg,
+                            reg=getattr(args, "qp_reg", 0.1),
+                            qp_solver=qp_solver
+                        )
+                    else:
+                        y_star = solve_occupancy_qp_qpth(
                             H_use, r_flat_use, gamma_use,
                             reg=getattr(args, "qp_reg", 0.1),
                             qp_solver=qp_solver
@@ -451,24 +478,28 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 else:
                     raise ValueError(f"Invalid algorithm: {args.algo}")
 
+                # Disaggregate occupancy back to original state space for evaluation
+                if agg is not None and _agg_info is not None:
+                    y_star = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
+
                 with torch.no_grad():
-                    mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+                    mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
                                                             args.foc, args.voc, args.hc, args.bc, args.beta,
                                                             p)
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
 
                 # 1. Augmented Lagrangian loss
-                # violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
-                # rho = getattr(args, 'aug_lag_rho', 0.1)
-                # aug_lag = rho * violation.pow(2).mean()
-                # v_star = torch.sum(r_true * y_star, dim=1)
-                # dfl_loss = -v_star.mean() + aug_lag
+                violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
+                rho = getattr(args, 'aug_lag_rho', 0.1)
+                aug_lag = rho * violation.pow(2).mean()
+                v_star = torch.sum(r_true * y_star, dim=1)
+                dfl_loss = -v_star.mean() + aug_lag
 
                 # 2. True evaluation loss
-                v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
-                dfl_loss = -v_star.mean() * 10000
-                aug_lag = torch.tensor(0.0)
+                # v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use, W=W_agg)
+                # dfl_loss = -v_star.mean() * 10000
+                # aug_lag = torch.tensor(0.0)
 
                 pred_loss = pred_loss_fn(lambda_pred, lambda_true)
 
@@ -531,12 +562,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             optimizer.step()
 
         with torch.no_grad():
-            mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max, args.d_max,
+            mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
                                                     args.foc, args.voc, args.hc, args.bc, args.beta,
                                                     p)
-            r_true = mdp_true.r.reshape(batch_size, -1)
-            H_true = mdp_true.build_H(mdp_true.P)
-            v_star = (r_true * y_star).sum(dim=1).mean().item()
+            v_eval, _ = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
+            v_star = v_eval.mean().item()
             epoch_rewards.append(v_star)
         
         train_reward_list.append(float(np.mean(epoch_rewards)))
@@ -589,7 +619,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         if (epoch + 1) % 1 == 0:
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
             if args.algo in ('dfl', 'dfl_qpth') and epoch_vstar and epoch_aug_lag and epoch_mse:
-                msg += f'  |  v*={np.mean(epoch_vstar):.2f}  aug_lag={np.mean(epoch_aug_lag):.2f}  pred_MSE={np.mean(epoch_mse):.4f}'
+                msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
             if getattr(args, 'policy_analysis', False):
                 msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
             print(msg)
@@ -704,7 +734,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             # --- Oracle: solve with true lambda ---
             mdp_true_test = create_inventory_from_lambda(
                 lambda_true,
-                args.b_max, args.s_max, args.q_max, args.d_max,
+                args.b_max, args.s_max, args.q_max,    
                 args.foc, args.voc, args.hc, args.bc, args.beta,
                 p
             )
@@ -721,7 +751,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             # --- Predicted: solve with predicted lambda, evaluate on true MDP ---
             mdp_pred = create_inventory_from_lambda(
                 lambda_pred,
-                args.b_max, args.s_max, args.q_max, args.d_max,
+                args.b_max, args.s_max, args.q_max,
                 args.foc, args.voc, args.hc, args.bc, args.beta,
                 p
             )

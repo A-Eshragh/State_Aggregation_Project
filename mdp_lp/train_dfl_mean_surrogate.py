@@ -63,7 +63,7 @@ def get_true_optimum(p_true_list, rho=10.0):
         lam_t = torch.tensor([lam_true], device=device)
         p = torch.tensor([p_val], dtype=torch.float32, device=device)
         mdp = create_inventory_from_lambda(
-            lam_t, config["b_max"], config["s_max"], config["q_max"], config["d_max"],
+            lam_t, config["b_max"], config["s_max"], config["q_max"],
             config["foc"], config["voc"], config["hc"], config["bc"], config["beta"], p)
         S = config["s_max"] + config["b_max"] + 1
         gamma = torch.ones(1, S, device=device) / S
@@ -136,12 +136,12 @@ def train_dfl_mean_surrogate(
 
         mdp_pred = create_inventory_from_lambda(
             lambda_pred,
-            config["b_max"], config["s_max"], config["q_max"], config["d_max"],
+            config["b_max"], config["s_max"], config["q_max"],
             config["foc"], config["voc"], config["hc"], config["bc"], config["beta"], p,
         )
         mdp_true = create_inventory_from_lambda(
             lambda_true,
-            config["b_max"], config["s_max"], config["q_max"], config["d_max"],
+            config["b_max"], config["s_max"], config["q_max"],
             config["foc"], config["voc"], config["hc"], config["bc"], config["beta"], p,
         )
 

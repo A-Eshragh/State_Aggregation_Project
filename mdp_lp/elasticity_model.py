@@ -77,7 +77,7 @@ class LambdaPredictor(nn.Module):
                 # nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
                 # if module.bias is not None:
                 #     nn.init.zeros_(module.bias)
-                nn.init.uniform_(module.weight, a=0.0, b=0.3) 
+                nn.init.uniform_(module.weight, a=0.0, b=0.2) 
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.1)
 
