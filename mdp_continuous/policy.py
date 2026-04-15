@@ -38,19 +38,10 @@ def occupancy_to_policy_fn(feature_model, w_star, n_actions=2):
             ys.append(y_sa)
         ys = torch.stack(ys, dim=1)  # (B, n_actions)
 
-        # Clamp negative occupancies and pick greedy action
-        ys_pos = torch.clamp(ys, min=0.0)
-        total = ys_pos.sum(dim=1, keepdim=True)
-
-        # Where total > 0, pick argmax; else uniform random
-        valid = (total.squeeze(1) > 1e-10)
-        actions = torch.argmax(ys_pos, dim=1)
-
-        # For invalid states, sample uniformly
-        if not valid.all():
-            rand_actions = torch.randint(0, n_actions, (B,), device=device)
-            actions = torch.where(valid, actions, rand_actions)
-
+        # Pick action with highest occupancy.
+        # With non-negative features + w >= 0, y >= 0 so argmax is well-defined.
+        # For signed features (RFF), relative ordering still encodes LP preference.
+        actions = torch.argmax(ys, dim=1)
         return actions
 
     return policy_fn

@@ -28,7 +28,8 @@ class CartPoleConfig:
 
     # ── Features ──
     feature_type: str = "rff"  # "rff" or "neural"
-    n_features: int = 128      # d (number of basis functions)
+    n_features: int = 128      # d (number of trial basis functions)
+    n_test_features: int = None  # m (Galerkin test dim); None → n_features // 2
     rff_bandwidth: float = 0.5
     neural_hidden: List[int] = field(default_factory=lambda: [128, 128])
 
@@ -45,6 +46,7 @@ class CartPoleConfig:
     n_epochs: int = 100
     n_iterations: int = 20       # outer iterations for iterative refinement
     dfl_lambda: float = 1.0      # penalty weight for flow residual
+    qp_eta: float = 0.01         # QP regularization: spreads LP weight across features
     exploration_eps: float = 0.1  # epsilon-greedy exploration
 
     # ── Evaluation ──

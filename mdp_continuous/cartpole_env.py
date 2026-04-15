@@ -159,11 +159,17 @@ def collect_trajectories(
     all_rewards = []
     all_next_states = []
     all_dones = []
+    all_returns = []
     init_states = []
+
+    gamma = dynamics.cfg.gamma
 
     for _ in range(n_episodes):
         s = dynamics.sample_initial_states(1, device=device)  # (1, 4)
         init_states.append(s.squeeze(0))
+
+        ep_states, ep_actions, ep_rewards = [], [], []
+        ep_next_states, ep_dones = [], []
 
         for t in range(max_steps):
             a = policy_fn(s)  # (1,)
@@ -171,20 +177,35 @@ def collect_trajectories(
             s_next = dynamics.step(s, a)  # (1, 4)
             done = dynamics.is_terminal(s_next)  # (1,)
 
-            all_states.append(s.squeeze(0))
-            all_actions.append(a.squeeze(0))
-            all_rewards.append(r.squeeze(0))
-            all_next_states.append(s_next.squeeze(0))
-            all_dones.append(done.squeeze(0))
+            ep_states.append(s.squeeze(0))
+            ep_actions.append(a.squeeze(0))
+            ep_rewards.append(r.squeeze(0))
+            ep_next_states.append(s_next.squeeze(0))
+            ep_dones.append(done.squeeze(0))
 
             if done.item():
                 break
             s = s_next
 
+        # Compute discounted returns (reward-to-go)
+        G = torch.tensor(0.0, device=device)
+        ep_returns = []
+        for r in reversed(ep_rewards):
+            G = r + gamma * G
+            ep_returns.insert(0, G)
+
+        all_states.extend(ep_states)
+        all_actions.extend(ep_actions)
+        all_rewards.extend(ep_rewards)
+        all_next_states.extend(ep_next_states)
+        all_dones.extend(ep_dones)
+        all_returns.extend(ep_returns)
+
     return {
         "states": torch.stack(all_states),
         "actions": torch.stack(all_actions),
         "rewards": torch.stack(all_rewards),
+        "returns": torch.stack(all_returns),
         "next_states": torch.stack(all_next_states),
         "dones": torch.stack(all_dones),
         "init_states": torch.stack(init_states),
@@ -194,6 +215,13 @@ def collect_trajectories(
 def random_policy(states: torch.Tensor) -> torch.Tensor:
     """Uniform random over {0, 1}."""
     return torch.randint(0, 2, (states.shape[0],), device=states.device)
+
+
+def heuristic_policy(states: torch.Tensor) -> torch.Tensor:
+    """Simple PD controller: push in the direction the pole is falling."""
+    theta = states[:, 2]
+    theta_dot = states[:, 3]
+    return ((theta + 0.5 * theta_dot) > 0).long()
 
 
 def epsilon_greedy_policy(base_policy_fn, epsilon: float = 0.1):

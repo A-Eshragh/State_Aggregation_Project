@@ -15,12 +15,12 @@ import matplotlib.pyplot as plt
 from mdp_lp.inventory_elasticity import create_inventory_from_lambda
 from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
-from mdp_lp.train_elasticity import eval_y_on_true_mdp
 
 # ── MDP parameters (same as piecewise_linear plot) ──
 B_MAX, S_MAX, Q_MAX, D_MAX = 5, 50, 30, 30
 FOC, VOC, HC, BC, BETA, PRICE = 0, 0.5, 0.1, 0, 0.95, 10.0
 LAMBDA_TRUE = 10.0
+RHO = 10000.0
 
 N_STATES = B_MAX + S_MAX + 1   # 56
 N_ACTIONS = Q_MAX + 1           # 31
@@ -60,6 +60,7 @@ def main():
     mdp_true = create_inventory_from_lambda(lam_true_t, B_MAX, S_MAX, Q_MAX,
                                              FOC, VOC, HC, BC, BETA, p_t)
     r_true = mdp_true.r.reshape(1, -1)
+    H_true = mdp_true.build_H(mdp_true.P)
     S_true = mdp_true.P.shape[1]
     gamma_true = mdp_true.build_gamma(1, S_true, torch.device("cpu"))
     gamma_true = torch.clamp(gamma_true, min=1e-8)
@@ -88,10 +89,12 @@ def main():
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(lambda_values)}")
         y, basis, mdp_pred, gamma_pred = build_mdp_and_solve(lam, solver, agg=None)
-        # Evaluate policy implied by y on the TRUE MDP
-        v_eval, _ = eval_y_on_true_mdp(mdp_true, y, gamma_true)
-        v = v_eval.sum().item()
-        L_orig.append(-v)
+        # DFL term: -r_true^T y*(λ)
+        dfl = -(r_true * y).sum().item()
+        # Penalty: ρ * ||γ_true - H_true y*(λ)||²
+        violation = gamma_true - (H_true @ y.unsqueeze(-1)).squeeze(-1)
+        pen = violation.pow(2).sum().item()
+        L_orig.append(dfl + RHO * pen)
         basis_orig.append(tuple(basis[0].tolist()))
     L_orig = np.array(L_orig)
 
@@ -106,10 +109,12 @@ def main():
             if (i + 1) % 100 == 0:
                 print(f"  {i+1}/{len(lambda_values)}")
             y, basis, mdp_pred, gamma_pred = build_mdp_and_solve(lam, solver, agg=agg_modules[n_agg])
-            # Evaluate policy implied by disaggregated y on the TRUE MDP
-            v_eval, _ = eval_y_on_true_mdp(mdp_true, y, gamma_true)
-            v = v_eval.sum().item()
-            L_agg.append(-v)
+            # DFL term: -r_true^T y*(λ)
+            dfl = -(r_true * y).sum().item()
+            # Penalty: ρ * ||γ_true - H_true y*(λ)||²
+            violation = gamma_true - (H_true @ y.unsqueeze(-1)).squeeze(-1)
+            pen = violation.pow(2).sum().item()
+            L_agg.append(dfl + RHO * pen)
             basis_agg.append(tuple(basis[0].tolist()))
         L_agg_dict[n_agg] = np.array(L_agg)
         basis_agg_dict[n_agg] = basis_agg
@@ -168,10 +173,10 @@ def main():
     idx_true = np.argmin(np.abs(lambda_values - LAMBDA_TRUE))
     ax.plot(LAMBDA_TRUE, L_orig[idx_true], 'r*', markersize=15, zorder=5)
 
-    ax.set_ylabel('DFL Loss  $L(\\lambda) = -r_{true}^T \\, y^*(\\lambda)$', fontsize=13)
+    ax.set_ylabel('$L(\\lambda) = -r_{true}^T y^*(\\lambda) + \\rho\\|\\gamma_{true} - H_{true} y^*\\|^2$', fontsize=12)
     ax.set_title(
-        f'DFL Loss Landscape: Original ({orig_n_basis} bases) vs State Aggregation (fewer bases)\n'
-        f'Fewer LP variables $\\Rightarrow$ fewer basis regions $\\Rightarrow$ smoother landscape',
+        f'Aug-Lag Landscape: Original ({orig_n_basis} bases) vs State Aggregation (fewer bases)\n'
+        f'Fewer LP variables $\\Rightarrow$ fewer basis regions $\\Rightarrow$ smoother landscape  ($\\rho$={RHO:.0f})',
         fontsize=14
     )
     ax.legend(fontsize=11, loc='upper right')
@@ -238,8 +243,8 @@ def main():
     ax3.axvline(LAMBDA_TRUE, color='red', linestyle='--', linewidth=2, label=f'$\\lambda_{{true}}$')
     ax3.plot(LAMBDA_TRUE, L_orig[idx_true], 'r*', markersize=15, zorder=5)
     ax3.set_xlim(zoom_lo, zoom_hi)
-    ax3.set_ylabel('DFL Loss $L(\\lambda)$', fontsize=13)
-    ax3.set_title('Zoomed near $\\lambda_{true}$: DFL has many kinks, state aggregation is smoother', fontsize=13)
+    ax3.set_ylabel('$L_{aug}(\\lambda)$', fontsize=13)
+    ax3.set_title(f'Zoomed near $\\lambda_{{true}}$: Aug-Lag ($\\rho$={RHO:.0f}), state aggregation is smoother', fontsize=13)
     ax3.legend(fontsize=11)
     ax3.grid(True, alpha=0.3)
 

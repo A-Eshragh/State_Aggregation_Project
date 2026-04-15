@@ -8,6 +8,43 @@ import random
 import numpy as np
 
 
+def compute_zero_grad_stats(v_star, lambda_pred, threshold=None, threshold_ratio=0.1):
+    """
+    Compute zero-gradient statistics: dV*/dλ_pred per sample.
+
+    Measures how sensitive the value function is to changes in λ_pred.
+    A high zero-grad fraction means the LP solution is insensitive to λ
+    (flat landscape, weak DFL learning signal).
+
+    Args:
+        v_star: (batch,) value tensor, must be in the computation graph.
+        lambda_pred: (batch,) or (batch,1) predicted lambda, must be in the graph.
+        threshold: absolute threshold for "near-zero".
+                   If None, uses threshold_ratio * mean|dV/dλ|.
+        threshold_ratio: fraction of mean |grad| used when threshold is None.
+
+    Returns:
+        zero_grad_frac: float in [0, 1], fraction of samples with |dV/dλ| < threshold
+        grad_mean_abs:  float, mean |dV/dλ| across the batch
+        threshold_used: float, the threshold that was applied
+    """
+    grad_lambda = torch.autograd.grad(
+        v_star.sum(), lambda_pred, retain_graph=True, allow_unused=True
+    )[0]
+
+    if grad_lambda is None:
+        return 1.0, 0.0, 0.0
+
+    abs_grad = grad_lambda.detach().abs().flatten()
+    mean_abs = abs_grad.mean().item()
+
+    if threshold is None:
+        threshold = threshold_ratio * mean_abs if mean_abs > 0 else 1e-8
+
+    zero_frac = (abs_grad < threshold).float().mean().item()
+    return zero_frac, mean_abs, threshold
+
+
 def set_seed(seed):
     """Set random seeds for reproducibility."""
     random.seed(seed)
