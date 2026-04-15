@@ -25,24 +25,28 @@ from torch import nn
 
 class SoftAggDense(nn.Module):
     """
-    Learn soft memberships W from transition dynamics and aggregate (P, r, gamma).
+    Learn soft memberships W and aggregate (P, r, gamma).
 
-    Design matches `sa_sparse.SoftAgg`:
-    - Learn destination-state embedding E (S x r_embed)
-    - Compute per-(s,a) expected embedding: phi = sum_{s'} P[s,a,s'] * E[s']
-    - Map concatenated per-action features to logits over clusters
-    - Softmax(logits / tau) gives memberships W
+    Directly learns a dense logit matrix W_logits (S x M) and applies
+    softmax(W_logits / tau) to obtain the membership matrix W.
     """
 
-    def __init__(self, n_states: int, n_actions: int, n_clusters: int, r_embed: int = 8):
+    def __init__(self, n_states: int, n_actions: int, n_clusters: int, **kwargs):
         super().__init__()
         self.n_states = int(n_states)
         self.n_actions = int(n_actions)
         self.n_clusters = int(n_clusters)
-        self.r_embed = int(r_embed)
 
-        self.dest_embed = nn.Embedding(num_embeddings=self.n_states, embedding_dim=self.r_embed)
-        self.to_logits = nn.Linear(self.n_actions * self.r_embed, self.n_clusters)
+        
+        # NOTE:Method 1: W depends on P
+        # self.W_logits = nn.Linear(n_states * n_actions, n_clusters)
+
+        # NOTE:Method 2: W doesn't depend on P and r
+        self.W_logits = nn.Parameter(torch.randn(self.n_states, self.n_clusters))
+
+        # NOTE:Method 3: Original method
+        # self.dest_embed = nn.Embedding(num_embeddings=self.n_states, embedding_dim=self.r_embed)
+        # self.to_logits = nn.Linear(self.n_actions * self.r_embed, self.n_clusters)
 
     def forward(
         self,
@@ -86,13 +90,23 @@ class SoftAggDense(nn.Module):
                 f"but got S={S},A={A}"
             )
 
-        # === (1) Build memberships W[b,s,m] from P ===
-        E = self.dest_embed.weight  # (S, r)
-        # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-        phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
-        phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
-        logits = self.to_logits(phi_cat)  # (B,S,M)
-        W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+        # === (1) Build memberships W[b,s,m] from learned logits ===
+        # NOTE: Method 1: W depends on P
+        # P_flat = P.reshape(B, S, A * S)
+        # W_logits = self.W_logits(P_flat)          # (B, S, M)
+        # W = torch.softmax(W_logits / tau, dim=-1)
+
+        # NOTE: Method 2: W doesn't depend on P and r
+        W = torch.softmax(self.W_logits / float(tau), dim=1)  # (S, M)
+        W = W.unsqueeze(0).expand(B, -1, -1)  # (B, S, M)
+
+        # NOTE: Method 3: Original method
+        # E = self.dest_embed.weight  # (S, r)
+        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+        # phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r)
+        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+        # logits = self.to_logits(phi_cat)  # (B,S,M)
+        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
 
         # Cluster masses: mass[b,m] = sum_s W[b,s,m]
         mass = W.sum(dim=1).clamp_min(eps)  # (B,M)
@@ -103,7 +117,7 @@ class SoftAggDense(nn.Module):
 
         # === (3) Aggregate transitions ===
         # Right[b,s,a,m'] = sum_{s'} P[b,s,a,s'] W[b,s',m']
-        right = torch.einsum("bsas,bsm->bsam", P, W)  # (B,S,A,M)
+        right = torch.einsum("bsaj,bjm->bsam", P, W)  # (B,S,A,M)
         # p_hat[b,m,a,m'] = sum_s W[b,s,m] Right[b,s,a,m']
         # NOTE: we must use distinct symbols for source-cluster (m) and dest-cluster (n),
         # otherwise einsum sees repeated indices incorrectly.

@@ -16,14 +16,13 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from mdp_lp.elasticity_model import ElasticityModel, LambdaPredictor
 from mdp_lp.inventory_elasticity import create_inventory_from_lambda
-from mdp_lp.utils import solve_lp
+from mdp_lp.utils import solve_lp, compute_zero_grad_stats
 from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
 from mdp_lp.solvers.differentiable_qp import DifferentiableQPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 from mdp_lp.inventory_poisson_grad import poisson_pmf
-
 
 
 def prepare_elasticity_data(args):
@@ -116,7 +115,7 @@ def prepare_elasticity_data(args):
         train_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
         test_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
     else:
-        gen = torch.Generator().manual_seed(42)
+        gen = torch.Generator().manual_seed(1)
         train_dataset, test_dataset = random_split(
             TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true),
             [train_size, test_size],
@@ -134,7 +133,7 @@ def prepare_elasticity_data(args):
     #   The occupancy QP has SA variables where S=(b_max+s_max+1) and A=(q_max+1).
     #   qpth solves dense KKT systems whose cost/memory blows up quickly with SA, especially when batching.
     #   So we intentionally keep batch size very small for dfl_qpth when n_agg=-1.
-    default_bs = 32
+    default_bs = 128
     # ZIHAO
     # if getattr(args, "algo", None) == "dfl_qpth" and getattr(args, "n_agg", -1) == -1:
     #     # Heuristic: for SA in the thousands (e.g., 151*21=3171), even B=2 can be painful on CPU.
@@ -253,15 +252,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     
     pred_model = LambdaPredictor(hidden_dim, use_p_related=use_p_related, use_price_only=True).to(device)
 
+    # SoftAggDense init consumes the global RNG and would change DataLoader shuffle vs n_agg=-1.
+    # Build it only after pretrain, with RNG save/restore so global RNG matches the no-agg run.
     agg = None
-    params = list(pred_model.parameters())
-    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth"):
-        n_states = args.b_max + args.s_max + 1
-        n_actions = args.q_max + 1
-        agg = SoftAggDense(n_states=n_states, n_actions=n_actions, n_clusters=args.n_agg, r_embed=getattr(args, "sa_r_embed", 8)).to(device)
-        params = params + list(agg.parameters())
-
-    optimizer = optim.Adam(params, lr=learning_rate)
+    optimizer = optim.Adam(pred_model.parameters(), lr=learning_rate)
     # Prediction stabilizer loss (used for training signal in both algorithms)
     pred_loss_fn = nn.MSELoss()
     # Objective-difference logging loss: keep scale interpretable (MSE would square thousands → millions)
@@ -289,6 +283,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     # For DFL: gradient magnitudes for weight balance (||∇_θ v*||, ||∇_θ pred_loss||); dℓ/dw = pred_loss
     train_grad_norm_vstar_list = []
     train_grad_norm_pred_loss_list = []
+    # For DFL: zero-gradient diagnostics (dV*/dλ_pred)
+    train_zero_grad_frac_list = []
+    train_dv_dlambda_mean_list = []
     # Policy analysis: track ordering bias per epoch (predicted-lambda policy vs oracle)
     train_order_bias_per_epoch = []
     train_inv_bias_per_epoch = []
@@ -320,7 +317,28 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
     pred_model.train()
     if args.algo == "dfl" or args.algo == "dfl_qpth":
-        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=0)
+        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=30)
+
+    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth"):
+        n_states = args.b_max + args.s_max + 1
+        n_actions = args.q_max + 1
+        _rng_state = torch.get_rng_state()
+        torch.manual_seed(42 + int(args.n_agg))
+        agg = SoftAggDense(
+            n_states=n_states,
+            n_actions=n_actions,
+            n_clusters=args.n_agg,
+            r_embed=getattr(args, "sa_r_embed", 8),
+        ).to(device)
+        torch.set_rng_state(_rng_state)
+        optimizer = optim.Adam(
+            list(pred_model.parameters()) + list(agg.parameters()),
+            lr=learning_rate,
+        )
+
+    params = list(pred_model.parameters())
+    if agg is not None:
+        params.extend(list(agg.parameters()))
 
     # Epoch 0: same metric as epochs 1+ for both DFL and twostage — (r_true · y_star) at init, so they start at the same point.
     pred_model.eval()
@@ -384,7 +402,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 v_star_init, _ = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
             # r_true = mdp_true.r.reshape(batch_size, -1)
             # v_star_init = (r_true * y_star).sum(dim=1).mean().item()
-            initial_rewards.append(v_star_init)
+            initial_rewards.extend(v_star_init.flatten().tolist())
     initial_reward = float(np.mean(initial_rewards))
 
     pred_model.train()
@@ -403,6 +421,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         epoch_twostage_loss = []  # For two-stage: track prediction loss per batch
         epoch_grad_norm_vstar = []  # For DFL: ||∇_θ v*|| per batch
         epoch_grad_norm_pred_loss = []  # For DFL: ||∇_θ pred_loss|| per batch
+        epoch_zero_grad_frac = []  # For DFL: zero-grad fraction per batch
+        epoch_dv_dlambda_mean = []  # For DFL: mean |dV*/dλ_pred| per batch
         epoch_order_pred = []   # policy analysis: E[order] under predicted-λ policy
         epoch_order_oracle = [] # policy analysis: E[order] under oracle (true-λ) policy
         epoch_inv_pred = []     # policy analysis: E[inventory] under predicted-λ policy
@@ -501,6 +521,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 # dfl_loss = -v_star.mean() * 10000
                 # aug_lag = torch.tensor(0.0)
 
+                # Zero-grad diagnostic: dV*/dλ_pred
+                # zg_frac, dv_dl_mean, _ = compute_zero_grad_stats(v_star, lambda_pred)
+                zg_frac = 0.0
+                dv_dl_mean = 0.0
+                epoch_zero_grad_frac.append(zg_frac)
+                epoch_dv_dlambda_mean.append(dv_dl_mean)
+
                 pred_loss = pred_loss_fn(lambda_pred, lambda_true)
 
                 def _grad_norm_from_grads(grads):
@@ -586,12 +613,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
             train_grad_norm_vstar_list.append(np.mean(epoch_grad_norm_vstar) if epoch_grad_norm_vstar else 0.0)
             train_grad_norm_pred_loss_list.append(np.mean(epoch_grad_norm_pred_loss) if epoch_grad_norm_pred_loss else 0.0)
+            train_zero_grad_frac_list.append(np.mean(epoch_zero_grad_frac) if epoch_zero_grad_frac else 0.0)
+            train_dv_dlambda_mean_list.append(np.mean(epoch_dv_dlambda_mean) if epoch_dv_dlambda_mean else 0.0)
         else:
             # Two-stage (or any other non-DFL mode): no DFL loss/MSE
             train_mse_list.append(0.0)
             train_dfl_loss_list.append(0.0)
             train_grad_norm_vstar_list.append(0.0)
             train_grad_norm_pred_loss_list.append(0.0)
+            train_zero_grad_frac_list.append(0.0)
+            train_dv_dlambda_mean_list.append(0.0)
             # For two-stage: track prediction loss
             if epoch_twostage_loss:
                 train_twostage_loss_list.append(np.mean(epoch_twostage_loss))
@@ -620,6 +651,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
             if args.algo in ('dfl', 'dfl_qpth') and epoch_vstar and epoch_aug_lag and epoch_mse:
                 msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
+                msg += f'  zero_grad={train_zero_grad_frac_list[-1]:.1%}  |dV/dλ|={train_dv_dlambda_mean_list[-1]:.4f}'
             if getattr(args, 'policy_analysis', False):
                 msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
             print(msg)
@@ -653,6 +685,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     'train_twostage_loss_per_epoch': [float(x) for x in train_twostage_loss_list],
                     'train_grad_norm_vstar_per_epoch': [float(x) for x in train_grad_norm_vstar_list],
                     'train_grad_norm_pred_loss_per_epoch': [float(x) for x in train_grad_norm_pred_loss_list],
+                    'train_zero_grad_frac_per_epoch': [float(x) for x in train_zero_grad_frac_list],
+                    'train_dv_dlambda_mean_per_epoch': [float(x) for x in train_dv_dlambda_mean_list],
                     'train_time': train_time_list.copy(),
                     'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
                     'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
@@ -838,6 +872,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         'train_twostage_loss_per_epoch': train_twostage_loss_list,  # Prediction loss for two-stage
         'train_grad_norm_vstar_per_epoch': train_grad_norm_vstar_list,  # ||∇_θ v*|| (DFL only)
         'train_grad_norm_pred_loss_per_epoch': train_grad_norm_pred_loss_list,  # ||∇_θ pred_loss|| (DFL only)
+        'train_zero_grad_frac_per_epoch': train_zero_grad_frac_list,  # fraction of |dV*/dλ| near zero (DFL only)
+        'train_dv_dlambda_mean_per_epoch': train_dv_dlambda_mean_list,  # mean |dV*/dλ_pred| (DFL only)
         'train_order_bias_per_epoch': train_order_bias_per_epoch,
         'train_inv_bias_per_epoch': train_inv_bias_per_epoch,
         'train_lambda_bias_per_epoch': train_lambda_bias_per_epoch,

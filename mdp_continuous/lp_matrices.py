@@ -73,8 +73,14 @@ def estimate_lp_matrices(
     # ── M = Psi^T (B - gamma P) Phi + ridge * I ──
     M = PsiT_B_Phi - gamma * PsiT_P_Phi
     if ridge > 0:
-        reg_size = min(M.shape[0], M.shape[1])
-        M[:reg_size, :reg_size] += ridge * torch.eye(reg_size, device=M.device, dtype=M.dtype)
+        # Add ridge to each m×m diagonal block (out-of-place for autograd safety)
+        m_dim, d_dim = M.shape
+        ridge_mat = torch.zeros_like(M)
+        for start in range(0, d_dim, m_dim):
+            end = min(start + m_dim, d_dim)
+            blk = end - start
+            ridge_mat[:blk, start:end] = ridge * torch.eye(blk, device=M.device, dtype=M.dtype)
+        M = M + ridge_mat
 
     # ── Cost vector: c_j = -(1/N) sum_t r_t phi_j(s_t, a_t) ──
     # Negative because LP is maximize r^T y but reduced form is minimize c^T w
