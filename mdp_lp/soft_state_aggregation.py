@@ -108,6 +108,14 @@ class SoftAggDense(nn.Module):
         # logits = self.to_logits(phi_cat)  # (B,S,M)
         # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
 
+        # NOTE: Method 4: Original method with wrong einsum
+        # E = self.dest_embed.weight  # (S, r)
+        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+        # phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
+        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+        # logits = self.to_logits(phi_cat)  # (B,S,M)
+        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+
         # Cluster masses: mass[b,m] = sum_s W[b,s,m]
         mass = W.sum(dim=1).clamp_min(eps)  # (B,M)
 
@@ -117,11 +125,10 @@ class SoftAggDense(nn.Module):
 
         # === (3) Aggregate transitions ===
         # Right[b,s,a,m'] = sum_{s'} P[b,s,a,s'] W[b,s',m']
+        # NOTE: Method 4: Original method with wrong einsum
+        # right = torch.einsum("bsas,bsm->bsam", P, W)  # (B,S,A,M)
+
         right = torch.einsum("bsaj,bjm->bsam", P, W)  # (B,S,A,M)
-        # p_hat[b,m,a,m'] = sum_s W[b,s,m] Right[b,s,a,m']
-        # NOTE: we must use distinct symbols for source-cluster (m) and dest-cluster (n),
-        # otherwise einsum sees repeated indices incorrectly.
-        # p_hat[b,m,a,n] = sum_s W[b,s,m] * right[b,s,a,n]
         p_hat = torch.einsum("bsm,bsan->bman", W, right)  # (B,M,A,M)
         P_agg = p_hat / mass[:, :, None, None]  # (B,M,A,M)
 
