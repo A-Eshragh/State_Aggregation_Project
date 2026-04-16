@@ -12,6 +12,21 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "train_cartpole",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mdp_continuous.train_cartpole",
+            "args": [
+                "--method",
+                "neural_dfl",
+                "--n_iterations",
+                "20",
+                "--n_features",
+                "128",
+            ],
+            "console": "integratedTerminal"
+        },
+        {
             "name": "all_elasticity",
             "type": "debugpy",
             "request": "launch",

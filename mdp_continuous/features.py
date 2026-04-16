@@ -165,10 +165,11 @@ class ActionIndexedFeatures(nn.Module):
     phi(s, a=0) = [f(s); 0]      (d = 2k)
     phi(s, a=1) = [0; f(s)]
 
-    where f(s) = Softplus(MLP(s)) in R^k (k = d_per_action).
+    where f(s) = softmax(MLP(s) / tau) in R^k (k = d_per_action).
 
-    This gives the LP separate control over occupancy for each action,
-    matching the discrete LP where y(s,a) is a separate variable.
+    Using softmax creates localized, soft-partition features — each feature
+    activates strongly in a different region of state space. This gives the
+    LP meaningful spatial discrimination (similar to soft state aggregation).
 
     Constraint matrix M has shape (k, 2k):
         M[:, 0:k]   encodes action-0 dynamics
@@ -185,6 +186,7 @@ class ActionIndexedFeatures(nn.Module):
         hidden_dims: list = None,
         state_scales: torch.Tensor = None,
         n_test_features: int = None,  # ignored; always d_per_action
+        tau: float = 0.5,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -192,6 +194,7 @@ class ActionIndexedFeatures(nn.Module):
         self.n_features = n_features  # total d = n_actions * d_per_action
         self.d_per_action = n_features // n_actions
         self.n_test_features = self.d_per_action  # m = k = d / n_actions
+        self.tau = tau
 
         assert n_features % n_actions == 0, \
             f"n_features ({n_features}) must be divisible by n_actions ({n_actions})"
@@ -199,8 +202,8 @@ class ActionIndexedFeatures(nn.Module):
         if hidden_dims is None:
             hidden_dims = [128, 128]
 
-        # Fully learnable state network: normalized state -> R^k
-        # No output activation — positivity maintained via initialization + pretraining.
+        # Learnable state network: normalized state -> R^k logits
+        # Softmax normalization creates localized features (soft partition of unity).
         input_dim = state_dim
         layers = []
         prev = input_dim
@@ -211,44 +214,20 @@ class ActionIndexedFeatures(nn.Module):
         layers.append(nn.Linear(prev, self.d_per_action))
         self.state_net = nn.Sequential(*layers)
 
-        self._initialize_weights()
-
         if state_scales is None:
             state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0])
         self.register_buffer("state_scales", state_scales)
 
-    def _initialize_weights(self):
-        """Positive initialization: outputs start positive without activation.
-
-        With non-negative weights, positive biases, and ReLU hidden layers,
-        the network outputs are guaranteed positive at init. This satisfies
-        the LP requirement that phi_j >= 0 for w >= 0 to imply y_w >= 0.
-        """
-        for module in self.state_net:
-            if isinstance(module, nn.Linear):
-                nn.init.uniform_(module.weight, a=0.0, b=0.3)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.1)
-
     def _state_features(self, states: torch.Tensor) -> torch.Tensor:
         """Base state features f(s).  (B, 4) -> (B, k)
 
-        Positive init keeps outputs non-negative.
-        Top-k sparsification: only the top-k features per state are kept,
-        rest zeroed out.  This mimics bin indicators (sparse, non-negative).
+        Softmax normalization creates a soft partition of state space:
+        f(s) >= 0 and sum_j f_j(s) = 1. Each feature activates in a
+        different state region, giving the LP spatial discrimination.
         """
         norm_s = states / self.state_scales   # (B, 4)
-        f = self.state_net(norm_s)            # (B, k)
-
-        # Top-k sparsification: keep k_active largest, zero the rest
-        k_active = max(1, self.d_per_action // 16)  # e.g. 4 out of 64
-        topk_vals, topk_idx = f.topk(k_active, dim=1)
-        mask = torch.zeros_like(f)
-        mask.scatter_(1, topk_idx, 1.0)
-
-        # Straight-through: zero in forward, but gradient flows through all
-        f_sparse = f * mask
-        return f_sparse
+        logits = self.state_net(norm_s)        # (B, k)
+        return torch.softmax(logits / self.tau, dim=1)  # (B, k), non-negative, sums to 1
 
     def phi(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Action-indexed features.  (B, 4) x (B,) -> (B, d)
