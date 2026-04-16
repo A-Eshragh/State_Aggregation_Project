@@ -133,7 +133,7 @@ class NeuralFeatures(nn.Module):
         self.register_buffer("test_proj", proj)
 
         if state_scales is None:
-            state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0])
+            state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0]) # for cartpole
         self.register_buffer("state_scales", state_scales)
 
     def _encode_input(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
@@ -159,6 +159,118 @@ class NeuralFeatures(nn.Module):
         return result @ self.test_proj
 
 
+class ContinuousActionFeatures(nn.Module):
+    """Action-indexed features for continuous action spaces.
+
+    Generalizes ActionIndexedFeatures by replacing one_hot(a) with soft
+    RBF basis functions g(a) over the action space:
+
+        phi(s, a) = g(a) ⊗ f(s)        (d = n_bases * k)
+
+    where:
+        f(s) = softmax(MLP(s) / tau_s)  in R^k   (soft state partition)
+        g(a) = softmax(-||a - c_j||^2 / (2*sigma^2))  in R^n_bases  (soft action partition)
+
+    Both f(s) and g(a) are non-negative and sum to 1, preserving LP structure.
+
+    Constraint matrix M has shape (k, n_bases * k):
+        Each block M[:, j*k:(j+1)*k] encodes dynamics near action center c_j.
+    """
+
+    def __init__(
+        self,
+        state_dim: int = 4,
+        action_dim: int = 1,
+        n_action_bases: int = 8,
+        d_per_action: int = 64,
+        hidden_dims: list = None,
+        state_scales: torch.Tensor = None,
+        action_low: float = -1.0,
+        action_high: float = 1.0,
+        tau_s: float = 0.5,
+        sigma: float = None,
+    ):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.n_action_bases = n_action_bases
+        self.d_per_action = d_per_action
+        self.n_features = n_action_bases * d_per_action  # total d
+        self.n_test_features = d_per_action              # m = k
+        self.tau_s = tau_s
+
+        # RBF bandwidth: default to spacing between centers
+        if sigma is None:
+            sigma = (action_high - action_low) / n_action_bases
+        self.sigma = sigma
+
+        if hidden_dims is None:
+            hidden_dims = [128, 128]
+
+        # Fixed RBF centers uniformly spanning the action range
+        if action_dim == 1:
+            centers = torch.linspace(action_low, action_high, n_action_bases).unsqueeze(1)
+        else:
+            # For multi-dim actions, use random uniform centers
+            centers = (torch.rand(n_action_bases, action_dim)
+                       * (action_high - action_low) + action_low)
+        self.register_buffer("centers", centers)  # (n_bases, action_dim)
+
+        # Learnable state network: state -> R^k logits -> softmax
+        layers = []
+        prev = state_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev, h))
+            layers.append(nn.ReLU())
+            prev = h
+        layers.append(nn.Linear(prev, d_per_action))
+        self.state_net = nn.Sequential(*layers)
+
+        if state_scales is None:
+            state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0])  # for cartpole
+        self.register_buffer("state_scales", state_scales)
+
+    def _state_features(self, states: torch.Tensor) -> torch.Tensor:
+        """Soft state partition f(s).  (B, state_dim) -> (B, k)"""
+        norm_s = states / self.state_scales
+        logits = self.state_net(norm_s)
+        return torch.softmax(logits / self.tau_s, dim=1)
+
+    def _action_features(self, actions: torch.Tensor) -> torch.Tensor:
+        """RBF action basis g(a).  (B,) or (B, action_dim) -> (B, n_bases)
+
+        g_j(a) = softmax_j( -||a - c_j||^2 / (2 * sigma^2) )
+        Non-negative, sums to 1 over j.
+        """
+        if actions.dim() == 1:
+            actions = actions.unsqueeze(1)  # (B, 1)
+        # actions: (B, action_dim), centers: (n_bases, action_dim)
+        diff = actions.unsqueeze(1) - self.centers.unsqueeze(0)  # (B, n_bases, action_dim)
+        sq_dist = (diff ** 2).sum(dim=2)  # (B, n_bases)
+        logits = -sq_dist / (2.0 * self.sigma ** 2)
+        return torch.softmax(logits, dim=1)  # (B, n_bases)
+
+    def phi(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """State-action features.  (B, state_dim) x (B,) or (B, action_dim) -> (B, d)
+
+        phi(s, a) = g(a) ⊗ f(s), where ⊗ is the Kronecker product.
+        """
+        f_s = self._state_features(states)    # (B, k)
+        g_a = self._action_features(actions)   # (B, n_bases)
+        # Kronecker: (B, n_bases, k) -> (B, n_bases * k)
+        result = (g_a.unsqueeze(2) * f_s.unsqueeze(1)).reshape(states.shape[0], -1)
+        return result  # (B, d)
+
+    def psi(self, states: torch.Tensor) -> torch.Tensor:
+        """Galerkin test features = f(s).  (B, state_dim) -> (B, k)
+
+        Summing phi(s,a) over a collapses g(a) (which sums to 1 for any a),
+        leaving f(s) in each block. The test space is just f(s) in R^k.
+        """
+        return self._state_features(states)
+
+
+# for discrete actions like cartpoles
 class ActionIndexedFeatures(nn.Module):
     """Action-indexed features matching the discrete LP structure.
 
@@ -215,7 +327,7 @@ class ActionIndexedFeatures(nn.Module):
         self.state_net = nn.Sequential(*layers)
 
         if state_scales is None:
-            state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0])
+            state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0]) # for cartpole
         self.register_buffer("state_scales", state_scales)
 
     def _state_features(self, states: torch.Tensor) -> torch.Tensor:
