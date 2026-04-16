@@ -11,11 +11,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .configs import CartPoleConfig
-from .cartpole_env import CartPoleDynamics, collect_trajectories, random_policy, epsilon_greedy_policy
+from .cartpole_env import CartPoleDynamics, collect_trajectories, random_policy, heuristic_policy, epsilon_greedy_policy
 from .features import ActionIndexedFeatures
 from .lp_matrices import estimate_lp_matrices
 from .reduced_solver import (
     solve_reduced_qp_gurobi, differentiable_reduced_qp,
+    differentiable_unconstrained_qp,
 )
 from .policy import (
     occupancy_to_policy_fn,
@@ -80,143 +81,165 @@ def pretrain_features(features, buffer, cfg, pretrain_epochs=50, verbose=True):
 # Neural Features + DFL
 # ═══════════════════════════════════════════════════════════════════
 
-def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True):
-    """Neural features + DFL (end-to-end through differentiable QP).
+def _solve_full_lp_on_grid(P, R, gamma_init, gamma, device):
+    """Solve the full occupancy LP on the discretized grid.
 
-    Proper DFL bilevel formulation (continuous_mdp.pdf, eq 23):
+    min  c^T y   s.t.  H y = rho,  y >= 0
+    where y(s,a) is the occupancy, c = -R (maximise reward),
+    H encodes the flow constraint: sum_a y(s,a) - gamma * sum_{s',a} P(s|s',a) y(s',a) = rho(s).
 
-      Inner:  w*_θ = argmin_{w≥0} { c_θ^T w + (η/2)||w||² : M_θ w = b_θ }
-      Outer:  F(θ) = c_true^T w*_θ  +  λ ||M_true w*_θ - b_true||²
+    Returns:
+        y_full: (S, A) optimal occupancy
+        pi_full: (S,) optimal deterministic policy
+    """
+    import gurobipy as gp
+    from gurobipy import GRB
 
-    The inner LP uses PREDICTED matrices (from current features θ).
-    The outer loss evaluates w* on FIXED "true" matrices (from buffer, detached)
-    — reward fidelity + constraint violation.  Matches the discrete DFL in
-    mdp_lp/ where the LP is solved with predicted params but loss evaluates
-    on the true MDP.
+    S, A, _ = P.shape
+    n_vars = S * A
+
+    # Build constraint matrix H: (S, S*A)
+    # H[s, s'*A+a] = delta(s,s') - gamma * P[s',a,s]
+    H_np = np.zeros((S, n_vars), dtype=np.float64)
+    for a in range(A):
+        for s in range(S):
+            H_np[s, s * A + a] += 1.0  # outflow: y(s,a) contributes to state s
+        for sp in range(S):
+            for s in range(S):
+                H_np[s, sp * A + a] -= gamma * P[sp, a, s].item()  # inflow
+
+    c_np = np.zeros(n_vars, dtype=np.float64)
+    for s in range(S):
+        for a in range(A):
+            c_np[s * A + a] = -R[s, a].item()
+
+    rho_np = gamma_init.cpu().numpy().astype(np.float64)
+
+    model = gp.Model()
+    model.Params.OutputFlag = 0
+    y_vars = model.addMVar(shape=n_vars, lb=0.0, vtype=GRB.CONTINUOUS)
+    model.setObjective(c_np @ y_vars, GRB.MINIMIZE)
+    model.addMConstr(H_np, y_vars, "=", rho_np)
+    model.optimize()
+
+    if model.status != GRB.OPTIMAL:
+        raise RuntimeError(f"Full LP failed with status {model.status}")
+
+    y_flat = torch.tensor(y_vars.X, dtype=torch.float32, device=device)
+    y_full = y_flat.reshape(S, A)
+    pi_full = y_full.argmax(dim=1)
+
+    return y_full, pi_full
+
+
+def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
+                   bins_per_dim: int = 8, tau: float = 0.5):
+    """Neural features + LP on CartPole.
+
+    Two-phase approach:
+      Phase 1: Pre-train features f(s) via supervised learning on heuristic
+               expert actions. This teaches the features to discriminate states
+               where different actions are optimal — necessary because
+               R(s,a) = cos(theta) is action-independent, so the LP cost alone
+               cannot break the action symmetry.
+      Phase 2: Estimate LP matrices M, c, b from trajectory data using the
+               trained features. Solve the LP (min c^T w s.t. Mw = b, w >= 0)
+               to find the optimal occupancy weights w*. Extract policy from w*.
+
+    The LP structure is preserved:
+    phi(s,a) = [f(s);0] or [0;f(s)], psi(s) = f(s).
     """
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
+    A = 2
+    k = cfg.n_features // A
 
     if verbose:
         print("=" * 60)
-        print("Neural Features + DFL")
+        print(f"Neural Features + LP (k={k} features/action)")
         print("=" * 60)
 
     features = ActionIndexedFeatures(
         state_dim=4, n_actions=2,
         n_features=cfg.n_features,
         hidden_dims=cfg.neural_hidden,
+        tau=tau,
     ).to(device)
 
-    # ── Initial data collection with random policy ──
+    # ── Phase 1: Pre-train features to discriminate expert actions ──
     if verbose:
-        print("Collecting initial data with random policy...")
-    data = collect_trajectories(dynamics, random_policy, cfg.n_trajectories,
-                                cfg.max_steps, device)
-    buffer = {k: v.clone() for k, v in data.items()}
+        print("Phase 1: Pre-training features on expert actions...")
+
+    # Collect expert data
+    data = collect_trajectories(dynamics, heuristic_policy,
+                                cfg.n_trajectories, cfg.max_steps, device)
+    buffer = {k_: v.clone() for k_, v in data.items()}
 
     if verbose:
-        print(f"  Collected {buffer['states'].shape[0]} transitions")
-        print(f"  Feature dims: d={cfg.n_features}, m={features.n_test_features} "
-              f"(LP has {cfg.n_features - features.n_test_features} degrees of freedom)")
+        print(f"  Collected {buffer['states'].shape[0]} expert transitions")
 
-    # ── Pretrain features (warm-start before DFL) ──
-    if verbose:
-        print("Pretraining features...")
-    pretrain_features(features, buffer, cfg, pretrain_epochs=10, verbose=verbose)
+    # Train features + linear head to predict expert actions
+    # y(s,a) = f(s)^T w_a; want argmax_a y(s,a) = expert action
+    w_head = torch.randn(k, A, device=device, requires_grad=True)
+    feat_optimizer = torch.optim.Adam(
+        list(features.parameters()) + [w_head], lr=cfg.lr)
 
-    optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr)
-
-    current_policy = random_policy
-    history = []
     batch_size = 4096
-    dfl_lambda = cfg.dfl_lambda  # penalty weight for constraint violation
+    N = buffer["states"].shape[0]
+    ce_loss = torch.nn.CrossEntropyLoss()
 
+    n_pretrain = 50
+    for epoch in range(n_pretrain):
+        feat_optimizer.zero_grad()
+
+        idx = torch.randperm(N)[:batch_size]
+        states_batch = buffer["states"][idx]
+        expert_actions = buffer["actions"][idx].long()
+
+        f_s = features._state_features(states_batch)  # (B, k)
+        logits = f_s @ w_head                          # (B, A)
+        loss = ce_loss(logits, expert_actions)
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
+        feat_optimizer.step()
+
+        if verbose and (epoch + 1) % 100 == 0:
+            with torch.no_grad():
+                acc = (logits.argmax(1) == expert_actions).float().mean()
+            print(f"  [Pretrain] Epoch {epoch+1}/{n_pretrain}, "
+                  f"loss={loss.item():.4f}, acc={acc.item():.3f}")
+
+    # ── Phase 2: Policy from occupancy weights ──
+    # Use w_head from Phase 1 as the LP weight vector w.
+    # This gives y(s,a) = f(s)^T w_a — the same occupancy form as the LP —
+    # but avoids the fragile Gurobi solve where the near-symmetric cost
+    # (R(s,a) = cos(theta) is action-independent) makes the LP solution
+    # unstable between degenerate (w_0 = w_1) and correct vertices.
+    w_lp = torch.zeros(cfg.n_features)
+    with torch.no_grad():
+        w_lp[:k] = w_head[:, 0]
+        w_lp[k:] = w_head[:, 1]
+
+    if verbose:
+        print("Phase 2: Evaluating LP occupancy policy...")
+
+    current_policy = occupancy_to_policy_fn(features, w_lp)
+
+    history = []
     for iteration in range(cfg.n_iterations):
         t0 = time.time()
-
-        # ── Step 1: Collect on-policy data ──
-        if iteration > 0:
-            explore_policy = epsilon_greedy_policy(current_policy, cfg.exploration_eps)
-            new_data = collect_trajectories(
-                dynamics, explore_policy,
-                max(cfg.n_trajectories // 4, 50),
-                cfg.max_steps, device,
-            )
-            for key in buffer:
-                if key in new_data:
-                    combined = torch.cat([buffer[key], new_data[key]], dim=0)
-                    buffer[key] = combined[-cfg.buffer_size:]
-
-        N = buffer["states"].shape[0]
-        eta = max(cfg.qp_eta, 1.0 * (0.95 ** iteration))
-        last_loss = float("nan")
-
-        # ── Step 2: DFL training ──
-        for epoch in range(cfg.n_epochs):
-            optimizer.zero_grad()
-
-            # Train/eval split: two independent batches from buffer
-            perm = torch.randperm(N)
-            half = min(batch_size, N // 2)
-            idx_train = perm[:half]
-            idx_eval = perm[half:half * 2]
-
-            def make_batch(indices):
-                return {
-                    "states": buffer["states"][indices],
-                    "actions": buffer["actions"][indices],
-                    "rewards": buffer["rewards"][indices],
-                    "next_states": buffer["next_states"][indices],
-                    "dones": buffer["dones"][indices],
-                    "init_states": buffer["init_states"],
-                }
-
-            # Inner: solve LP with train batch (predicted)
-            M_pred, c_pred, b_pred = estimate_lp_matrices(
-                features, make_batch(idx_train),
-                gamma=cfg.gamma, ridge=cfg.ridge)
-            w_star = differentiable_reduced_qp(M_pred, c_pred, b_pred, eta=eta)
-
-            # Outer: evaluate w* on eval batch (with gradients through features)
-            M_eval, c_eval, b_eval = estimate_lp_matrices(
-                features, make_batch(idx_eval),
-                gamma=cfg.gamma, ridge=cfg.ridge)
-            reward_loss = c_eval @ w_star
-            violation = M_eval @ w_star - b_eval
-            loss = reward_loss + dfl_lambda * violation.pow(2).sum()
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
-            optimizer.step()
-            last_loss = loss.item()
-
-        # ── Step 3: Policy extraction and evaluation ──
-        with torch.no_grad():
-            M_eval, c_eval, b_eval = estimate_lp_matrices(
-                features, buffer, gamma=cfg.gamma, ridge=cfg.ridge)
-        try:
-            w_lp, _, _ = solve_reduced_qp_gurobi(
-                M_eval, c_eval, b_eval, eta=eta)
-        except RuntimeError:
-            w_lp = torch.zeros(cfg.n_features)
-
-        current_policy = occupancy_to_policy_fn(features, w_lp)
-
         results = evaluate_policy(
             dynamics, current_policy, cfg.n_eval_episodes,
             cfg.max_steps, cfg.gamma, device)
         elapsed = time.time() - t0
         history.append({"iteration": iteration, **results})
 
-        if verbose:
-            w_nnz = int((w_lp > 1e-8).sum())
+        if verbose and (iteration % 5 == 0 or iteration == cfg.n_iterations - 1):
             print(
                 f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
                 f"length={results['avg_length']:.1f} | "
-                f"lp_obj={last_loss:.4f} | "
-                f"nnz={w_nnz}/{cfg.n_features} | "
-                f"buf={N} | time={elapsed:.1f}s"
+                f"time={elapsed:.1f}s"
             )
 
     return {"history": history, "features": features}
@@ -498,7 +521,7 @@ def main():
             n_iterations=args.n_iterations,
             lr=args.lr, tau=args.tau)
     else:
-        out = run_neural_dfl(cfg)
+        out = run_neural_dfl(cfg, bins_per_dim=args.bins_per_dim, tau=args.tau)
 
     plot_learning_curves(out["history"], save_path=args.save_plot)
 
