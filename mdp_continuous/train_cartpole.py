@@ -5,10 +5,21 @@ Neural features + DFL (end-to-end through differentiable LP).
 """
 
 import argparse
+import random
 import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+
+
+def set_seed(seed: int):
+    """Fix all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 from .configs import CartPoleConfig
 from .cartpole_env import CartPoleDynamics, collect_trajectories, random_policy, heuristic_policy, epsilon_greedy_policy
@@ -189,8 +200,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     N = buffer["states"].shape[0]
     ce_loss = torch.nn.CrossEntropyLoss()
 
-    n_pretrain = 200
-    for epoch in range(n_pretrain):
+    pretrain_epochs = 100
+    for epoch in range(pretrain_epochs):
         feat_optimizer.zero_grad()
 
         idx = torch.randperm(N)[:batch_size]
@@ -208,31 +219,32 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         if verbose and (epoch + 1) % 50 == 0:
             with torch.no_grad():
                 acc = (logits.argmax(1) == expert_actions).float().mean()
-            print(f"  [Pretrain] Epoch {epoch+1}/{n_pretrain}, "
+            print(f"  [Pretrain] Epoch {epoch+1}/{pretrain_epochs}, "
                   f"loss={loss.item():.4f}, acc={acc.item():.3f}")
 
-    # ── Phase 2: DFL iterations ──
-    # R(s,a) = cos(theta) is action-independent, so the LP cost c is symmetric
-    # across actions → the LP degenerates to one action.  Fix: augment the
-    # reward with a small expert-action bonus (reward shaping) so the cost
-    # vector c can break the symmetry. The dynamics constraint M is already
-    # action-dependent; the bonus just nudges the LP toward the expert action.
+    # ── Phase 2: DFL iterations (LP + constraint penalty) ──
+    # Matches the discrete DFL approach in mdp_lp/:
+    #   1. Solve LP: min c^T w  s.t. Mw = b, w >= 0  (differentiable_reduced_lp)
+    #   2. DFL loss = c_true^T w* + rho * ||b - M_true @ w*||^2
+    #      - c_true^T w*: LP objective on true cost (reward maximization)
+    #      - rho * ||...||^2: augmented Lagrangian penalty for flow constraint
+    #
+    # R(s,a) = cos(theta) is action-independent → LP cost c can't break action
+    # symmetry. We use reward shaping (expert bonus) in the LP solve to get a
+    # meaningful w*, but evaluate the DFL loss on the TRUE (unshaped) cost.
     if verbose:
-        print("Phase 2: DFL iterations (LP solve with shaped reward)...")
+        print("Phase 2: DFL iterations (LP + constraint penalty)...")
 
-    dfl_optimizer = torch.optim.Adam(
-        list(features.parameters()) + [w_head], lr=cfg.lr * 0.1)
-    alpha_shape = 2.0  # reward shaping strength
+    dfl_optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr * 0.1)
+    alpha_shape = 2.0  # reward shaping strength for LP solve
+    rho = cfg.dfl_lambda  # augmented Lagrangian penalty weight
 
-    # Compute shaped rewards: r_shaped = r + alpha * expert_bonus
-    # expert_bonus = softmax(f(s) @ w_head)[a_taken] — high when the taken
-    # action matches the pretrained classifier's preference.
+    # Compute shaped rewards for LP solve (breaks action degeneracy)
     def compute_shaped_rewards(states, actions, rewards):
         with torch.no_grad():
             f_s = features._state_features(states)
             logits = f_s @ w_head
             probs = torch.softmax(logits, dim=1)
-            # Bonus: probability the classifier assigns to the taken action
             bonus = probs.gather(1, actions.long().unsqueeze(1)).squeeze(1)
         return rewards + alpha_shape * bonus
 
@@ -243,14 +255,13 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             buffer["states"], buffer["actions"], buffer["rewards"])
         M, c, b = estimate_lp_matrices(
             features, shaped_buffer, gamma=cfg.gamma, ridge=cfg.ridge)
-        w_star = differentiable_reduced_qp(M, c, b, eta=cfg.qp_eta).detach()
+        w_star = differentiable_reduced_lp(M, c, b).detach()
     current_policy = occupancy_to_policy_fn(features, w_star)
 
     if verbose:
-        # Diagnostic: check warm-start policy
         test_s = torch.tensor([
-            [0.0, 0.0, 0.05, 0.0],   # leaning right
-            [0.0, 0.0, -0.05, 0.0],   # leaning left
+            [0.0, 0.0, 0.05, 0.0],
+            [0.0, 0.0, -0.05, 0.0],
         ], device=device)
         acts = current_policy(test_s)
         expert_acts = heuristic_policy(test_s)
@@ -297,28 +308,28 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         else:
             batch = buffer
 
-        # Shaped rewards: break LP action degeneracy using pretrained classifier
+        # LP solve with shaped rewards (for action discrimination)
         shaped_batch = {kk: v for kk, v in batch.items()}
         shaped_batch["rewards"] = compute_shaped_rewards(
             batch["states"], batch["actions"], batch["rewards"])
-
-        # LP objective: estimate matrices with shaped reward, solve QP
-        M, c, b = estimate_lp_matrices(
+        M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
             features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
-        eta = max(cfg.qp_eta, 1.0 * (0.95 ** iteration))
-        w_star = differentiable_reduced_qp(M, c, b, eta=eta)
-        lp_loss = c @ w_star
+        w_star = differentiable_reduced_lp(M_shaped, c_shaped, b_shaped)
 
-        # CE term: co-train the classifier head alongside features
-        ce_idx = torch.randperm(N)[:batch_size]
-        f_s = features._state_features(buffer["states"][ce_idx])
-        logits = f_s @ w_head
-        ce_reg = ce_loss(logits, buffer["actions"][ce_idx].long())
+        # DFL loss on TRUE (unshaped) LP matrices — matches discrete mdp_lp/
+        M_true, c_true, b_true = estimate_lp_matrices(
+            features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
 
-        loss = lp_loss + 10.0 * ce_reg
+        # 1. LP objective: c_true^T w*
+        lp_obj = c_true @ w_star
+
+        # 2. Augmented Lagrangian: rho * ||b - M_true @ w*||^2
+        violation = b_true - M_true @ w_star
+        aug_lag = rho * violation.pow(2).mean()
+
+        loss = lp_obj + aug_lag
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(features.parameters()) + [w_head], max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
         dfl_optimizer.step()
 
         # ── Extract policy from LP solution ──
@@ -328,20 +339,19 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 buffer["states"], buffer["actions"], buffer["rewards"])
             M_eval, c_eval, b_eval = estimate_lp_matrices(
                 features, shaped_full, gamma=cfg.gamma, ridge=cfg.ridge)
-            w_eval = differentiable_reduced_qp(
-                M_eval, c_eval, b_eval, eta=cfg.qp_eta).detach()
+            w_eval = differentiable_reduced_lp(M_eval, c_eval, b_eval).detach()
         current_policy = occupancy_to_policy_fn(features, w_eval)
 
         elapsed = time.time() - t0
         history.append({"iteration": iteration, **results})
 
-        if verbose and (iteration % 5 == 0 or iteration == cfg.n_iterations - 1):
+        if verbose and (iteration % 1 == 0 or iteration == cfg.n_iterations - 1):
             w_nnz = int((w_eval > 1e-8).sum())
             print(
                 f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
                 f"length={results['avg_length']:.1f} | "
-                f"lp={lp_loss.item():.4f} | ce={ce_reg.item():.4f} | "
-                f"eta={eta:.4f} | nnz={w_nnz}/{features.n_features} | "
+                f"lp_obj={lp_obj.item():.4f} | aug_lag={aug_lag.item():.4f} | "
+                f"nnz={w_nnz}/{features.n_features} | "
                 f"time={elapsed:.1f}s"
             )
 
@@ -599,11 +609,14 @@ def parse_args():
     p.add_argument("--bins_per_dim", type=int, default=8)
     p.add_argument("--tau", type=float, default=0.5,
                    help="Softmax temperature for membership")
+    p.add_argument("--seed", type=int, default=1,
+                   help="Random seed for reproducibility")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    set_seed(args.seed)
 
     cfg = CartPoleConfig(
         n_iterations=args.n_iterations,
@@ -615,6 +628,7 @@ def main():
         n_trajectories=args.n_trajectories,
         n_epochs=args.n_epochs,
         ridge=args.ridge,
+        dfl_lambda=100.0
     )
 
     if args.method == "soft_agg":
