@@ -1,0 +1,26 @@
+\section{Problem Statement}
+We consider a discounted MDP $(\gS, \gA, P, r, \beta, \gamma)$ with the state space $\mathcal{S}$, the action space $\mathcal{A}$, the discount factor $\beta \in [0,1)$ over an infinite horizon, and the initial state distribution $\gamma \in \R^{|S|}$ satisfying $\gamma(s) > 0$ for all $s \in S$. The transition kernel $P_\theta(s' \mid s, a)$ gives
+the probability of moving to state~$s'$ from state~$s$ under action~$a$,
+and $r_\theta(s,a)$ denotes the immediate reward in state~$s$ when action~$a$
+is taken. Both the reward function and the transition kernel may depend on a
+parameter vector $\theta \in \mathbb{R}^n$.We also define the optimal value function
+$v^*_\theta \in \mathbb{R}^{|\mathcal{S}|}$ as the unique fixed point of the
+Bellman optimality equation:
+\begin{align*}
+    v^*_\theta(s)
+    = \max_{a \in \mathcal{A}} \{
+        r_\theta(s,a) + \beta \sum_{s' \in \mathcal{S}}
+          P_\theta(s' \mid s, a) v^*_\theta(s')\},
+    \quad \forall\, s \in \mathcal{S},
+\end{align*}
+and the optimal policy $\pi^*_\theta$ selects, at each state $s$, the action attaining the maximum of the Bellman optimality equation.
+
+In this paper, we focus on the predict-then-optimization framework, where the goal is to learn a predictive model $m_{w}(x)$, parameterized by weights $w$, that maps input features $x$ to predicted MDP parameters $\hat{\theta}$, which may include rewards, transition probabilities, or both, in order to optimize the quality of the downstream optimal policy. 
+
+\paragraph{End-to-end learning objective.}
+A standard two-stage pipeline trains $m_w$ to minimize the prediction error between $\hat{\theta}$ and the ground-truth $\theta^*$, and solves the MDP at the inference time. This pipeline ignores how predication error translate into decision quality. On the other hand, DFL trains $m_w$ directly to maximize the quality of the resulting policy. The training objective of DFL can be written as a regret form
+\begin{align}
+    \min_{w} L(y^*) := v^{\mathsf{true}}(\pi^*) - v^{\mathsf{true}}(\hat{\pi}^*).
+    \label{eq:dfl_obj}
+\end{align}
+Optimizing~\Cref{eq:dfl_obj} by gradient descent requires differentiating $v^*_\theta$ with respect to $\theta$, and hence with respect to $w$ through the chain rule. Existing DFL methods differentiate through the KKT conditions of the Bellman equation, treating the optimal policy as the solution of a \emph{nonlinear} system. This involves inverting a matrix of dimension $|\gS||\gA| \times |\gS||\gA|$~\citep{wang2021learning, amos2017optnet}. The cost grows quickly with the action space and is the main obstacle to scaling DFL beyond small MDPs. Our goal in this paper is therefore to differentiate through the MDP optimization layer in a way that backpropagates decision-quality gradients to the predictor weights $w$ at substantially lower cost. In the next section, we develop a more efficient approach based on the linear programming reformulation of MDPs and derive a gradient whose dominant cost is solving a linear system of dimension only $|\gS| \times |\gS|$, independent of the action space.

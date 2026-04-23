@@ -115,7 +115,7 @@ def prepare_elasticity_data(args):
         train_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
         test_dataset = TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true)
     else:
-        gen = torch.Generator().manual_seed(1)
+        gen = torch.Generator().manual_seed(args.seed)
         train_dataset, test_dataset = random_split(
             TensorDataset(feats, obj_true, lambda_true, prices_tensor, y_true, dual_true),
             [train_size, test_size],
@@ -217,10 +217,11 @@ def eval_y_on_true_mdp(mdp_true, y_star, gamma):
     return v, y_true.reshape(B, S * A)
 
 def pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=60):
-    """Pretrain the lambda prediction model."""
     learning_rate = 1e-2
+    inner_steps = 20
 
     optimizer = optim.Adam(pred_model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=pretrain_epochs)
     pred_loss_fn = nn.MSELoss()
 
     for epoch in range(pretrain_epochs):
@@ -234,6 +235,99 @@ def pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=60):
             optimizer.zero_grad()
         print(f"[Warm Start] Epoch {epoch+1}/{pretrain_epochs}, loss: {loss.item()}")
     return pred_model
+
+
+def pretrain_aggregator(pred_model, agg, train_loader, args, device, pretrain_epochs=20, lr=1e-2):
+    """Pre-train the soft-aggregation module to reproduce the oracle occupancy y_true.
+
+    With a random W the aggregated LP → disaggregated y lands on near-arbitrary
+    state-action pairs, and the predictor's v*-gradient ends up pointing the
+    wrong way (its minimum is reached at ill-posed λ). By first training the
+    aggregator to match the *oracle* occupancy under the current (pretrained)
+    predictor, W starts from a sensible structure, so the main DFL loss
+    becomes monotone in λ_pred (just like plain DFL).
+
+    Predictor is frozen during this phase.
+    """
+    for p_ in pred_model.parameters():
+        p_.requires_grad = False
+    for p_ in agg.parameters():
+        p_.requires_grad = True
+
+    optimizer = optim.Adam(agg.parameters(), lr=lr)
+    solver_obj = DenseLPSolver()
+    def lp_solver(H, r, gamma):
+        y, basis, dual = solver_obj.solve(H, r, gamma)
+        return y, basis, dual
+
+    # λ-augmentation during agg pretraining. With few training samples (small
+    # train_size) the aggregator overfits to the oracle λ_true values and
+    # learns a W where the LP gives y_disagg ≈ y_true only at those specific
+    # points; for any other λ_pred (notably λ → 0) the LP+W still happens to
+    # produce a y_disagg that makes v* = r_true·y_disagg look attractive,
+    # creating a spurious low-λ local minimum in the main DFL loss. Exposing
+    # the aggregator to K random perturbations of λ per step — with fresh
+    # oracle y solved on-the-fly — forces W to actually depend on λ, so the
+    # main-loop v* landscape has a genuine optimum at λ_pred ≈ λ_true.
+    n_lambda_aug = int(getattr(args, "agg_pretrain_lambda_aug", 3))
+    aug_scale_min = float(getattr(args, "agg_pretrain_scale_min", 0.3))
+    aug_scale_max = float(getattr(args, "agg_pretrain_scale_max", 3.0))
+    for epoch in range(pretrain_epochs):
+        total = 0.0; n = 0
+        for batch in train_loader:
+            feats, obj_true, lambda_true, prices, y_true, dual_true = batch
+            batch_size = feats.shape[0]
+            p_price = prices if prices.dim() == 1 else prices[:, 0]
+
+            # Build the set of λ targets: always include the oracle, then add
+            # n_lambda_aug random multiplicative perturbations so the W has
+            # to generalize across a range of MDPs.
+            lambda_variants = [(lambda_true, y_true)]
+            for _ in range(n_lambda_aug):
+                scale = (aug_scale_min + (aug_scale_max - aug_scale_min)
+                         * torch.rand(batch_size, device=device))
+                lambda_k = (lambda_true * scale).clamp_min(0.5)
+                with torch.no_grad():
+                    mdp_k = create_inventory_from_lambda(
+                        lambda_k, args.b_max, args.s_max, args.q_max,
+                        args.foc, args.voc, args.hc, args.bc, args.beta, p_price)
+                    y_k, _, _, _ = solve_lp(mdp_k, lp_solver)   # (B, S*A)
+                lambda_variants.append((lambda_k, y_k))
+
+            batch_loss = 0.0
+            for lambda_for_mdp, y_target in lambda_variants:
+                mdp = create_inventory_from_lambda(
+                    lambda_for_mdp, args.b_max, args.s_max, args.q_max,
+                    args.foc, args.voc, args.hc, args.bc, args.beta, p_price)
+                S = mdp.P.shape[1]
+                gamma = mdp.build_gamma(batch_size, S, device)
+                gamma = torch.clamp(gamma, min=1e-8)
+                gamma = gamma / gamma.sum(dim=1, keepdim=True)
+
+                P_agg, r_agg, gamma_agg, info = agg(
+                    mdp.P, mdp.r, gamma, tau=getattr(args, "sa_tau", 0.5))
+                H_agg = mdp.build_H(P_agg)
+                r_flat_agg = r_agg.reshape(batch_size, -1)
+                y_agg = DifferentiableLPSolver.apply(H_agg, r_flat_agg, gamma_agg)
+                y_disagg = SoftAggDense.disaggregate_y(y_agg, info["W"], mdp.r.shape[2])
+                if bool(getattr(args, "normalize_disagg", True)):
+                    expected_sum = 1.0 / (1.0 - float(args.beta))
+                    y_sum = y_disagg.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                    y_disagg = y_disagg * (expected_sum / y_sum)
+                batch_loss = batch_loss + F.mse_loss(y_disagg, y_target)
+            batch_loss = batch_loss / max(1, len(lambda_variants))
+
+            optimizer.zero_grad()
+            batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(agg.parameters(), max_norm=10.0)
+            optimizer.step()
+            total += batch_loss.item() * batch_size; n += batch_size
+        print(f"[Agg Pretrain] Epoch {epoch+1}/{pretrain_epochs}, "
+              f"avg MSE={total/max(n,1):.4f} ({len(lambda_variants)} λ variants/step)")
+
+    for p_ in pred_model.parameters():
+        p_.requires_grad = True
+    return agg
 
 def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     """Train and evaluate with elasticity-based inventory model.
@@ -317,13 +411,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
     pred_model.train()
     if args.algo == "dfl" or args.algo == "dfl_qpth":
-        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=30)
+        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=50)
 
     if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth"):
         n_states = args.b_max + args.s_max + 1
         n_actions = args.q_max + 1
         _rng_state = torch.get_rng_state()
-        torch.manual_seed(42 + int(args.n_agg))
+        torch.manual_seed(args.seed + int(args.n_agg))
         agg = SoftAggDense(
             n_states=n_states,
             n_actions=n_actions,
@@ -331,10 +425,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             r_embed=getattr(args, "sa_r_embed", 8),
         ).to(device)
         torch.set_rng_state(_rng_state)
-        optimizer = optim.Adam(
-            list(pred_model.parameters()) + list(agg.parameters()),
-            lr=learning_rate,
-        )
+        agg_lr_ratio = float(getattr(args, "agg_lr_ratio", 0.01))
+        optimizer = optim.Adam([
+            {"params": pred_model.parameters(), "lr": learning_rate * agg_lr_ratio},
+            {"params": agg.parameters(),        "lr": learning_rate},
+        ])
+
+        agg_pretrain_epochs = int(getattr(args, "agg_pretrain_epochs", 0))
+        if agg_pretrain_epochs > 0:
+            pretrain_aggregator(pred_model, agg, train_loader, args, device,
+                                pretrain_epochs=agg_pretrain_epochs)
 
     params = list(pred_model.parameters())
     if agg is not None:
@@ -406,7 +506,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     initial_reward = float(np.mean(initial_rewards))
 
     pred_model.train()
+    agg_warmup_epochs = 0
+    fidelity_weight = float(getattr(args, "fidelity_weight", 0.0))
     for epoch in range(args.n_epochs):
+        if agg is not None:
+            freeze_agg = (epoch < agg_warmup_epochs)
+            for p_ in agg.parameters():
+                p_.requires_grad = (not freeze_agg)
         train_loss = 0.0
         obj_loss = 0.0
         epoch_sa_time = 0.0
@@ -501,6 +607,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 # Disaggregate occupancy back to original state space for evaluation
                 if agg is not None and _agg_info is not None:
                     y_star = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
+                    # Normalize disaggregated occupancy so sum(y) = 1/(1-β). With
+                    # soft aggregation y_disagg = Wᵀ y_agg has sum ≈ (S/M)·sum(y_agg),
+                    # i.e. scaled by (S/M) ≈ 5× for S=56,M=10. That factor directly
+                    # inflates both r_true·y_disagg and ‖γ - H_true y_disagg‖², so
+                    # with large ρ the optimizer chases the scale rather than λ.
+                    if bool(getattr(args, "normalize_disagg", True)):
+                        expected_sum = 1.0 / (1.0 - float(args.beta))
+                        y_sum = y_star.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                        y_star = y_star * (expected_sum / y_sum)
 
                 with torch.no_grad():
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
@@ -509,12 +624,19 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
 
-                # 1. Augmented Lagrangian loss
+                # 1. Augmented Lagrangian loss (original L2 penalty form)
                 violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
                 rho = getattr(args, 'aug_lag_rho', 0.1)
                 aug_lag = rho * violation.pow(2).mean()
                 v_star = torch.sum(r_true * y_star, dim=1)
                 dfl_loss = -v_star.mean() + aug_lag
+
+                # 3. Optional fidelity loss: anchor disaggregated occupancy to
+                # the oracle y_true. Gives the aggregator a supervised target
+                # that does not require lambda_pred to be wrong.
+                if fidelity_weight > 0:
+                    fidelity_loss = F.mse_loss(y_star, y_true)
+                    dfl_loss = dfl_loss + fidelity_weight * fidelity_loss
 
                 # 2. True evaluation loss
                 # v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use, W=W_agg)
@@ -732,6 +854,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             }
             final_checkpoint.write_text(json.dumps(checkpoint_data, indent=2))
             torch.save(pred_model.state_dict(), final_model)
+
+            # Save SoftAggDense
+            if agg is not None and int(getattr(args, "n_agg", -1)) != -1:
+                agg_final_path = args.save_dir / 'agg_state_final.pt'
+                agg_payload = {
+                    'state_dict': agg.state_dict(),
+                    'n_states': int(args.b_max + args.s_max + 1),
+                    'n_actions': int(args.q_max + 1),
+                    'n_clusters': int(args.n_agg),
+                    'r_embed': int(getattr(args, 'sa_r_embed', 8)),
+                    'sa_tau': float(getattr(args, 'sa_tau', 0.5)),
+                    'seed': int(args.seed),
+                }
+                torch.save(agg_payload, agg_final_path)
+                print(f'[Training] Saved SoftAggDense to {agg_final_path}')
         except Exception as e:
             print(f'[Training] ERROR saving final checkpoint: {e}')
             import traceback
@@ -756,9 +893,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             lambda_pred = pred_model(feats)
             if not torch.all(torch.isfinite(lambda_pred)):
                 raise ValueError("lambda_pred contains non-finite values (NaN/Inf) during eval")
-            if torch.any(lambda_pred < 0):
+            # Match training-time handling (lines ~550-553): the Poisson rate must be
+            # strictly positive for `create_inventory_from_lambda`, but the unconstrained
+            # MLP head can occasionally emit small/negative values. Clamp for MDP
+            # construction while keeping the raw prediction for MSE logging.
+            if torch.any(lambda_pred < 1):
                 min_val = float(lambda_pred.min().item())
-                raise ValueError(f"lambda_pred must be >= 0, but min(lambda_pred)={min_val} during eval")
+                print(f"[Evaluation] WARNING: min(lambda_pred)={min_val:.4f} < 1; clamping to 1.0 for MDP construction.")
+                lambda_pred_pos = torch.clamp(lambda_pred, min=1.0)
+            else:
+                lambda_pred_pos = lambda_pred
 
             if use_p_related:
                 p = prices[:, 0]
@@ -784,7 +928,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
             # --- Predicted: solve with predicted lambda, evaluate on true MDP ---
             mdp_pred = create_inventory_from_lambda(
-                lambda_pred,
+                lambda_pred_pos,
                 args.b_max, args.s_max, args.q_max,
                 args.foc, args.voc, args.hc, args.bc, args.beta,
                 p

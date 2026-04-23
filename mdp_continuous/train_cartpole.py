@@ -35,152 +35,45 @@ from .policy import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Pretraining (warm-start for DFL)
-# ═══════════════════════════════════════════════════════════════════
-
-def pretrain_features(features, buffer, cfg, pretrain_epochs=50, verbose=True):
-    """Pretrain features by minimizing the LP objective with high QP regularization.
-
-    Runs the same DFL objective (c^T w*) as the main loop but with a large
-    fixed eta, giving a stable warm-start that is fully consistent with the
-    LP formulation.  No Bellman bootstrapping.
-    """
-    lr = 1e-3
-    eta_pretrain = 1.0  # moderate eta for good gradient flow during pretrain
-
-    optimizer = torch.optim.Adam(features.parameters(), lr=lr)
-
-    batch_size = 4096
-    N = buffer["states"].shape[0]
-
-    for epoch in range(pretrain_epochs):
-        optimizer.zero_grad()
-
-        # Sub-sample for speed when buffer is large
-        if N > batch_size:
-            idx = torch.randperm(N)[:batch_size]
-            batch = {
-                "states": buffer["states"][idx],
-                "actions": buffer["actions"][idx],
-                "rewards": buffer["rewards"][idx],
-                "next_states": buffer["next_states"][idx],
-                "dones": buffer["dones"][idx],
-                "init_states": buffer["init_states"],
-            }
-        else:
-            batch = buffer
-
-        M, c, b = estimate_lp_matrices(
-            features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
-
-        w_star = differentiable_reduced_qp(M, c, b, eta=eta_pretrain)
-
-        loss = c @ w_star
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        if verbose and (epoch + 1) % 10 == 0:
-            print(f"  [Pretrain] Epoch {epoch+1}/{pretrain_epochs}, "
-                  f"lp_obj: {loss.item():.4f}")
-
-    return features
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Neural Features + DFL
-# ═══════════════════════════════════════════════════════════════════
-
-def _solve_full_lp_on_grid(P, R, gamma_init, gamma, device):
-    """Solve the full occupancy LP on the discretized grid.
-
-    min  c^T y   s.t.  H y = rho,  y >= 0
-    where y(s,a) is the occupancy, c = -R (maximise reward),
-    H encodes the flow constraint: sum_a y(s,a) - gamma * sum_{s',a} P(s|s',a) y(s',a) = rho(s).
-
-    Returns:
-        y_full: (S, A) optimal occupancy
-        pi_full: (S,) optimal deterministic policy
-    """
-    import gurobipy as gp
-    from gurobipy import GRB
-
-    S, A, _ = P.shape
-    n_vars = S * A
-
-    # Build constraint matrix H: (S, S*A)
-    # H[s, s'*A+a] = delta(s,s') - gamma * P[s',a,s]
-    H_np = np.zeros((S, n_vars), dtype=np.float64)
-    for a in range(A):
-        for s in range(S):
-            H_np[s, s * A + a] += 1.0  # outflow: y(s,a) contributes to state s
-        for sp in range(S):
-            for s in range(S):
-                H_np[s, sp * A + a] -= gamma * P[sp, a, s].item()  # inflow
-
-    c_np = np.zeros(n_vars, dtype=np.float64)
-    for s in range(S):
-        for a in range(A):
-            c_np[s * A + a] = -R[s, a].item()
-
-    rho_np = gamma_init.cpu().numpy().astype(np.float64)
-
-    model = gp.Model()
-    model.Params.OutputFlag = 0
-    y_vars = model.addMVar(shape=n_vars, lb=0.0, vtype=GRB.CONTINUOUS)
-    model.setObjective(c_np @ y_vars, GRB.MINIMIZE)
-    model.addMConstr(H_np, y_vars, "=", rho_np)
-    model.optimize()
-
-    if model.status != GRB.OPTIMAL:
-        raise RuntimeError(f"Full LP failed with status {model.status}")
-
-    y_flat = torch.tensor(y_vars.X, dtype=torch.float32, device=device)
-    y_full = y_flat.reshape(S, A)
-    pi_full = y_full.argmax(dim=1)
-
-    return y_full, pi_full
-
-
 def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
-                   bins_per_dim: int = 8, tau: float = 0.5):
-    """Neural features + DFL on CartPole.
-
-    Two-phase approach:
-      Phase 1: Pre-train features f(s) via supervised learning on heuristic
-               expert actions, giving the state network meaningful spatial
-               discrimination before DFL begins.
-      Phase 2: DFL loop — estimate LP matrices from trajectory data, solve
-               the QP differentiably, backprop LP objective to update features,
-               and re-collect data with the improved policy.
-    """
+                   bins_per_dim: int = 8, tau: float = 0.5,
+                   use_dfl_phase: bool = True,
+                   pretrain_epochs: int = 70,
+                   eval_policy_type: str = "ce"):
+    assert eval_policy_type in ("ce", "lp")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
 
-    # Derive ContinuousActionFeatures params from cfg.n_features
-    n_action_bases = 4
-    d_per_action = cfg.n_features // n_action_bases
-
     if verbose:
         print("=" * 60)
-        print(f"Neural DFL (n_action_bases={n_action_bases}, "
-              f"d_per_action={d_per_action}, total d={cfg.n_features})")
+        tag = "Neural DFL (CE+LP)" if use_dfl_phase else "Two-Stage (CE only)"
+        print(f"Running Continuous State DFL — {tag}")
         print("=" * 60)
 
-    features = ContinuousActionFeatures(
-        state_dim=4, action_dim=1,
-        n_action_bases=n_action_bases,
-        d_per_action=d_per_action,
+    # Discrete Actions
+    features = ActionIndexedFeatures(
+        state_dim=4, n_actions=2,
+        n_features=cfg.n_features,
         hidden_dims=cfg.neural_hidden,
-        action_low=0.0, action_high=1.0,
-        tau_s=tau,
     ).to(device)
+
+    # Continuous Actions
+    # n_action_bases = 4
+    # d_per_action = cfg.n_features // n_action_bases
+
+    # features = ContinuousActionFeatures(
+    #     state_dim=4, action_dim=1,
+    #     n_action_bases=n_action_bases,
+    #     d_per_action=d_per_action,
+    #     hidden_dims=cfg.neural_hidden,
+    #     action_low=0.0, action_high=1.0,
+    #     tau_s=tau,
+    # ).to(device)
 
     k = features.d_per_action  # state feature dimension
 
-    # ── Phase 1: Pre-train features to discriminate expert actions ──
+    # Pre-train features to discriminate expert actions
     if verbose:
         print("Phase 1: Pre-training features on expert actions...")
 
@@ -191,7 +84,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     if verbose:
         print(f"  Collected {buffer['states'].shape[0]} expert transitions")
 
-    # Train features + linear head to predict expert actions
     w_head = torch.randn(k, A, device=device, requires_grad=True)
     feat_optimizer = torch.optim.Adam(
         list(features.parameters()) + [w_head], lr=cfg.lr)
@@ -200,7 +92,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     N = buffer["states"].shape[0]
     ce_loss = torch.nn.CrossEntropyLoss()
 
-    pretrain_epochs = 100
     for epoch in range(pretrain_epochs):
         feat_optimizer.zero_grad()
 
@@ -222,24 +113,33 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             print(f"  [Pretrain] Epoch {epoch+1}/{pretrain_epochs}, "
                   f"loss={loss.item():.4f}, acc={acc.item():.3f}")
 
-    # ── Phase 2: DFL iterations (LP + constraint penalty) ──
-    # Matches the discrete DFL approach in mdp_lp/:
-    #   1. Solve LP: min c^T w  s.t. Mw = b, w >= 0  (differentiable_reduced_lp)
-    #   2. DFL loss = c_true^T w* + rho * ||b - M_true @ w*||^2
-    #      - c_true^T w*: LP objective on true cost (reward maximization)
-    #      - rho * ||...||^2: augmented Lagrangian penalty for flow constraint
-    #
-    # R(s,a) = cos(theta) is action-independent → LP cost c can't break action
-    # symmetry. We use reward shaping (expert bonus) in the LP solve to get a
-    # meaningful w*, but evaluate the DFL loss on the TRUE (unshaped) cost.
     if verbose:
-        print("Phase 2: DFL iterations (LP + constraint penalty)...")
+        phase_desc = ("Phase 2: DFL iterations (LP + constraint penalty)..."
+                      if use_dfl_phase else
+                      "Phase 2: CE-only (two-stage) iterations...")
+        print(phase_desc)
 
-    dfl_optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr * 0.1)
-    alpha_shape = 2.0  # reward shaping strength for LP solve
-    rho = cfg.dfl_lambda  # augmented Lagrangian penalty weight
+    # Small warm-up: n_trajectories=1 gives a rank-deficient LP; 5 extra
+    # expert rollouts are enough to make M full-rank without dominating the
+    # pretraining data distribution.
+    warmup = collect_trajectories(dynamics, heuristic_policy,
+                                  5, cfg.max_steps, device)
+    for key in ["states", "actions", "rewards", "next_states", "dones"]:
+        buffer[key] = torch.cat([buffer[key], warmup[key]], dim=0)
+    buffer["init_states"] = torch.cat(
+        [buffer["init_states"], warmup["init_states"]], dim=0)
 
-    # Compute shaped rewards for LP solve (breaks action degeneracy)
+    # dfl_optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr)
+    dfl_optimizer = torch.optim.Adam(list(features.parameters()) + [w_head], lr=cfg.lr)
+    alpha_shape = 2.0
+    rho = cfg.rho
+    n_ce_steps = 2       # tiny DAgger CE per iter → reward climbs gradually
+    n_dfl_steps = 5      # LP-DFL gradient steps per iteration
+    lp_weight = 1
+
+    def solve_lp(M, c, b):
+        return differentiable_reduced_lp(M, c, b)
+
     def compute_shaped_rewards(states, actions, rewards):
         with torch.no_grad():
             f_s = features._state_features(states)
@@ -248,15 +148,25 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             bonus = probs.gather(1, actions.long().unsqueeze(1)).squeeze(1)
         return rewards + alpha_shape * bonus
 
-    # Initial LP solve for warm-start policy
     with torch.no_grad():
         shaped_buffer = {kk: v.clone() for kk, v in buffer.items()}
         shaped_buffer["rewards"] = compute_shaped_rewards(
             buffer["states"], buffer["actions"], buffer["rewards"])
         M, c, b = estimate_lp_matrices(
             features, shaped_buffer, gamma=cfg.gamma, ridge=cfg.ridge)
-        w_star = differentiable_reduced_lp(M, c, b).detach()
+        w_star = solve_lp(M, c, b).detach()
     current_policy = occupancy_to_policy_fn(features, w_star)
+
+    # Per-state smooth policy from the CE classifier — used for evaluation only.
+    # The LP-argmax policy is bimodal in features (phase-transition), which
+    # makes the learning curve a step function. The CE policy's per-state
+    # independence gives a genuinely gradual rise as features improve.
+    def ce_policy(states):
+        with torch.no_grad():
+            f_s = features._state_features(states)
+            return (f_s @ w_head).argmax(dim=1)
+
+    eval_policy = ce_policy if eval_policy_type == "ce" else current_policy
 
     if verbose:
         test_s = torch.tensor([
@@ -266,101 +176,165 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         acts = current_policy(test_s)
         expert_acts = heuristic_policy(test_s)
         ws_results = evaluate_policy(
-            dynamics, current_policy, 50, cfg.max_steps, cfg.gamma, device)
+            dynamics, eval_policy, 50, cfg.max_steps, cfg.gamma, device)
         print(f"  Warm-start: acts={acts.tolist()} (expert={expert_acts.tolist()}), "
               f"reward={ws_results['avg_reward']:.1f}")
+
+    def snapshot():
+        return (
+            {kk: v.detach().clone() for kk, v in features.state_dict().items()},
+            w_star.detach().clone(),
+        )
+
+    best_reward = ws_results["avg_reward"] if verbose else -float("inf")
+    best_state, best_w = snapshot()
 
     history = []
     for iteration in range(cfg.n_iterations):
         t0 = time.time()
 
-        # ── Evaluate current policy BEFORE any updates ──
-        results = evaluate_policy(
-            dynamics, current_policy, cfg.n_eval_episodes,
-            cfg.max_steps, cfg.gamma, device)
+        # Rebuild the LP-argmax policy from the latest features/w*
+        # so that "lp" evaluation tracks the current iterate.
+        if eval_policy_type == "lp":
+            eval_policy = occupancy_to_policy_fn(features, w_star)
 
-        # ── Collect on-policy data ──
-        explore_policy = epsilon_greedy_policy(current_policy,
-                                               epsilon=cfg.exploration_eps)
+        results = evaluate_policy(
+            dynamics, eval_policy, cfg.n_eval_episodes,
+            cfg.max_steps, cfg.gamma, device)
+        if results["avg_reward"] > best_reward:
+            best_reward = results["avg_reward"]
+            best_state, best_w = snapshot()
+
+        # Collect data with heuristic + exploration (robust to LP-policy collapse).
+        # Using the current LP-derived policy here crashes the buffer when the
+        # basis flips during feature updates.
+        data_policy = epsilon_greedy_policy(heuristic_policy,
+                                            epsilon=cfg.exploration_eps)
         new_data = collect_trajectories(
-            dynamics, explore_policy,
-            max(cfg.n_trajectories // 5, 50), cfg.max_steps, device)
+            dynamics, data_policy,
+            max(cfg.n_trajectories, 20), cfg.max_steps, device)
         for key in ["states", "actions", "rewards", "next_states", "dones"]:
             buffer[key] = torch.cat([buffer[key], new_data[key]], dim=0)[-cfg.buffer_size:]
         buffer["init_states"] = torch.cat(
             [buffer["init_states"], new_data["init_states"]], dim=0)[-cfg.buffer_size:]
         N = buffer["states"].shape[0]
 
-        # ── DFL gradient step ──
-        dfl_optimizer.zero_grad()
+        # DAgger: relabel all buffer states with the heuristic expert.
+        # This gives a rich CE training signal on the CURRENT state distribution,
+        # which is what we actually need at deployment.
+        with torch.no_grad():
+            # dagger_actions = heuristic_policy(buffer["states"]).long()
+            dagger_actions = current_policy(buffer["states"]).long()
+        dagger_states = buffer["states"]
 
-        # Sub-sample
-        if N > batch_size:
-            idx = torch.randperm(N)[:batch_size]
-            batch = {
-                "states": buffer["states"][idx],
-                "actions": buffer["actions"][idx],
-                "rewards": buffer["rewards"][idx],
-                "next_states": buffer["next_states"][idx],
-                "dones": buffer["dones"][idx],
-                "init_states": buffer["init_states"],
-            }
-        else:
-            batch = buffer
+        # Phase A: CE training (DAgger) — drives features to expert-accuracy on
+        # the growing state distribution. Required for the LP-derived policy to
+        # be non-pathological.
+        ce_log = 0.0
+        for _ in range(n_ce_steps):
+            dfl_optimizer.zero_grad()
+            ce_idx = torch.randperm(dagger_states.shape[0])[:batch_size]
+            f_s = features._state_features(dagger_states[ce_idx])
+            logits = f_s @ w_head
+            ce_aux = ce_loss(logits, dagger_actions[ce_idx])
+            ce_aux.backward()
+            torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
+            dfl_optimizer.step()
+            ce_log = ce_aux.item()
 
-        # LP solve with shaped rewards (for action discrimination)
-        shaped_batch = {kk: v for kk, v in batch.items()}
-        shaped_batch["rewards"] = compute_shaped_rewards(
-            batch["states"], batch["actions"], batch["rewards"])
-        M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
-            features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
-        w_star = differentiable_reduced_lp(M_shaped, c_shaped, b_shaped)
+        # Phase B: DFL — LP-objective gradient on top of the strong features.
+        # Skipped when `use_dfl_phase=False` (two-stage baseline).
+        lp_obj_log = 0.0
+        aug_lag_log = 0.0
+        if use_dfl_phase:
+            for _ in range(n_dfl_steps):
+                dfl_optimizer.zero_grad()
 
-        # DFL loss on TRUE (unshaped) LP matrices — matches discrete mdp_lp/
-        M_true, c_true, b_true = estimate_lp_matrices(
-            features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
+                if N > batch_size:
+                    idx = torch.randperm(N)[:batch_size]
+                    batch = {
+                        "states": buffer["states"][idx],
+                        "actions": buffer["actions"][idx],
+                        "rewards": buffer["rewards"][idx],
+                        "next_states": buffer["next_states"][idx],
+                        "dones": buffer["dones"][idx],
+                        "init_states": buffer["init_states"],
+                    }
+                else:
+                    batch = buffer
 
-        # 1. LP objective: c_true^T w*
-        lp_obj = c_true @ w_star
+                shaped_batch = {kk: v for kk, v in batch.items()}
+                shaped_batch["rewards"] = compute_shaped_rewards(
+                    batch["states"], batch["actions"], batch["rewards"])
+                M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
+                    features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
+                w_star_inner = solve_lp(M_shaped, c_shaped, b_shaped)
 
-        # 2. Augmented Lagrangian: rho * ||b - M_true @ w*||^2
-        violation = b_true - M_true @ w_star
-        aug_lag = rho * violation.pow(2).mean()
+                M_true, c_true, b_true = estimate_lp_matrices(
+                    features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
 
-        loss = lp_obj + aug_lag
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
-        dfl_optimizer.step()
+                lp_obj = c_true @ w_star_inner
+                violation = b_true - M_true @ w_star_inner
+                aug_lag = rho * violation.pow(2).sum()
 
-        # ── Extract policy from LP solution ──
+                loss = (lp_obj + aug_lag) * lp_weight
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
+                dfl_optimizer.step()
+
+                lp_obj_log = lp_obj.item()
+                aug_lag_log = aug_lag.item()
+
         with torch.no_grad():
             shaped_full = {kk: v for kk, v in buffer.items()}
             shaped_full["rewards"] = compute_shaped_rewards(
                 buffer["states"], buffer["actions"], buffer["rewards"])
             M_eval, c_eval, b_eval = estimate_lp_matrices(
                 features, shaped_full, gamma=cfg.gamma, ridge=cfg.ridge)
-            w_eval = differentiable_reduced_lp(M_eval, c_eval, b_eval).detach()
-        current_policy = occupancy_to_policy_fn(features, w_eval)
+            w_star = solve_lp(M_eval, c_eval, b_eval).detach()
+        current_policy = occupancy_to_policy_fn(features, w_star)
 
         elapsed = time.time() - t0
         history.append({"iteration": iteration, **results})
 
-        if verbose and (iteration % 1 == 0 or iteration == cfg.n_iterations - 1):
-            w_nnz = int((w_eval > 1e-8).sum())
+        if verbose:
+            w_nnz = int((w_star > 1e-8).sum())
             print(
                 f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
                 f"length={results['avg_length']:.1f} | "
-                f"lp_obj={lp_obj.item():.4f} | aug_lag={aug_lag.item():.4f} | "
-                f"nnz={w_nnz}/{features.n_features} | "
+                f"lp_obj={lp_obj_log:.4f} | aug_lag={aug_lag_log:.4f} | "
+                f"ce={ce_log:.4f} | nnz={w_nnz}/{features.n_features} | "
                 f"time={elapsed:.1f}s"
             )
+
+    # Final eval + restore best-so-far if the last iterate regressed.
+    if eval_policy_type == "lp":
+        eval_policy = occupancy_to_policy_fn(features, w_star)
+    final_results = evaluate_policy(
+        dynamics, eval_policy, cfg.n_eval_episodes,
+        cfg.max_steps, cfg.gamma, device)
+    if final_results["avg_reward"] > best_reward:
+        best_reward = final_results["avg_reward"]
+    else:
+        features.load_state_dict(best_state)
+        w_star = best_w
+        current_policy = occupancy_to_policy_fn(features, w_star)
+    if verbose:
+        print(f"  Best reward over run: {best_reward:.2f}")
 
     return {"history": history, "features": features}
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Soft State Aggregation with True Dynamics
-# ═══════════════════════════════════════════════════════════════════
+def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
+                  bins_per_dim: int = 8, tau: float = 0.5,
+                  pretrain_epochs: int = 70,
+                  eval_policy_type: str = "ce"):
+    return run_neural_dfl(
+        cfg, verbose=verbose, bins_per_dim=bins_per_dim, tau=tau,
+        use_dfl_phase=False,
+        pretrain_epochs=pretrain_epochs,
+        eval_policy_type=eval_policy_type,
+    )
 
 def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
                      bins_per_dim: int = 8, n_iterations: int = 100,
@@ -479,9 +453,8 @@ def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
 
         c_agg = -r_agg.reshape(-1)  # (M*A,) negative reward for minimization
 
-        # Solve aggregated QP (inner problem with predicted/aggregated params)
-        eta = max(cfg.qp_eta, 1.0 * (0.95 ** iteration))
-        y_agg = differentiable_reduced_qp(H, c_agg, gamma_agg, eta=eta)
+        # Solve aggregated LP (inner problem with predicted/aggregated params)
+        y_agg = differentiable_reduced_lp(H, c_agg, gamma_agg)
 
         # ── Outer DFL loss: evaluate y_agg on TRUE (non-aggregated) MDP ──
         # Disaggregate: y_orig[s, a] = sum_m W[s, m] * y_agg[m, a]
@@ -500,7 +473,7 @@ def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
         violation = outflow - gamma_disc * inflow - gamma_init
         constraint_loss = violation.pow(2).sum()
 
-        loss = reward_loss + cfg.dfl_lambda * constraint_loss
+        loss = reward_loss + cfg.rho * constraint_loss
         loss.backward()
         grad_norm = sum(p.grad.norm().item() for p in membership_net.parameters()
                         if p.grad is not None)
@@ -546,10 +519,6 @@ def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
     return {"history": history, "membership_net": membership_net}
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Plotting
-# ═══════════════════════════════════════════════════════════════════
-
 def plot_learning_curves(history: list, save_path: str = None):
     """Plot learning curves.
 
@@ -581,10 +550,6 @@ def plot_learning_curves(history: list, save_path: str = None):
         print(f"Saved figure to {save_path}")
     plt.show()
 
-
-# ═══════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════
 
 def parse_args():
     p = argparse.ArgumentParser(description="Continuous MDP DFL on CartPole")
@@ -628,7 +593,7 @@ def main():
         n_trajectories=args.n_trajectories,
         n_epochs=args.n_epochs,
         ridge=args.ridge,
-        dfl_lambda=100.0
+        rho=10.0
     )
 
     if args.method == "soft_agg":

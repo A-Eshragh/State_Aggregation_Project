@@ -34,7 +34,7 @@ def main():
     parser.add_argument('--beta_0', type=float, default=3.5, help='β₀ in elasticity model')
     parser.add_argument('--beta_1', type=float, default=-1.0, help='β₁ in elasticity model')
     parser.add_argument('--beta_2', type=float, default=0.09, help='β₂ in elasticity model (exp a/b use 0; exp c use ±0.09)')
-    parser.add_argument('--sigma_epsilon', type=float, default=0.5, help='σ_ε in elasticity model (higher = more λ variance; can be >1)')
+    parser.add_argument('--sigma_epsilon', type=float, default=0.3, help='σ_ε in elasticity model (higher = more λ variance; can be >1)')
     
     # Price parameters
     parser.add_argument('--p_constant', type=float, default=5.0, help='Constant price (experiment a)')
@@ -46,8 +46,8 @@ def main():
     
     # Inventory parameters
     parser.add_argument('--b_max', type=int, default=5, help='Maximum backlog')
-    parser.add_argument('--s_max', type=int, default=50, help='Maximum storage')
-    parser.add_argument('--q_max', type=int, default=50, help='Maximum order quantity')
+    parser.add_argument('--s_max', type=int, default=30, help='Maximum storage')
+    parser.add_argument('--q_max', type=int, default=30, help='Maximum order quantity')
         
     # Cost parameters (asymmetric cases)
     parser.add_argument('--cost_case', type=str, choices=['high_margin', 'low_margin', 'normal_margin'], required=True,
@@ -74,6 +74,7 @@ def main():
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
     parser.add_argument('--results_root', type=str, default='mdp_lp/results_elasticity',
                         help='Root directory to save results (default: mdp_lp/results_elasticity)')
+    parser.add_argument('--seed', type=int, default=1, help='Seed')
 
     # Soft state aggregation (optional; only used for DFL variants)
     parser.add_argument('--n_agg', type=int, default=-1,
@@ -87,6 +88,30 @@ def main():
     parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
     parser.add_argument('--aug_lag_rho', type=float, default=10000.0, help='Augmented Lagrangian penalty coefficient ρ (default 10; 100 can dominate and cause λ collapse)')
     parser.add_argument('--policy_analysis', action='store_true', help='If set, run policy analysis (1 extra LP per batch for order/inv bias vs oracle). Default: off (1 solve per batch).')
+    # Soft-aggregation anti-shortcut knobs (see train_elasticity.py)
+    parser.add_argument('--agg_lr_ratio', type=float, default=0.01,
+                        help='Aggregator LR as fraction of predictor LR (two-timescale training)')
+    parser.add_argument('--agg_warmup_epochs', type=int, default=30,
+                        help='Freeze aggregator for this many initial epochs so predictor can learn first')
+    parser.add_argument('--fidelity_weight', type=float, default=0.0,
+                        help='Weight of MSE(y_disagg, y_true) — supervised anchor for the aggregator')
+    parser.add_argument('--normalize_disagg', action='store_true', default=True,
+                        help='After disaggregation, rescale y so sum(y)=1/(1-β) (removes scale inflation).')
+    parser.add_argument('--no_normalize_disagg', dest='normalize_disagg', action='store_false',
+                        help='Disable y_disagg normalization (for debugging)')
+    parser.add_argument('--agg_pretrain_epochs', type=int, default=0,
+                        help='Pre-train aggregator to match oracle y_true for this many epochs (predictor frozen).')
+    parser.add_argument('--agg_pretrain_oracle', action='store_true', default=True,
+                        help='During agg pretraining, build the MDP with λ_true (not λ_pred).')
+    parser.add_argument('--no_agg_pretrain_oracle', dest='agg_pretrain_oracle', action='store_false')
+    parser.add_argument('--agg_pretrain_lambda_aug', type=int, default=3,
+                        help='Number of random λ perturbations per step during agg pretrain (+oracle). Forces W to generalize across λ.')
+    parser.add_argument('--agg_pretrain_scale_min', type=float, default=0.3,
+                        help='Minimum multiplicative scale for λ perturbation during agg pretrain')
+    parser.add_argument('--agg_pretrain_scale_max', type=float, default=3.0,
+                        help='Maximum multiplicative scale for λ perturbation during agg pretrain')
+    parser.add_argument('--use_pi_eval_loss', action='store_true',
+                        help='Use eval_y_on_true_mdp(policy(y_star)) as the DFL objective (un-inflatable)')
     
     args = parser.parse_args()
     default_costs = {
@@ -106,7 +131,7 @@ def main():
     if args.experiment_type == 'a' or args.experiment_type == 'b':
         args.beta_2 = 0.0
     
-    set_seed(1)
+    set_seed(args.seed)
     
     train_loader, test_loader, gt_elasticity, p, p_related = prepare_elasticity_data(args)
     

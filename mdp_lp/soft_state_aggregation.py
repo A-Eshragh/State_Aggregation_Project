@@ -31,22 +31,45 @@ class SoftAggDense(nn.Module):
     softmax(W_logits / tau) to obtain the membership matrix W.
     """
 
-    def __init__(self, n_states: int, n_actions: int, n_clusters: int, **kwargs):
+    def __init__(
+        self,
+        n_states: int,
+        n_actions: int,
+        n_clusters: int,
+        r_embed: int = 8,
+        fixed_W: bool = False,
+        fixed_W_seed: int = 0,
+        **kwargs,
+    ):
         super().__init__()
         self.n_states = int(n_states)
         self.n_actions = int(n_actions)
         self.n_clusters = int(n_clusters)
+        self.r_embed = int(r_embed)
+        self.fixed_W = bool(fixed_W)
 
-        
         # NOTE:Method 1: W depends on P
         # self.W_logits = nn.Linear(n_states * n_actions, n_clusters)
 
         # NOTE:Method 2: W doesn't depend on P and r
-        self.W_logits = nn.Parameter(torch.randn(self.n_states, self.n_clusters))
+        # self.W_logits = nn.Parameter(torch.randn(self.n_states, self.n_clusters))
 
-        # NOTE:Method 3: Original method
+        if self.fixed_W:
+            gen = torch.Generator()
+            gen.manual_seed(int(fixed_W_seed))
+            W_logits = torch.randn(self.n_states, self.n_clusters, generator=gen)
+            W_fixed = torch.softmax(W_logits, dim=1)  # (S, M)
+            self.register_buffer("W_fixed", W_fixed)
+        else:
+            # NOTE:Method 3: Original method
+            self.dest_embed = nn.Embedding(num_embeddings=self.n_states, embedding_dim=self.r_embed)
+            self.to_logits = nn.Linear(self.n_actions * self.r_embed, self.n_clusters)
+
+        # NOTE:Method 4: Original method with r_bias
         # self.dest_embed = nn.Embedding(num_embeddings=self.n_states, embedding_dim=self.r_embed)
         # self.to_logits = nn.Linear(self.n_actions * self.r_embed, self.n_clusters)
+        # self.r_bias = nn.Linear(self.n_actions, self.n_clusters, bias=False)
+        # nn.init.normal_(self.r_bias.weight, std=1e-3)
 
     def forward(
         self,
@@ -90,31 +113,44 @@ class SoftAggDense(nn.Module):
                 f"but got S={S},A={A}"
             )
 
-        # === (1) Build memberships W[b,s,m] from learned logits ===
-        # NOTE: Method 1: W depends on P
-        # P_flat = P.reshape(B, S, A * S)
-        # W_logits = self.W_logits(P_flat)          # (B, S, M)
-        # W = torch.softmax(W_logits / tau, dim=-1)
+        if self.fixed_W:
+            # Method 5: fixed random W (buffer), broadcast to batch.
+            W = self.W_fixed.unsqueeze(0).expand(B, -1, -1)  # (B,S,M)
+        else:
+            # === (1) Build memberships W[b,s,m] from learned logits ===
+            # NOTE: Method 1: W depends on P
+            # P_flat = P.reshape(B, S, A * S)
+            # W_logits = self.W_logits(P_flat)          # (B, S, M)
+            # W = torch.softmax(W_logits / tau, dim=-1)
 
-        # NOTE: Method 2: W doesn't depend on P and r
-        W = torch.softmax(self.W_logits / float(tau), dim=1)  # (S, M)
-        W = W.unsqueeze(0).expand(B, -1, -1)  # (B, S, M)
+            # NOTE: Method 2: W doesn't depend on P and r
+            # W = torch.softmax(self.W_logits / float(tau), dim=1)  # (S, M)
+            # W = W.unsqueeze(0).expand(B, -1, -1)  # (B, S, M)
 
-        # NOTE: Method 3: Original method
-        # E = self.dest_embed.weight  # (S, r)
-        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-        # phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r)
-        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
-        # logits = self.to_logits(phi_cat)  # (B,S,M)
-        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+            # NOTE: Method 3: Original method (correct einsum)
+            E = self.dest_embed.weight  # (S, r)
+            # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+            phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r)
+            phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+            logits = self.to_logits(phi_cat)  # (B,S,M)
+            W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
 
-        # NOTE: Method 4: Original method with wrong einsum
-        # E = self.dest_embed.weight  # (S, r)
-        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-        # phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
-        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
-        # logits = self.to_logits(phi_cat)  # (B,S,M)
-        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+            # NOTE: Method 3.2: Original method (wrong einsum)
+            # E = self.dest_embed.weight  # (S, r)
+            # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+            # phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
+            # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+            # logits = self.to_logits(phi_cat)  # (B,S,M)
+            # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+            
+            # NOTE: Method 4: Original method with r_bias
+            # E = self.dest_embed.weight  # (S, r_embed)
+            # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+            # phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r_embed)
+            # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r_embed)
+            # # NOTE: Only change
+            # logits = self.to_logits(phi_cat) + self.r_bias(r) # (B,S,M)
+            # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
 
         # Cluster masses: mass[b,m] = sum_s W[b,s,m]
         mass = W.sum(dim=1).clamp_min(eps)  # (B,M)
