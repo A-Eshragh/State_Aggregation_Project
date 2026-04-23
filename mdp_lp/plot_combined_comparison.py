@@ -14,7 +14,7 @@ from mdp_lp.soft_state_aggregation import SoftAggDense
 from mdp_lp.train_elasticity import eval_y_on_true_mdp
 
 # ── MDP parameters ──
-B_MAX, S_MAX, Q_MAX = 5, 50, 30
+B_MAX, S_MAX, Q_MAX = 5, 30, 30
 FOC, VOC, HC, BC, BETA, PRICE = 0, 0.5, 0.1, 0, 0.95, 10.0
 LAMBDA_TRUE = 10.0
 RHO = 10000.0
@@ -159,7 +159,7 @@ def train_soft_agg_dfl(n_clusters, n_samples=50, n_epochs=50, pretrain_epochs=60
     device = torch.device("cpu")
 
     # ── Step 1: Build dataset ──
-    gt = ElasticityModel(beta_0=3.5, beta_1=-1.0, beta_2=0.0, sigma_epsilon=0.5)
+    gt = ElasticityModel(beta_0=3.5, beta_1=-1.0, beta_2=0.09, sigma_epsilon=0.3)
     p = torch.exp(torch.randn(n_samples) * 0.6 + np.log(5.0))
     lambda_true = gt(p, None)
     feats = torch.stack([p, torch.zeros(n_samples)], dim=1)  # [price, noise_placeholder]
@@ -368,9 +368,267 @@ def plot_all(lambda_values, methods, output_dir='mdp_lp/plot_results'):
     print(f"\nSaved 5 figures to {output_dir}/combined_*.pdf")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════
+def compute_loss_grad(lam_val, r_true, H_true, gamma_true,
+                      agg=None, rho=0.0, tau=0.5):
+    lam = torch.tensor([lam_val], dtype=torch.float32, requires_grad=True)
+    p = torch.tensor([PRICE], dtype=torch.float32)
+
+    mdp = create_inventory_from_lambda(lam, B_MAX, S_MAX, Q_MAX,
+                                       FOC, VOC, HC, BC, BETA, p)
+    S = mdp.P.shape[1]
+    gamma = mdp.build_gamma(1, S, torch.device("cpu"))
+    gamma = torch.clamp(gamma, min=1e-8)
+    gamma = gamma / gamma.sum(dim=1, keepdim=True)
+
+    if agg is not None:
+        P_agg, r_agg, gamma_agg, info = agg(mdp.P, mdp.r, gamma, tau=tau)
+        H_agg = mdp.build_H(P_agg)
+        r_flat_agg = r_agg.reshape(1, -1)
+        y_agg = DifferentiableLPSolver.apply(H_agg, r_flat_agg, gamma_agg)
+        y_star = SoftAggDense.disaggregate_y(y_agg, info["W"], N_ACTIONS)
+    else:
+        H = mdp.build_H(mdp.P)
+        r_flat = mdp.r.reshape(1, -1)
+        y_star = DifferentiableLPSolver.apply(H, r_flat, gamma)
+
+    V = (r_true * y_star).sum()
+    loss = -V
+    if rho > 0.0:
+        violation = gamma_true - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
+        loss = loss + rho * violation.pow(2).sum()
+
+    grad = torch.autograd.grad(loss, lam)[0].item()
+    return loss.item(), grad
+
+
+def sweep_loss_grad(lambda_values, r_true, H_true, gamma_true,
+                    agg=None, rho=0.0, label=""):
+    """Sweep λ and return (losses, grads) arrays for a given formulation."""
+    n = len(lambda_values)
+    losses = np.zeros(n)
+    grads = np.zeros(n)
+    for i, lam in enumerate(lambda_values):
+        if (i + 1) % 50 == 0:
+            print(f"  [{label}] {i+1}/{n}")
+        ell, g = compute_loss_grad(lam, r_true, H_true, gamma_true,
+                                   agg=agg, rho=rho)
+        losses[i] = ell
+        grads[i] = g
+    return losses, grads
+
+
+def _longest_flat_run(lam_vals, g, rel_thresh=0.05, min_frac=0.25):
+    """Return (x0, x1) of the longest contiguous run where |g| < rel_thresh·max|g|.
+
+    Returns None if the longest such run spans less than `min_frac` of the grid.
+    Used to highlight "vanishing gradient" plateaus on the gradient row.
+    """
+    g_abs = np.abs(np.asarray(g))
+    g_max = g_abs.max()
+    if g_max == 0:
+        return None
+    mask = g_abs < rel_thresh * g_max
+    n = len(mask)
+    best_start, best_end, best_len = 0, 0, 0
+    i = 0
+    while i < n:
+        if mask[i]:
+            j = i
+            while j < n and mask[j]:
+                j += 1
+            if j - i > best_len:
+                best_len = j - i
+                best_start, best_end = i, j - 1
+            i = j
+        else:
+            i += 1
+    if best_len < min_frac * n:
+        return None
+    return float(lam_vals[best_start]), float(lam_vals[best_end])
+
+
+def load_trained_agg(ckpt_path, n_clusters_fallback=10, r_embed_fallback=8,
+                     seed=1):
+    """Load a SoftAggDense module saved by train_elasticity.py.
+
+    Supports two checkpoint formats:
+      1. Payload dict: {'state_dict', 'n_states', 'n_actions',
+         'n_clusters', 'r_embed', ...}  (format written by
+         train_elasticity.py to `agg_state_final.pt`).
+      2. Raw state_dict (legacy format used by
+         `trained_agg_M{n_clusters}.pt`).
+    """
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+        agg = SoftAggDense(
+            n_states=int(ckpt.get('n_states', N_STATES)),
+            n_actions=int(ckpt.get('n_actions', N_ACTIONS)),
+            n_clusters=int(ckpt.get('n_clusters', n_clusters_fallback)),
+            r_embed=int(ckpt.get('r_embed', r_embed_fallback)),
+        )
+        agg.load_state_dict(ckpt['state_dict'])
+    else:
+        torch.manual_seed(seed)
+        agg = SoftAggDense(n_states=N_STATES, n_actions=N_ACTIONS,
+                           n_clusters=n_clusters_fallback,
+                           r_embed=r_embed_fallback)
+        agg.load_state_dict(ckpt)
+    agg.eval()
+    return agg
+
+
+def plot_landscape_comparison(lambda_values, r_true, H_true, gamma_true,
+                              n_clusters=10, rho_small=10.0, seed=1,
+                              output_dir='mdp_lp/plot_results',
+                              agg_ckpt=None):
+    L_orig, g_orig = sweep_loss_grad(
+        lambda_values, r_true, H_true, gamma_true,
+        rho=0.0, label="Original")
+
+    print(f"[3-col] Aug. Lagrangian (rho={rho_small}) ...")
+    L_lag, g_lag = sweep_loss_grad(
+        lambda_values, r_true, H_true, gamma_true,
+        rho=rho_small, label=f"Lag rho={rho_small:g}")
+
+    torch.manual_seed(seed)
+    agg = SoftAggDense(n_states=N_STATES, n_actions=N_ACTIONS,
+                       n_clusters=n_clusters, r_embed=8)
+    agg_src = f'random init (seed={seed})'
+
+    candidate_paths = []
+    if agg_ckpt is not None:
+        candidate_paths.append(agg_ckpt)
+    candidate_paths.append(os.path.join(output_dir, f'trained_agg_M{n_clusters}.pt'))
+
+    for path in candidate_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            print(f"Loading trained aggregation model from {path}")
+            agg = load_trained_agg(path, n_clusters_fallback=n_clusters, seed=seed)
+            agg_src = f'trained ({path})'
+            break
+        except RuntimeError as e:
+            print(f"  [3-col] Skipping {path} (schema mismatch: {e.__class__.__name__})")
+    agg.eval()
+    print(f"[3-col] Soft aggregation + penalty (M={n_clusters}, rho={rho_small}, {agg_src}) ...")
+    L_agg, g_agg = sweep_loss_grad(
+        lambda_values, r_true, H_true, gamma_true,
+        agg=agg, rho=rho_small, label=f"SoftAgg+pen M={n_clusters}")
+
+    losses = [L_orig, L_lag, L_agg]
+    def _moving_avg(y, window):
+        y = np.asarray(y, dtype=float)
+        kernel = np.ones(window) / window
+        padded = np.pad(y, (window // 2, window // 2), mode='edge')
+        return np.convolve(padded, kernel, mode='valid')[:len(y)]
+
+    smooth_win = max(5, len(lambda_values) // 40)   # ~10 points for 400-sample sweep
+    grads = [np.gradient(_moving_avg(L, smooth_win), lambda_values) for L in losses]
+
+    lambda_stars = [float(lambda_values[int(np.argmin(L))]) for L in losses]
+    shifts = [ls - LAMBDA_TRUE for ls in lambda_stars]
+
+    prev_rc = plt.rcParams.copy()
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.labelsize': 13,
+        'axes.titlesize': 13,
+        'axes.linewidth': 0.9,
+        'legend.fontsize': 9.5,
+        'legend.frameon': True,
+        'legend.framealpha': 0.92,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    })
+
+    fig, axes = plt.subplots(
+        2, 3, figsize=(14.8, 7.4),
+        gridspec_kw={'hspace': 0.34, 'wspace': 0.30})
+
+    col_titles = [
+        r'(a) Original loss:  $\mathcal{L}=-r_{\mathrm{true}}^{\!\top}\,y^{*}(\lambda)$',
+        rf'(b) Aug. Lagrangian  ($\rho={rho_small:g}$)',
+        rf'(c) Aug. Lagrangian + Soft agg.  ($\rho={rho_small:g},\,M={n_clusters}$)',
+    ]
+    col_colors = ['#455A64', '#E65100', '#1565C0']   # charcoal / orange / blue
+    lam_true_color = '#D32F2F'          # red dashed (matches both_methods_with_penalty.pdf)
+    minimiser_color = '#2E7D32'         # green minimiser dot (matches reference)
+    bias_band_color = '#D32F2F'         # red bias band |λ* − λ_true|
+    plateau_color = '#9E9E9E'           # gray vanishing-gradient plateau
+
+    # ───────── Row 1 — loss landscapes ─────────
+    for ax, L, ttl, c, lam_s in zip(axes[0], losses, col_titles, col_colors,
+                                    lambda_stars):
+        ax.plot(lambda_values, L, lw=1.8, color=c, solid_capstyle='round')
+        ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
+                   alpha=0.9, label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
+        ax.plot(lam_s, float(np.min(L)), marker='o', mfc=minimiser_color,
+                mec='white', ms=9, mew=1.3, ls='', zorder=5,
+                label=rf'$\lambda^{{*}}={lam_s:.2f}$')
+        ax.set_title(ttl, pad=8)
+        ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+        ax.legend(loc='best')
+    axes[0, 0].set_ylabel(r'Loss  $\mathcal{L}(\lambda)$')
+
+    # ───────── Row 2 — gradients with diagnostic overlays ─────────
+    dlam = float(lambda_values[1] - lambda_values[0])
+    for ax, g, c, lam_s, shift in zip(axes[1], grads, col_colors,
+                                       lambda_stars, shifts):
+        ax.plot(lambda_values, g, lw=1.8, color=c, solid_capstyle='round')
+
+        # (a)-type pathology: shade vanishing-gradient plateau if one exists.
+        flat = _longest_flat_run(lambda_values, g, rel_thresh=0.10, min_frac=0.35)
+        if flat is not None:
+            ax.axvspan(flat[0], flat[1], color=plateau_color, alpha=0.22, lw=0,
+                       label='vanishing gradient')
+
+        # (a)/(b)-type pathology: shade the bias band between λ* and λ_true.
+        if abs(shift) >= dlam:
+            x0, x1 = sorted([lam_s, LAMBDA_TRUE])
+            ax.axvspan(x0, x1, color=bias_band_color, alpha=0.18, lw=0,
+                       label=rf'$|\Delta\lambda|={abs(shift):.2f}$')
+
+        ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
+                   alpha=0.9, label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
+        ax.axhline(0.0, color='black', lw=1.0, alpha=0.80)
+
+        # Where gradient descent actually stops.
+        g_at_star = float(np.interp(lam_s, lambda_values, g))
+        ax.plot(lam_s, g_at_star, marker='o', mfc=minimiser_color, mec='white',
+                ms=9, mew=1.3, ls='', zorder=5,
+                label=rf'$\lambda^{{*}}={lam_s:.2f}$')
+
+        ax.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
+        ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+        ax.legend(loc='best')
+    axes[1, 0].set_ylabel(r'Gradient  $d\mathcal{L}/d\lambda$')
+
+    for ax in axes.flat:
+        ax.set_xlim(lambda_values[0], lambda_values[-1])
+
+    fig.suptitle(
+        r'Gradient descent stops where $d\mathcal{L}/d\lambda\!=\!0$:  '
+        r'(a) vanishing signal $\Rightarrow$ no descent;  '
+        r'(b) biased stationary point $\Rightarrow$ wrong $\lambda^{*}$;  '
+        r'(c) soft aggregation $\Rightarrow$ $\lambda^{*}\!\approx\!\lambda_{\mathrm{true}}$.',
+        fontsize=11.5, y=1.02)
+
+    out_path = os.path.join(output_dir, 'landscape_comparison_3col.pdf')
+    plt.savefig(out_path, bbox_inches='tight')
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+
+    print(f"\nSaved 2×3 landscape comparison to {out_path}")
+    print(f"  λ*  (a) original          = {lambda_stars[0]:.3f}   shift {shifts[0]:+.3f}")
+    print(f"  λ*  (b) aug-lag ρ={rho_small:<6g}= {lambda_stars[1]:.3f}   shift {shifts[1]:+.3f}")
+    print(f"  λ*  (c) soft agg M={n_clusters:<4}   = {lambda_stars[2]:.3f}   shift {shifts[2]:+.3f}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -381,10 +639,33 @@ def main():
                         help='Aggregation cluster sizes')
     parser.add_argument('--lambda-max', type=float, default=20.0,
                         help='Max lambda value')
+    parser.add_argument('--plot-3col-only', action='store_true',
+                        help='Only generate the 2×3 landscape-vs-gradient figure '
+                             '(skips the original per-metric combined_*.pdf sweeps)')
+    parser.add_argument('--cluster-3col', type=int, default=10,
+                        help='Cluster count M used for the soft-agg panel of the 2×3 figure')
+    parser.add_argument('--rho-3col', type=float, default=10.0,
+                        help='Small ρ used for the augmented-Lagrangian panel of the 2×3 figure')
+    parser.add_argument('--seed-3col', type=int, default=1,
+                        help='Seed for the random SoftAggDense init in the 2×3 figure')
+    parser.add_argument('--agg-ckpt', type=str, default=None,
+                        help='Path to a SoftAggDense checkpoint saved by '
+                             'train_elasticity.py (agg_state_final.pt). If '
+                             'provided, this overrides the default '
+                             'trained_agg_M{M}.pt lookup.')
     args = parser.parse_args()
 
     r_true, H_true, gamma_true, mdp_true = build_true_mdp()
     lambda_values = np.linspace(0.5, args.lambda_max, args.n_points)
+
+    if args.plot_3col_only:
+        plot_landscape_comparison(
+            lambda_values, r_true, H_true, gamma_true,
+            n_clusters=args.cluster_3col,
+            rho_small=args.rho_3col,
+            seed=args.seed_3col,
+            agg_ckpt=args.agg_ckpt)
+        return
 
     agg_colors = {10: '#2196F3', 20: '#4CAF50', 30: '#FF9800',
                   40: '#9C27B0', 50: '#F44336'}
@@ -401,7 +682,7 @@ def main():
     ))
 
     # State aggregation with random W
-    torch.manual_seed(42)
+    torch.manual_seed(1)
     for n_clust in args.clusters:
         agg = SoftAggDense(n_states=N_STATES, n_actions=N_ACTIONS,
                            n_clusters=n_clust, r_embed=8)
@@ -417,6 +698,13 @@ def main():
         ))
 
     plot_all(lambda_values, methods)
+
+    plot_landscape_comparison(
+        lambda_values, r_true, H_true, gamma_true,
+        n_clusters=args.cluster_3col,
+        rho_small=args.rho_3col,
+        seed=args.seed_3col,
+        agg_ckpt=args.agg_ckpt)
 
 
 if __name__ == "__main__":

@@ -189,6 +189,7 @@ class ContinuousActionFeatures(nn.Module):
         action_high: float = 1.0,
         tau_s: float = 0.5,
         sigma: float = None,
+        state_features_type: str = "softmax",  # "softmax" or "softplus"
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -198,6 +199,7 @@ class ContinuousActionFeatures(nn.Module):
         self.n_features = n_action_bases * d_per_action  # total d
         self.n_test_features = d_per_action              # m = k
         self.tau_s = tau_s
+        self.state_features_type = state_features_type
 
         # RBF bandwidth: default to spacing between centers
         if sigma is None:
@@ -207,13 +209,20 @@ class ContinuousActionFeatures(nn.Module):
         if hidden_dims is None:
             hidden_dims = [128, 128]
 
-        # Fixed RBF centers uniformly spanning the action range
+        # Fixed RBF centers: uniform grid (tensor product for multi-dim)
         if action_dim == 1:
             centers = torch.linspace(action_low, action_high, n_action_bases).unsqueeze(1)
         else:
-            # For multi-dim actions, use random uniform centers
-            centers = (torch.rand(n_action_bases, action_dim)
-                       * (action_high - action_low) + action_low)
+            # Tensor-product grid: n_per_dim^action_dim points
+            # n_action_bases is rounded down to nearest perfect power
+            import math
+            n_per_dim = max(2, int(round(n_action_bases ** (1.0 / action_dim))))
+            grid_1d = torch.linspace(action_low, action_high, n_per_dim)
+            meshes = torch.meshgrid(*[grid_1d] * action_dim, indexing="ij")
+            centers = torch.stack([m.flatten() for m in meshes], dim=1)
+            # Update n_action_bases to actual count
+            self.n_action_bases = centers.shape[0]
+            self.n_features = self.n_action_bases * d_per_action
         self.register_buffer("centers", centers)  # (n_bases, action_dim)
 
         # Learnable state network: state -> R^k logits -> softmax
@@ -231,10 +240,20 @@ class ContinuousActionFeatures(nn.Module):
         self.register_buffer("state_scales", state_scales)
 
     def _state_features(self, states: torch.Tensor) -> torch.Tensor:
-        """Soft state partition f(s).  (B, state_dim) -> (B, k)"""
+        """Non-negative state features f(s).  (B, state_dim) -> (B, k)
+
+        "softmax": soft partition (sums to 1) — good for discrete state aggregation
+        "softplus": smooth non-negative (no sum constraint) — can represent
+                    smooth functions like linear controls without simplex bottleneck
+        """
         norm_s = states / self.state_scales
-        logits = self.state_net(norm_s)
-        return torch.softmax(logits / self.tau_s, dim=1)
+        out = self.state_net(norm_s)
+        if self.state_features_type == "softmax":
+            return torch.softmax(out / self.tau_s, dim=1)
+        elif self.state_features_type == "softplus":
+            return torch.nn.functional.softplus(out / self.tau_s)
+        else:
+            raise ValueError(f"Unknown state_features_type: {self.state_features_type}")
 
     def _action_features(self, actions: torch.Tensor) -> torch.Tensor:
         """RBF action basis g(a).  (B,) or (B, action_dim) -> (B, n_bases)

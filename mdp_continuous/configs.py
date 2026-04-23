@@ -45,7 +45,7 @@ class CartPoleConfig:
     lr: float = 1e-3
     n_epochs: int = 100
     n_iterations: int = 20       # outer iterations for iterative refinement
-    dfl_lambda: float = 1.0      # penalty weight for flow residual
+    rho: float = 1.0      # penalty weight for flow residual
     qp_eta: float = 0.01         # QP regularization: spreads LP weight across features
     exploration_eps: float = 0.1  # epsilon-greedy exploration
 
