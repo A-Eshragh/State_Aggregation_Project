@@ -20,7 +20,6 @@ The figure demonstrates both headline claims of the paper at once:
 Usage:
     python -m mdp_lp.plot_dfl_seeds_results
     python -m mdp_lp.plot_dfl_seeds_results --exp b --cost high_margin
-    python -m mdp_lp.plot_dfl_seeds_results --show-seeds
 """
 
 from __future__ import annotations
@@ -47,8 +46,8 @@ PLOT_DIR.mkdir(exist_ok=True, parents=True)
 
 ALGOS = ("dfl", "dfl_qpth", "twostage")          # LP / KKT / regression baselines
 ALGO_LABEL = {
-    "dfl":      r"DFL-LP (ours)",
-    "dfl_qpth": r"DFL-KKT",
+    "dfl":      r"DFL-LP",
+    "dfl_qpth": r"DFL-QPTH",
     "twostage": r"Two-stage (MSE)",
 }
 ALGO_COLOR = {
@@ -163,8 +162,7 @@ def _mean_std(xs: np.ndarray) -> Tuple[float, float]:
 # Plotting
 # ---------------------------------------------------------------------------
 def plot_main_figure(agg: Dict[Tuple[str, int], Dict[str, np.ndarray]],
-                     out_path: Path,
-                     show_seeds: bool = True) -> None:
+                     out_path: Path) -> None:
     """Two-panel figure: normalized regret (left) and training time (right)."""
     x = np.arange(len(N_AGG_ORDER), dtype=float)
     width = 0.26
@@ -191,7 +189,7 @@ def plot_main_figure(agg: Dict[Tuple[str, int], Dict[str, np.ndarray]],
 
     def _plot_panel(ax, key: str, use_log: bool = False) -> None:
         for algo in ALGOS:
-            means, stds, has_data, cells = [], [], [], []
+            means, stds, has_data = [], [], []
             for n_agg in N_AGG_ORDER:
                 row = agg.get((algo, n_agg))
                 xs = row[key] if row is not None else np.array([])
@@ -199,7 +197,6 @@ def plot_main_figure(agg: Dict[Tuple[str, int], Dict[str, np.ndarray]],
                 means.append(m)
                 stds.append(s)
                 has_data.append(xs.size > 0)
-                cells.append(row)
             means = np.asarray(means)
             stds = np.asarray(stds)
             mask = np.array(has_data)
@@ -208,24 +205,6 @@ def plot_main_figure(agg: Dict[Tuple[str, int], Dict[str, np.ndarray]],
                    color=ALGO_COLOR[algo], edgecolor="black", linewidth=0.6,
                    label=ALGO_LABEL[algo], alpha=0.90,
                    error_kw=dict(ecolor="black", lw=0.8, alpha=0.85))
-            if show_seeds:
-                # Trace each seed across the four x-groups with a thin line so the
-                # reader can see whether the trend is consistent per seed.
-                seed_to_xy: Dict[int, List[Tuple[float, float]]] = defaultdict(list)
-                for p, row in zip(pos, [c for c, m in zip(cells, mask) if m]):
-                    for s_idx, seed in enumerate(row["seeds"]):
-                        seed_to_xy[int(seed)].append((p, float(row[key][s_idx])))
-                for seed, pts in seed_to_xy.items():
-                    if len(pts) == 0:
-                        continue
-                    pts_sorted = sorted(pts, key=lambda t: t[0])
-                    xs_s = [p for p, _ in pts_sorted]
-                    ys_s = [v for _, v in pts_sorted]
-                    ax.plot(xs_s, ys_s, color=ALGO_COLOR[algo], lw=0.7,
-                            alpha=0.55, zorder=4)
-                    ax.scatter(xs_s, ys_s, s=36, facecolor="white",
-                               edgecolor=ALGO_COLOR[algo], linewidths=1.2,
-                               zorder=6)
         if use_log:
             ax.set_yscale("log")
 
@@ -296,8 +275,6 @@ def main():
                    help="cost_case subfolder (default: high_margin)")
     p.add_argument("--out", default=str(PLOT_DIR / "elasticity_main.pdf"),
                    help="Output figure path (PDF)")
-    p.add_argument("--hide-seeds", action="store_true",
-                   help="Disable the per-seed dot/line overlay on the bars")
     args = p.parse_args()
 
     runs = collect_runs(args.exp, args.cost)
@@ -315,11 +292,10 @@ def main():
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    show_seeds = not args.hide_seeds
-    plot_main_figure(agg_common, out_path, show_seeds=show_seeds)
+    plot_main_figure(agg_common, out_path)
     # Also save a PNG preview for README/slides.
     png_path = out_path.with_suffix(".png")
-    plot_main_figure(agg_common, png_path, show_seeds=show_seeds)
+    plot_main_figure(agg_common, png_path)
     print(f"\nSaved figure to {out_path}\n           and {png_path}")
 
 

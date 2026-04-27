@@ -74,6 +74,16 @@ def parse_args() -> argparse.Namespace:
                    help="CE/DAgger supervised pretrain steps before iterative phase")
     p.add_argument("--eval_policy", type=str, default="ce", choices=["ce", "lp"],
                    help="Policy used for evaluation at each iteration")
+    p.add_argument("--n_ce_steps", type=int, default=2,
+                   help="In-loop DAgger CE steps per iteration. Set to 0 in "
+                        "offline mode to avoid LP-policy relabel collapse.")
+    p.add_argument("--n_dfl_steps", type=int, default=5,
+                   help="LP-DFL gradient steps per iteration "
+                        "(neural_dfl only).")
+    p.add_argument("--dfl_lr", type=float, default=None,
+                   help="LR for the DFL-phase optimizer. None = use --lr. "
+                        "A smaller value (e.g. 3e-4) keeps features near the "
+                        "BC basin and stabilizes late iterations.")
 
     # LP / shaping knobs
     p.add_argument("--gamma", type=float, default=0.99)
@@ -118,6 +128,9 @@ def main() -> None:
         tau=args.tau,
         pretrain_epochs=args.pretrain_epochs,
         eval_policy_type=args.eval_policy,
+        n_ce_steps=args.n_ce_steps,
+        n_dfl_steps=args.n_dfl_steps,
+        dfl_lr=args.dfl_lr,
     )
     total_time = time.time() - t0
 

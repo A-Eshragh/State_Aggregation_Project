@@ -6,6 +6,60 @@ import time
 import torch
 import random
 import numpy as np
+from mdp_lp.inventory_poisson_grad import poisson_pmf
+
+
+def estimate_penalty_lambda_star(
+    dfl_loss: torch.Tensor,
+    lambda_pred: torch.Tensor,
+    lambda_min: float = 1.0,
+    curvature_eps: float = 1e-6,
+    max_newton_step: float = 10.0,
+):
+    """
+    Estimate the stationary point lambda* of the penalty Lagrangian loss
+    with a local Newton step on lambda_pred:
+
+        lambda* ≈ lambda_pred - grad / h_diag
+
+    where grad = dL/dlambda_pred and h_diag is a curvature proxy obtained from
+    second-order autograd on the same batch objective.
+
+    Returns per-sample lists for the current batch, plus compact summaries.
+    """
+    grad = torch.autograd.grad(
+        dfl_loss, lambda_pred, retain_graph=True, create_graph=True, allow_unused=True
+    )[0]
+    if grad is None:
+        return None
+
+    h_diag = torch.autograd.grad(
+        grad.sum(), lambda_pred, retain_graph=True, allow_unused=True
+    )[0]
+    if h_diag is None:
+        h_diag = torch.zeros_like(grad)
+
+    safe_h = torch.where(
+        h_diag.abs() < float(curvature_eps),
+        torch.full_like(h_diag, float(curvature_eps)),
+        h_diag,
+    )
+    step = torch.clamp(grad / safe_h, min=-float(max_newton_step), max=float(max_newton_step))
+    lambda_star = lambda_pred - step
+    if lambda_min is not None:
+        lambda_star = torch.clamp(lambda_star, min=float(lambda_min))
+
+    lambda_star_flat = lambda_star.detach().reshape(-1)
+    grad_abs = grad.detach().abs()
+    grad_abs_flat = grad_abs.reshape(-1)
+    return {
+        "lambda_star_list": [float(x) for x in lambda_star_flat.cpu().tolist()],
+        "grad_abs_list": [float(x) for x in grad_abs_flat.cpu().tolist()],
+        "lambda_star_mean": float(lambda_star_flat.mean().item()),
+        "lambda_star_min": float(lambda_star_flat.min().item()),
+        "lambda_star_max": float(lambda_star_flat.max().item()),
+        "grad_abs_mean": float(grad_abs_flat.mean().item()),
+    }
 
 
 def compute_zero_grad_stats(v_star, lambda_pred, threshold=None, threshold_ratio=0.1):

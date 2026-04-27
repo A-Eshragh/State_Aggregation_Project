@@ -1,256 +1,431 @@
 """
-Evidence probe: with a FIXED random W, does DFL training trace the loss landscape?
+Plot-only: loss landscape L(λ) for a saved fixed aggregation matrix W.
 
-Setup (single-sample, scalar λ_pred):
-  - SoftAggDense with fixed_W=True — W is a random row-stochastic matrix, frozen,
-    independent of P, r, and λ.
-  - True problem: one λ_true, one price p. We hold them fixed and sweep λ_pred.
-  - Loss (same form used in training):
-        L(λ) = -r_true^T y_disagg(λ) + ρ · ||γ_true - H_true y_disagg(λ)||²
-    where y_disagg(λ) = disaggregate( LP_agg(H(λ), r(λ), γ) ).
+This script is meant to be run on an experiment output directory like:
 
-Three pieces of evidence:
-  (A) Scan λ over a grid, compute L(λ) via the forward-only LP solver (Gurobi).
-  (B) Treat λ_pred as a torch.Parameter and run Adam via the DIFFERENTIABLE LP.
-      Track the trajectory (λ_t, L_t) and overlay on the landscape.
-  (C) At each λ in the grid, compute the DFL autograd gradient and compare
-      against the finite-difference gradient of L. Agreement within basis cells
-      is the cleanest evidence that DFL is descending the landscape.
+  mdp_lp/results_elasticity/exp_b/high_margin/dfl/n_agg_10/epochs_300/
 
-Usage:
-    python -m mdp_lp.test_fixed_W_landscape
+where we expect:
+  - results.json (for MDP parameters)
+  - agg_W_fixed.pt (saved fixed W)   OR you can pass --w_path explicitly
+
+We sweep λ over a grid, build the (original) MDP at λ, aggregate (P,r,γ) with the
+saved fixed W, solve the aggregated occupancy LP with SciPy HiGHS, disaggregate
+occupancy back to original state space, and compute:
+
+    L(λ) = - r_true(λ_ref)^T y_disagg(λ) + ρ * mean((γ_ref - H_ref y_disagg(λ))^2)
+
+If --lambda_ref / --price_ref are omitted, the script reconstructs the saved
+experiment sample and uses that sample's true lambda and price by default.
+The scan also applies the same lambda floor used during training.
 """
 
 import time
+import json
+import argparse
+from pathlib import Path
+from typing import Optional
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 
+from mdp_lp.elasticity_model import ElasticityModel
 from mdp_lp.inventory_elasticity import create_inventory_from_lambda
-from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
-from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
+from mdp_lp.utils import set_seed
+
+try:
+    from scipy.optimize import linprog  # type: ignore
+except Exception as e:
+    raise RuntimeError(
+        "This script requires SciPy (for linprog/HiGHS). Install with `pip install scipy`."
+    ) from e
 
 
-# ─── Problem parameters (match plot_state_agg_landscape.py for comparability) ───
-B_MAX, S_MAX, Q_MAX = 5, 50, 30
-FOC, VOC, HC, BC, BETA, PRICE = 0, 0.5, 0.1, 0, 0.95, 10.0
-LAMBDA_TRUE = 10.0
-RHO = 10000.0
+def solve_lp_scipy(H: torch.Tensor, r: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+    """
+    Forward-only LP solve using SciPy HiGHS:
+        maximize r^T y  s.t. H y = gamma, y >= 0
+    Inputs are single-sample tensors:
+        H: (S, SA), r: (SA,), gamma: (S,)
+    Returns:
+        y: (SA,) torch tensor (float32)
+    """
+    H_np = H.detach().cpu().numpy()
+    r_np = r.detach().cpu().numpy()
+    g_np = gamma.detach().cpu().numpy()
 
-N_STATES = B_MAX + S_MAX + 1   # 56
-N_ACTIONS = Q_MAX + 1           # 31
-M_CLUSTERS = 10
-TAU = 0.5
-NORMALIZE_DISAGG = True
-EXPECTED_SUM = 1.0 / (1.0 - BETA)
+    # linprog minimizes; convert max r^T y -> min (-r)^T y
+    c = -r_np
+    res = linprog(
+        c=c,
+        A_eq=H_np,
+        b_eq=g_np,
+        bounds=(0.0, None),
+        method="highs",
+    )
+    if not res.success:
+        raise RuntimeError(f"SciPy linprog failed: status={res.status} msg={res.message}")
+    y = torch.tensor(res.x, dtype=torch.float32)
+    return y
 
 
-def build_mdp(lam_val):
-    lam = torch.as_tensor([float(lam_val)], dtype=torch.float32)
-    p = torch.tensor([PRICE], dtype=torch.float32)
-    return create_inventory_from_lambda(lam, B_MAX, S_MAX, Q_MAX,
-                                        FOC, VOC, HC, BC, BETA, p)
+def _aggregate_with_fixed_W(P: torch.Tensor, r: torch.Tensor, gamma: torch.Tensor, W: torch.Tensor, eps: float = 1e-8):
+    """
+    Aggregate (P, r, gamma) with a fixed membership matrix W.
+
+    Args:
+        P: (B,S,A,S)
+        r: (B,S,A)
+        gamma: (B,S)
+        W: (S,M) or (B,S,M)
+    Returns:
+        P_agg: (B,M,A,M)
+        r_agg: (B,M,A)
+        gamma_agg: (B,M)
+        info: dict with 'W' (B,S,M)
+    """
+    if W.dim() == 2:
+        Wb = W.unsqueeze(0).expand(P.shape[0], -1, -1)
+    else:
+        Wb = W
+    mass = Wb.sum(dim=1).clamp_min(eps)  # (B,M)
+    r_agg = torch.einsum("bsm,bsa->bma", Wb, r) / mass.unsqueeze(-1)
+    right = torch.einsum("bsaj,bjm->bsam", P, Wb)
+    p_hat = torch.einsum("bsm,bsan->bman", Wb, right)
+    P_agg = p_hat / mass[:, :, None, None]
+    P_agg = P_agg.clamp_min(0.0)
+    P_agg = P_agg / P_agg.sum(dim=-1, keepdim=True).clamp_min(eps)
+    gamma_agg = torch.einsum("bs,bsm->bm", gamma, Wb).clamp_min(eps)
+    gamma_agg = gamma_agg / gamma_agg.sum(dim=1, keepdim=True).clamp_min(eps)
+    return P_agg, r_agg, gamma_agg, {"W": Wb}
 
 
-def uniform_gamma(mdp):
+def _uniform_gamma(mdp):
     S = mdp.P.shape[1]
     g = mdp.build_gamma(1, S, torch.device("cpu"))
     g = torch.clamp(g, min=1e-8)
     return g / g.sum(dim=1, keepdim=True)
 
 
-def dfl_loss_forward_only(lam_val, agg, r_true_flat, H_true, gamma_true, solver):
-    """L(λ) using the non-differentiable Gurobi solver (for landscape scan)."""
+def _sample_prices_and_lambdas_from_cfg(args_cfg: dict):
+    """Recreate the experiment's sampled prices and lambda_true values."""
+    set_seed(int(args_cfg["seed"]))
+    device = torch.device("cpu")
+    n_samples = int(args_cfg.get("generated_n_samples", args_cfg["n_samples"]))
+    experiment_type = str(args_cfg["experiment_type"])
+
+    if experiment_type == "a":
+        p = torch.ones(n_samples, device=device) * float(args_cfg["p_constant"])
+        p_related = None
+    elif experiment_type == "b":
+        if bool(args_cfg.get("fixed_p", False)):
+            p = torch.arange(1, n_samples + 1, dtype=torch.float32, device=device)
+        else:
+            p = torch.exp(
+                torch.randn(n_samples, device=device) * float(args_cfg["p_lognormal_std"])
+                + np.log(float(args_cfg["p_lognormal_mean"]))
+            )
+        p_related = None
+    elif experiment_type == "c":
+        p = torch.exp(
+            torch.randn(n_samples, device=device) * float(args_cfg["p_lognormal_std"])
+            + np.log(float(args_cfg["p_lognormal_mean"]))
+        )
+        p_related = torch.exp(
+            torch.randn(n_samples, device=device) * float(args_cfg["p_related_lognormal_std"])
+            + np.log(float(args_cfg["p_related_lognormal_mean"]))
+        )
+    else:
+        raise ValueError(f"Unsupported experiment_type={experiment_type!r}")
+
+    gt_elasticity = ElasticityModel(
+        beta_0=float(args_cfg["beta_0"]),
+        beta_1=float(args_cfg["beta_1"]),
+        beta_2=float(args_cfg["beta_2"]),
+        sigma_epsilon=float(args_cfg["sigma_epsilon"]),
+    )
+    lambda_true = gt_elasticity(p, p_related)
+    return p.cpu(), None if p_related is None else p_related.cpu(), lambda_true.cpu()
+
+
+def _split_dataset_indices(n_samples: int, seed: int):
+    if n_samples <= 1:
+        return [0], [0]
+    train_size = n_samples // 2
+    perm = torch.randperm(n_samples, generator=torch.Generator().manual_seed(int(seed))).tolist()
+    return perm[:train_size], perm[train_size:]
+
+
+def _resolve_reference_values(
+    args_cfg: dict,
+    ref_split: str,
+    ref_index: int,
+    lambda_ref_override: Optional[float],
+    price_ref_override: Optional[float],
+):
+    if lambda_ref_override is not None and price_ref_override is not None:
+        return float(lambda_ref_override), float(price_ref_override), {
+            "source": "explicit",
+            "split": ref_split,
+            "ref_index": ref_index,
+            "sample_index": None,
+            "p_related_ref": None,
+        }
+
+    p_saved = args_cfg.get("p_values_used")
+    p_related_saved = args_cfg.get("p_related_values_used")
+    p, p_related, lambda_true = _sample_prices_and_lambdas_from_cfg(args_cfg)
+    if p_saved is not None:
+        p = torch.as_tensor(p_saved, dtype=torch.float32)
+    if p_related_saved is not None:
+        p_related = torch.as_tensor(p_related_saved, dtype=torch.float32)
+
+    n_samples = int(p.shape[0])
+    train_idx, test_idx = _split_dataset_indices(n_samples, int(args_cfg["seed"]))
+    if ref_split == "train":
+        split_indices = train_idx
+    elif ref_split == "test":
+        split_indices = test_idx
+    elif ref_split == "all":
+        split_indices = list(range(n_samples))
+    else:
+        raise ValueError(f"Unsupported reference split {ref_split!r}")
+
+    if not split_indices:
+        raise ValueError(f"No samples available in split {ref_split!r}")
+    if ref_index < 0 or ref_index >= len(split_indices):
+        raise IndexError(
+            f"reference_index={ref_index} is out of range for split {ref_split!r} "
+            f"(size={len(split_indices)})"
+        )
+
+    sample_index = split_indices[ref_index]
+    lambda_ref = float(lambda_true[sample_index].item()) if lambda_ref_override is None else float(lambda_ref_override)
+    price_ref = float(p[sample_index].item()) if price_ref_override is None else float(price_ref_override)
+    p_related_ref = None if p_related is None else float(p_related[sample_index].item())
+    return lambda_ref, price_ref, {
+        "source": "reconstructed" if p_saved is None else "saved_prices+reconstructed_lambda",
+        "split": ref_split,
+        "ref_index": ref_index,
+        "sample_index": sample_index,
+        "p_related_ref": p_related_ref,
+    }
+
+
+def loss_landscape_forward(
+    lam_val: float,
+    W_fixed: torch.Tensor,
+    args_cfg: dict,
+    lambda_ref: float,
+    price_ref: float,
+    lambda_floor: float,
+) -> float:
+    """Forward-only L(λ) using SciPy linprog and a saved fixed W."""
     with torch.no_grad():
-        mdp = build_mdp(lam_val)
-        gamma = uniform_gamma(mdp)
-        P_agg, r_agg, gamma_agg, info = agg(mdp.P, mdp.r, gamma, tau=TAU)
-        H_agg = mdp.build_H(P_agg)
-        r_flat_agg = r_agg.reshape(1, -1)
-        y_agg, _, _ = solver.solve(H_agg, r_flat_agg, gamma_agg)
-        y_orig = SoftAggDense.disaggregate_y(y_agg, info["W"], N_ACTIONS)
-        if NORMALIZE_DISAGG:
+        b_max, s_max, q_max = int(args_cfg["b_max"]), int(args_cfg["s_max"]), int(args_cfg["q_max"])
+        foc, voc, hc, bc = float(args_cfg["foc"]), float(args_cfg["voc"]), float(args_cfg["hc"]), float(args_cfg["bc"])
+        beta = float(args_cfg["beta"])
+        rho = float(args_cfg.get("aug_lag_rho", 10000.0))
+        normalize_disagg = bool(args_cfg.get("normalize_disagg", True))
+
+        # Match training: lambda_pred is clamped below by 1.0 before building the MDP.
+        lam_eff = max(float(lam_val), float(lambda_floor))
+        lam = torch.as_tensor([lam_eff], dtype=torch.float32)
+        p = torch.as_tensor([float(price_ref)], dtype=torch.float32)
+        mdp = create_inventory_from_lambda(lam, b_max, s_max, q_max, foc, voc, hc, bc, beta, p)
+        gamma = _uniform_gamma(mdp)
+        P_agg, r_agg, gamma_agg, info = _aggregate_with_fixed_W(mdp.P, mdp.r, gamma, W_fixed)
+
+        # Build H for aggregated MDP and solve occupancy
+        H_agg = mdp.build_H(P_agg)[0]  # (M, M*A) for B=1
+        r_flat_agg = r_agg.reshape(1, -1)[0]
+        gamma_agg = gamma_agg[0]
+        y_agg = solve_lp_scipy(H_agg, r_flat_agg, gamma_agg).view(1, -1)
+
+        # Disaggregate occupancy for loss computation
+        n_actions = q_max + 1
+        y_orig = SoftAggDense.disaggregate_y(y_agg, info["W"], n_actions)
+        if normalize_disagg:
+            expected_sum = 1.0 / (1.0 - beta)
             y_sum = y_orig.sum(dim=1, keepdim=True).clamp_min(1e-8)
-            y_orig = y_orig * (EXPECTED_SUM / y_sum)
-        dfl = -(r_true_flat * y_orig).sum().item()
-        violation = gamma_true - (H_true @ y_orig.unsqueeze(-1)).squeeze(-1)
-        pen = violation.pow(2).sum().item()
-    return dfl + RHO * pen
+            y_orig = y_orig * (expected_sum / y_sum)
 
+        # Reference quantities at (lambda_ref, price_ref)
+        lam_ref = torch.as_tensor([float(lambda_ref)], dtype=torch.float32)
+        mdp_ref = create_inventory_from_lambda(lam_ref, b_max, s_max, q_max, foc, voc, hc, bc, beta, p)
+        r_ref_flat = mdp_ref.r.reshape(1, -1)
+        H_ref = mdp_ref.build_H(mdp_ref.P)
+        gamma_ref = _uniform_gamma(mdp_ref)
 
-def dfl_loss_differentiable(lam_tensor, agg, r_true_flat, H_true, gamma_true):
-    """L(λ) built through the DIFFERENTIABLE LP (autograd flows back to lam_tensor)."""
-    lam = lam_tensor.view(1)
-    p = torch.tensor([PRICE], dtype=torch.float32)
-    mdp = create_inventory_from_lambda(lam, B_MAX, S_MAX, Q_MAX,
-                                       FOC, VOC, HC, BC, BETA, p)
-    gamma = uniform_gamma(mdp)
-    P_agg, r_agg, gamma_agg, info = agg(mdp.P, mdp.r, gamma, tau=TAU)
-    H_agg = mdp.build_H(P_agg)
-    r_flat_agg = r_agg.reshape(1, -1)
-    y_agg = DifferentiableLPSolver.apply(H_agg, r_flat_agg, gamma_agg)
-    y_orig = SoftAggDense.disaggregate_y(y_agg, info["W"], N_ACTIONS)
-    if NORMALIZE_DISAGG:
-        y_sum = y_orig.sum(dim=1, keepdim=True).clamp_min(1e-8)
-        y_orig = y_orig * (EXPECTED_SUM / y_sum)
-    dfl = -(r_true_flat * y_orig).sum()
-    violation = gamma_true - (H_true @ y_orig.unsqueeze(-1)).squeeze(-1)
-    pen = violation.pow(2).sum()
-    return dfl + RHO * pen
+        dfl = -(r_ref_flat * y_orig).sum().item()
+        violation = gamma_ref - (H_ref @ y_orig.unsqueeze(-1)).squeeze(-1)
+        pen = violation.pow(2).mean().item()
+        return float(dfl + rho * pen)
 
 
 def main():
-    out_dir = "mdp_lp/plot_results"
-
-    # ── Fixed-W aggregator (non-trainable; independent of P, λ) ──
-    agg = SoftAggDense(
-        n_states=N_STATES, n_actions=N_ACTIONS, n_clusters=M_CLUSTERS,
-        r_embed=8, fixed_W=True, fixed_W_seed=42,
+    parser = argparse.ArgumentParser(description="Plot L(lambda) landscape using saved fixed W.")
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default="",
+        help="Experiment output directory containing results.json and agg_W_fixed.pt",
     )
-    agg.eval()
-    for p in agg.parameters():  # no parameters, but buffers already frozen.
-        p.requires_grad_(False)
+    parser.add_argument(
+        "--w_path",
+        type=str,
+        default="",
+        help="Optional explicit path to agg_W_fixed.pt (overrides results_dir/agg_W_fixed.pt).",
+    )
+    parser.add_argument(
+        "--lambda_ref",
+        type=float,
+        default=None,
+        help="Optional explicit reference lambda. If omitted, infer from the saved experiment sample.",
+    )
+    parser.add_argument(
+        "--price_ref",
+        type=float,
+        default=None,
+        help="Optional explicit reference price. If omitted, infer from the saved experiment sample.",
+    )
+    parser.add_argument(
+        "--reference_split",
+        type=str,
+        choices=["train", "test", "all"],
+        default="train",
+        help="Which saved sample split to use when inferring lambda_ref/price_ref.",
+    )
+    parser.add_argument(
+        "--reference_index",
+        type=int,
+        default=0,
+        help="Index inside the selected reference split when inferring lambda_ref/price_ref.",
+    )
+    parser.add_argument("--lam_min", type=float, default=5.0)
+    parser.add_argument("--lam_max", type=float, default=6.0)
+    parser.add_argument("--n_grid", type=int, default=1000)
+    parser.add_argument(
+        "--lambda_floor",
+        type=float,
+        default=1.0,
+        help="Clamp scan lambda to at least this value to match training-time lambda_pred flooring.",
+    )
+    parser.add_argument("--out_dir", type=str, default="mdp_lp/plot_results")
+    args = parser.parse_args()
 
-    # Sanity: W is a valid row-stochastic matrix.
-    W = agg.W_fixed
-    row_sums = W.sum(dim=1)
-    print(f"[W] shape={tuple(W.shape)}  row_sum min/max=({row_sums.min():.6f}, {row_sums.max():.6f})")
+    if args.results_dir:
+        results_dir = Path(args.results_dir)
+    elif args.w_path:
+        results_dir = Path(args.w_path).resolve().parent
+    else:
+        raise ValueError("Provide --results_dir or --w_path.")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── True problem ──
-    mdp_true = build_mdp(LAMBDA_TRUE)
-    r_true_flat = mdp_true.r.reshape(1, -1).detach()
-    H_true = mdp_true.build_H(mdp_true.P).detach()
-    gamma_true = uniform_gamma(mdp_true).detach()
+    cfg = json.loads((results_dir / "results.json").read_text())
+    w_path = Path(args.w_path) if args.w_path else (results_dir / "agg_W_fixed.pt")
+    payload = torch.load(w_path, map_location="cpu")
+    if isinstance(payload, dict) and "W_fixed" in payload:
+        W_fixed = payload["W_fixed"].detach().cpu()
+        fixed_seed = int(payload.get("fixed_W_seed", cfg.get("agg_fixed_W_seed", -1)))
+        w_n_states = payload.get("n_states", None)
+        w_n_actions = payload.get("n_actions", None)
+        w_n_clusters = payload.get("n_clusters", None)
+    else:
+        raise RuntimeError(f"Expected a dict with key 'W_fixed' in {w_path}")
 
-    solver = DenseLPSolver()
+    # Sanity checks
+    if W_fixed.dim() != 2:
+        raise ValueError(f"W_fixed must be 2D (S,M); got {tuple(W_fixed.shape)}")
+    # Ensure the saved W matches the experiment config.
+    cfg_seed = cfg.get("agg_fixed_W_seed", None)
+    cfg_n_agg = cfg.get("n_agg", None)
+    cfg_n_states = int(cfg["b_max"]) + int(cfg["s_max"]) + 1
+    cfg_n_actions = int(cfg["q_max"]) + 1
 
-    # (A) Landscape scan
-    lambda_grid = np.linspace(0.5, 50.0, 150)
+    if cfg_seed is not None and int(cfg_seed) != int(fixed_seed):
+        raise RuntimeError(
+            f"Seed mismatch: results.json has agg_fixed_W_seed={cfg_seed} but {w_path.name} has fixed_W_seed={fixed_seed}. "
+            "You are not plotting the same W used in training."
+        )
+    if cfg_n_agg is not None and int(cfg_n_agg) != int(W_fixed.shape[1]):
+        raise RuntimeError(
+            f"Cluster mismatch: results.json n_agg={cfg_n_agg} but W_fixed has M={int(W_fixed.shape[1])}."
+        )
+    if int(W_fixed.shape[0]) != int(cfg_n_states):
+        raise RuntimeError(
+            f"State mismatch: results.json implies S={cfg_n_states} (b_max+s_max+1) but W_fixed has S={int(W_fixed.shape[0])}."
+        )
+    # Optional metadata checks from the payload (if present).
+    if w_n_states is not None and int(w_n_states) != int(cfg_n_states):
+        raise RuntimeError(f"W payload n_states={w_n_states} but results.json implies {cfg_n_states}.")
+    if w_n_actions is not None and int(w_n_actions) != int(cfg_n_actions):
+        raise RuntimeError(f"W payload n_actions={w_n_actions} but results.json implies {cfg_n_actions}.")
+    if w_n_clusters is not None and cfg_n_agg is not None and int(w_n_clusters) != int(cfg_n_agg):
+        raise RuntimeError(f"W payload n_clusters={w_n_clusters} but results.json n_agg={cfg_n_agg}.")
+
+    row_sums = W_fixed.sum(dim=1)
+    print(f"[W] loaded from {w_path}  seed={fixed_seed}  shape={tuple(W_fixed.shape)}  row_sum min/max=({row_sums.min():.6f},{row_sums.max():.6f})")
+
+    lambda_ref, price_ref, ref_info = _resolve_reference_values(
+        cfg,
+        ref_split=args.reference_split,
+        ref_index=int(args.reference_index),
+        lambda_ref_override=args.lambda_ref,
+        price_ref_override=args.price_ref,
+    )
+    ref_msg = (
+        f"[Ref] source={ref_info['source']} split={ref_info['split']} "
+        f"ref_index={ref_info['ref_index']} sample_index={ref_info['sample_index']} "
+        f"lambda_ref={lambda_ref:.6f} price_ref={price_ref:.6f}"
+    )
+    if ref_info["p_related_ref"] is not None:
+        ref_msg += f" p_related_ref={ref_info['p_related_ref']:.6f}"
+    print(ref_msg)
+    print(f"[Scan] raw lambda range=[{float(args.lam_min):.4f}, {float(args.lam_max):.4f}] with lambda_floor={float(args.lambda_floor):.4f}")
+
+    lam_grid = np.linspace(float(args.lam_min), float(args.lam_max), int(args.n_grid))
+    L_grid = np.zeros_like(lam_grid, dtype=float)
     t0 = time.time()
-    L_grid = np.array([
-        dfl_loss_forward_only(lam, agg, r_true_flat, H_true, gamma_true, solver)
-        for lam in lambda_grid
-    ])
-    print(f"[Landscape] scanned {len(lambda_grid)} λ values in {time.time()-t0:.1f}s")
+    for i, lam in enumerate(lam_grid):
+        L_grid[i] = loss_landscape_forward(
+            lam_val=float(lam),
+            W_fixed=W_fixed,
+            args_cfg=cfg,
+            lambda_ref=lambda_ref,
+            price_ref=price_ref,
+            lambda_floor=float(args.lambda_floor),
+        )
+    print(f"[Landscape] computed {len(lam_grid)} points in {time.time()-t0:.1f}s")
+    lam_min = float(lam_grid[np.argmin(L_grid)])
+    L_min = float(L_grid.min())
+    print(f"[Landscape] min at λ≈{lam_min:.4f}, L≈{L_min:.3f}")
 
-    # (B) Training trajectories from several inits
-    init_lams = [2.0, 6.0, 18.0, 35.0]
-    n_steps = 80
-    lr = 0.3
-    trajectories = {}
-    for init in init_lams:
-        lam_param = torch.tensor(float(init), requires_grad=True)
-        opt = torch.optim.Adam([lam_param], lr=lr)
-        traj_lams, traj_losses = [], []
-        for _ in range(n_steps):
-            opt.zero_grad()
-            loss = dfl_loss_differentiable(lam_param, agg, r_true_flat, H_true, gamma_true)
-            loss.backward()
-            traj_lams.append(float(lam_param.detach().clone()))
-            traj_losses.append(float(loss.detach().clone()))
-            opt.step()
-            # soft box: keep λ strictly positive and within scan range.
-            with torch.no_grad():
-                lam_param.clamp_(min=0.5, max=50.0)
-        traj_lams.append(float(lam_param.detach().clone()))
-        trajectories[init] = (np.array(traj_lams), np.array(traj_losses))
-        print(f"[SGD] init λ₀={init:5.1f} → final λ={traj_lams[-1]:.3f}   final L={traj_losses[-1]:.2f}")
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception as e:
+        raise RuntimeError("matplotlib is required for plotting. Install with `pip install matplotlib`.") from e
 
-    # (C) Autograd vs finite-difference gradient on a coarse grid.
-    # Use a SMALL h for the FD so it stays within-basis (matches what autograd
-    # computes). Basis changes will still show up as ratio ≠ 1 at a few points.
-    grad_grid = np.linspace(1.0, 45.0, 90)
-    g_autograd = np.zeros_like(grad_grid)
-    g_fd_small_h = np.zeros_like(grad_grid)
-    h_fd = 0.05
-    for i, lam in enumerate(grad_grid):
-        lam_t = torch.tensor(float(lam), requires_grad=True)
-        L = dfl_loss_differentiable(lam_t, agg, r_true_flat, H_true, gamma_true)
-        (g,) = torch.autograd.grad(L, lam_t)
-        g_autograd[i] = float(g)
-        L_hi = dfl_loss_forward_only(lam + h_fd, agg, r_true_flat, H_true, gamma_true, solver)
-        L_lo = dfl_loss_forward_only(lam - h_fd, agg, r_true_flat, H_true, gamma_true, solver)
-        g_fd_small_h[i] = (L_hi - L_lo) / (2 * h_fd)
-    # Also keep the coarse FD from the landscape scan — useful to see basis jumps
-    g_fd_scan = np.gradient(L_grid, lambda_grid)
-
-    # ────────────────────────────── Plot ──────────────────────────────
-    fig, axes = plt.subplots(3, 1, figsize=(13, 12),
-                             gridspec_kw={"height_ratios": [3, 2, 2]})
-    ax = axes[0]
-    ax.plot(lambda_grid, L_grid, "k-", lw=1.6, alpha=0.55,
-            label=f"Landscape L(λ) — forward LP scan")
-    cmap = plt.cm.viridis(np.linspace(0.05, 0.9, len(init_lams)))
-    for (init, (traj_lams, traj_losses)), color in zip(trajectories.items(), cmap):
-        ax.plot(traj_lams[:-1], traj_losses, "o-", color=color, ms=3, lw=1.2, alpha=0.9,
-                label=f"Adam from λ₀={init}")
-        ax.plot(traj_lams[0], traj_losses[0], "s", color=color, ms=10, mec="k", mew=0.6)
-        # evaluate L at final λ (closed-form via forward LP)
-        L_final = dfl_loss_forward_only(traj_lams[-1], agg, r_true_flat, H_true, gamma_true, solver)
-        ax.plot(traj_lams[-1], L_final, "*", color=color, ms=16, mec="k", mew=0.6)
-    ax.axvline(LAMBDA_TRUE, color="red", ls="--", lw=1.4, label=f"λ_true={LAMBDA_TRUE}")
-    ax.set_xlabel("λ_pred")
-    ax.set_ylabel(f"L(λ) = -r_true·y*(λ) + {RHO:g}·‖γ-Hy*‖²")
-    ax.set_title(f"Fixed random W (seed=42, M={M_CLUSTERS}):  DFL trajectories vs loss landscape\n"
-                 f"■ = init, ★ = end.   Adam lr={lr}, {n_steps} steps")
+    fig, ax = plt.subplots(1, 1, figsize=(7.0, 4.3))
+    ax.plot(lam_grid, L_grid, "k-", lw=1.8, alpha=0.85)
+    ax.axvline(lambda_ref, color="red", ls="--", lw=1.2, label=f"λ_ref={lambda_ref:.2f}")
+    ax.axvline(lam_min, color="#1f77b4", ls=":", lw=1.2, label=f"scan_min≈{lam_min:.2f}")
+    if float(args.lam_min) < float(args.lambda_floor) < float(args.lam_max):
+        ax.axvline(float(args.lambda_floor), color="gray", ls="-.", lw=1.0, label=f"λ_floor={args.lambda_floor:g}")
+    ax.set_xlabel("λ")
+    ax.set_ylabel("L(λ)")
+    ax.set_title(
+        f"Landscape with saved fixed W (seed={fixed_seed})\n"
+        f"{results_dir.name} | p_ref={price_ref:.3f}"
+    )
+    ax.grid(True, alpha=0.25)
     ax.legend(loc="best", fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Middle panel: autograd vs small-h FD on the same scale (symlog).
-    ax2 = axes[1]
-    ax2.plot(grad_grid, g_autograd, "o-", color="#1f77b4", ms=4,
-             label="DFL autograd  ∂L/∂λ")
-    ax2.plot(grad_grid, g_fd_small_h, "x--", color="#d62728", ms=5, lw=1.0,
-             label=f"Finite diff (h={h_fd})")
-    ax2.axhline(0, color="k", lw=0.5)
-    ax2.axvline(LAMBDA_TRUE, color="red", ls="--", lw=1.2)
-    ax2.set_yscale("symlog", linthresh=10)
-    ax2.set_xlabel("λ")
-    ax2.set_ylabel("∂L/∂λ  (symlog)")
-    ax2.set_title("Within-basis gradient agreement: DFL autograd ≈ FD with small h.\n"
-                  "Isolated spikes = basis changes occurring inside [λ-h, λ+h].")
-    ax2.legend(loc="best", fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    # Bottom panel: ratio autograd / FD (should be ≈1 within basis).
-    ax3 = axes[2]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(np.abs(g_fd_small_h) > 1e-6,
-                         g_autograd / g_fd_small_h, np.nan)
-    ax3.plot(grad_grid, ratio, "o-", color="#2ca02c", ms=4,
-             label="autograd / FD")
-    ax3.axhline(1.0, color="k", lw=0.7, ls="--", label="ideal = 1")
-    ax3.axvline(LAMBDA_TRUE, color="red", ls="--", lw=1.2)
-    ax3.set_ylim(-0.5, 2.0)
-    ax3.set_xlabel("λ")
-    ax3.set_ylabel("ratio")
-    ax3.set_title("Autograd/FD ratio — clustering near 1.0 confirms the DFL gradient = true landscape slope.")
-    ax3.legend(loc="best", fontsize=9)
-    ax3.grid(True, alpha=0.3)
-
     plt.tight_layout()
-    png = f"{out_dir}/fixed_W_landscape_trajectory.png"
-    pdf = f"{out_dir}/fixed_W_landscape_trajectory.pdf"
-    plt.savefig(png, dpi=150, bbox_inches="tight")
-    plt.savefig(pdf, bbox_inches="tight")
-    print(f"[Saved] {png}")
-    print(f"[Saved] {pdf}")
 
-    # ── Quantitative summary ──
-    lam_min = float(lambda_grid[np.argmin(L_grid)])
-    print(f"\n[Summary] λ with min L on scan:  {lam_min:.3f}   (λ_true={LAMBDA_TRUE})")
-    print(f"[Summary] min L on scan:         {L_grid.min():.3f}")
-    # Fraction of grad grid where autograd and FD have the same sign
-    signs_match = np.sign(g_autograd) == np.sign(g_fd_small_h)
-    print(f"[Summary] sign(autograd)==sign(FD[h={h_fd}]) on grid: "
-          f"{signs_match.mean()*100:.1f}% ({signs_match.sum()}/{len(signs_match)})")
-    # Ratio close to 1 quantifies true within-basis agreement
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(np.abs(g_fd_small_h) > 1e-6, g_autograd / g_fd_small_h, np.nan)
-    in_band = np.isfinite(ratio) & (np.abs(ratio - 1.0) < 0.1)
-    print(f"[Summary] |ratio-1|<0.1 (within-basis agreement): "
-          f"{in_band.mean()*100:.1f}% ({in_band.sum()}/{np.isfinite(ratio).sum()})")
+    pdf = out_dir / "fixed_W_landscape.pdf"
+    plt.savefig(pdf, bbox_inches="tight")
+    print(f"[Saved] {pdf}")
 
 
 if __name__ == "__main__":
