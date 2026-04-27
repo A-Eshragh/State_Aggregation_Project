@@ -16,13 +16,37 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from mdp_lp.elasticity_model import ElasticityModel, LambdaPredictor
 from mdp_lp.inventory_elasticity import create_inventory_from_lambda
-from mdp_lp.utils import solve_lp, compute_zero_grad_stats
+from mdp_lp.utils import (
+    solve_lp,
+    compute_zero_grad_stats,
+    estimate_penalty_lambda_star,
+)
 from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
-from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
+from mdp_lp.solvers.differentiable_lp_dual import DifferentiableLPSolverDual
 from mdp_lp.solvers.differentiable_qp import DifferentiableQPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
+from mdp_lp.solvers.sketched_lp import sketched_lp
 from mdp_lp.inventory_poisson_grad import poisson_pmf
+
+
+def _sketched_lp_from_args(H, r, gamma, args, batch_idx=0, epoch=0):
+    """Helper: pull sketch hyperparameters from args and call sketched_lp."""
+    base_seed = getattr(args, "sketch_seed", None)
+    if base_seed is None:
+        seed_for_call = None
+    else:
+        # Vary the seed per (epoch, batch) so sketches stay independent across
+        # iterations but reproducible given a fixed --sketch_seed.
+        seed_for_call = int(base_seed) + 10007 * int(epoch) + int(batch_idx)
+    return sketched_lp(
+        H, r, gamma,
+        n_sketches=int(getattr(args, "n_sketches", 4)),
+        sketch_ratio=float(getattr(args, "sketch_ratio", 0.7)),
+        sketch_mode=str(getattr(args, "sketch_mode", "gaussian")),
+        sketch_seed=seed_for_call,
+        beta=float(getattr(args, "beta", 0.95)),
+    )
 
 
 def prepare_elasticity_data(args):
@@ -410,10 +434,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     #     save_full_partial = False
 
     pred_model.train()
-    if args.algo == "dfl" or args.algo == "dfl_qpth":
+    if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
         pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=50)
 
-    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth"):
+    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
         n_states = args.b_max + args.s_max + 1
         n_actions = args.q_max + 1
         _rng_state = torch.get_rng_state()
@@ -423,12 +447,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             n_actions=n_actions,
             n_clusters=args.n_agg,
             r_embed=getattr(args, "sa_r_embed", 8),
+            fixed_W=bool(getattr(args, "agg_fixed_W", False)),
+            fixed_W_seed=int(getattr(args, "agg_fixed_W_seed", 1)),
         ).to(device)
         torch.set_rng_state(_rng_state)
+        # NOTE: --agg_lr_ratio is documented as "Aggregator LR as fraction of
+        # predictor LR (two-timescale training)". Earlier this was inverted —
+        # the ratio was applied to the predictor, so with the default
+        # agg_lr_ratio=0.01 the predictor learned at 1/100 the aggregator's
+        # rate and collapsed to a near-constant while W absorbed all input
+        # variation. The predictor now keeps `learning_rate`, the aggregator
+        # is scaled by agg_lr_ratio (matching the documented intent).
         agg_lr_ratio = float(getattr(args, "agg_lr_ratio", 0.01))
         optimizer = optim.Adam([
-            {"params": pred_model.parameters(), "lr": learning_rate * agg_lr_ratio},
-            {"params": agg.parameters(),        "lr": learning_rate},
+            {"params": pred_model.parameters(), "lr": learning_rate},
+            {"params": agg.parameters(),        "lr": learning_rate * agg_lr_ratio},
         ])
 
         agg_pretrain_epochs = int(getattr(args, "agg_pretrain_epochs", 0))
@@ -470,7 +503,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma = torch.clamp(gamma, min=1e-8)
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
             gamma_use = gamma
-            if args.algo in ("dfl", "dfl_qpth"):
+            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
                 if agg is not None:
@@ -479,9 +512,20 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 r_flat_use = r_use.reshape(batch_size, -1)
                 if args.algo == "dfl":
                     if agg is not None and _agg_info is not None:
-                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                        # y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                        y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_agg)
                     else:
-                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                        # y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                        y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_use)
+                elif args.algo == "dfl_sketch":
+                    # Initial-pass v* reporting: use the *plain* LP solution
+                    # (the sketched y_avg is a stochastic mix of vertices and
+                    # rolls out badly on the true MDP at degenerate cells).
+                    if agg is not None and _agg_info is not None:
+                        y_plain, _, _ = lp_solver(H_use, r_flat_use, gamma_agg)
+                    else:
+                        y_plain, _, _ = lp_solver(H_use, r_flat_use, gamma_use)
+                    y_star = y_plain
                 else:
                     if agg is not None and _agg_info is not None:
                         y_star = solve_occupancy_qp_qpth(
@@ -506,13 +550,23 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     initial_reward = float(np.mean(initial_rewards))
 
     pred_model.train()
-    agg_warmup_epochs = 0
+    # Respect --agg_warmup_epochs so the aggregator can be frozen for the first
+    # N epochs (anti-shortcut: forces the predictor to take the first DFL
+    # gradient steps before the aggregator can absorb the input variation).
+    agg_warmup_epochs = int(getattr(args, "agg_warmup_epochs", 0))
     fidelity_weight = float(getattr(args, "fidelity_weight", 0.0))
+
     for epoch in range(args.n_epochs):
         if agg is not None:
             freeze_agg = (epoch < agg_warmup_epochs)
             for p_ in agg.parameters():
                 p_.requires_grad = (not freeze_agg)
+        # Track estimated stationary point lambda* for the penalty Lagrangian loss.
+        epoch_lambda_star_mean = []
+        epoch_lambda_star_min = []
+        epoch_lambda_star_max = []
+        epoch_lambda_star_grad_abs = []
+        epoch_lambda_star_last_batch = None
         train_loss = 0.0
         obj_loss = 0.0
         epoch_sa_time = 0.0
@@ -534,7 +588,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         epoch_inv_pred = []     # policy analysis: E[inventory] under predicted-λ policy
         epoch_inv_oracle = []   # policy analysis: E[inventory] under oracle policy
         
-        for batch_data in train_loader:
+        for batch_idx, batch_data in enumerate(train_loader):
             feats, obj_true, lambda_true, prices, y_true, dual_true = batch_data
             batch_size = feats.shape[0]
 
@@ -565,7 +619,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
             gamma_use = gamma
 
-            if args.algo in ("dfl", "dfl_qpth"):
+            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
                 # Optionally aggregate (P, r, gamma) into M=n_agg clusters.
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
@@ -582,9 +636,21 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     # Differentiable LP via fixed-basis sensitivity (uses Gurobi to get a basis).
                     t0 = time.time()
                     if agg is not None and _agg_info is not None:
-                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                        # y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
+                        y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_agg)
                     else:
-                        y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                        # y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
+                        y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_use)
+                    epoch_solver_time += (time.time() - t0)
+                elif args.algo == "dfl_sketch":
+                    # Sketch-and-solve: ensemble of row-sketched LPs averaged for smoothness.
+                    t0 = time.time()
+                    if agg is not None and _agg_info is not None:
+                        y_star = _sketched_lp_from_args(H_use, r_flat_use, gamma_agg, args,
+                                                        batch_idx=batch_idx, epoch=epoch)
+                    else:
+                        y_star = _sketched_lp_from_args(H_use, r_flat_use, gamma_use, args,
+                                                        batch_idx=batch_idx, epoch=epoch)
                     epoch_solver_time += (time.time() - t0)
                 elif args.algo == "dfl_qpth":
                     t0 = time.time()
@@ -599,23 +665,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                             H_use, r_flat_use, gamma_use,
                             reg=getattr(args, "qp_reg", 0.1),
                             qp_solver=qp_solver
-                        )                    
+                        )
                     epoch_solver_time += (time.time() - t0)
                 else:
                     raise ValueError(f"Invalid algorithm: {args.algo}")
-
-                # Disaggregate occupancy back to original state space for evaluation
-                if agg is not None and _agg_info is not None:
-                    y_star = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
-                    # Normalize disaggregated occupancy so sum(y) = 1/(1-β). With
-                    # soft aggregation y_disagg = Wᵀ y_agg has sum ≈ (S/M)·sum(y_agg),
-                    # i.e. scaled by (S/M) ≈ 5× for S=56,M=10. That factor directly
-                    # inflates both r_true·y_disagg and ‖γ - H_true y_disagg‖², so
-                    # with large ρ the optimizer chases the scale rather than λ.
-                    if bool(getattr(args, "normalize_disagg", True)):
-                        expected_sum = 1.0 / (1.0 - float(args.beta))
-                        y_sum = y_star.sum(dim=1, keepdim=True).clamp_min(1e-8)
-                        y_star = y_star * (expected_sum / y_sum)
 
                 with torch.no_grad():
                     mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
@@ -624,12 +677,47 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
 
-                # 1. Augmented Lagrangian loss (original L2 penalty form)
-                violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
-                rho = getattr(args, 'aug_lag_rho', 0.1)
-                aug_lag = rho * violation.pow(2).mean()
-                v_star = torch.sum(r_true * y_star, dim=1)
-                dfl_loss = -v_star.mean() + aug_lag
+                if agg is not None and _agg_info is not None:
+                    W = _agg_info["W"]                                    # (B, S, M)
+                    mass = W.sum(dim=1).clamp_min(1e-8)                   # (B, M)
+                    r_true_3d = mdp_true.r                                # (B, S, A)
+                    r_true_agg = torch.einsum(
+                        "bsm,bsa->bma", W, r_true_3d
+                    ) / mass.unsqueeze(-1)                                # (B, M, A)
+                    right = torch.einsum("bsaj,bjm->bsam", mdp_true.P, W) # (B, S, A, M)
+                    p_hat = torch.einsum("bsm,bsan->bman", W, right)      # (B, M, A, M)
+                    P_true_agg = p_hat / mass[:, :, None, None]
+                    P_true_agg = P_true_agg.clamp_min(0.0)
+                    P_true_agg = P_true_agg / P_true_agg.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                    gamma_true_agg = torch.einsum("bs,bsm->bm", gamma_use, W).clamp_min(1e-8)
+                    gamma_true_agg = gamma_true_agg / gamma_true_agg.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                    H_true_agg = mdp_true.build_H(P_true_agg)             # (B, M, M*A)
+                    if args.algo == "dfl_sketch":
+                        # Keep y_star from the PRED-aggregated sketched solve
+                        # above. Re-solving the LP in TRUE-projected space here
+                        # kills the direct λ_pred → y_star gradient — only W
+                        # would carry the signal, and W alone can absorb all
+                        # input variation, causing the predictor to collapse
+                        # to a near-constant. Evaluating the PRED y_star
+                        # against TRUE-projected (r,γ,H) matches the
+                        # formulation diagnose_solver_gradients and
+                        # compute_loss_grad already use.
+                        pass
+                    else:
+                        # y_star = DifferentiableLPSolver.apply(H_true_agg, r_true_agg.reshape(batch_size, -1), gamma_true_agg)
+                        y_star, dual = DifferentiableLPSolverDual.apply(H_true_agg, r_true_agg.reshape(batch_size, -1), gamma_true_agg)
+
+                    violation = gamma_true_agg - (H_true_agg @ y_star.unsqueeze(-1)).squeeze(-1)
+                    rho = getattr(args, 'aug_lag_rho', 0.1)
+                    aug_lag = rho * violation.pow(2).mean()
+                    v_star = torch.sum(r_true_agg.reshape(batch_size, -1) * y_star, dim=1)
+                    dfl_loss = -v_star.mean() + aug_lag
+                else:
+                    violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
+                    rho = getattr(args, 'aug_lag_rho', 0.1)
+                    aug_lag = rho * violation.pow(2).mean()
+                    v_star = torch.sum(r_true * y_star, dim=1)
+                    dfl_loss = -v_star.mean() + aug_lag
 
                 # 3. Optional fidelity loss: anchor disaggregated occupancy to
                 # the oracle y_true. Gives the aggregator a supervised target
@@ -642,6 +730,22 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 # v_star, _y_pi_true = eval_y_on_true_mdp(mdp_true, y_star, gamma_use, W=W_agg)
                 # dfl_loss = -v_star.mean() * 10000
                 # aug_lag = torch.tensor(0.0)
+
+                lambda_star_info = estimate_penalty_lambda_star(
+                    dfl_loss=dfl_loss,
+                    lambda_pred=lambda_pred,
+                    lambda_min=1.0,
+                    curvature_eps=1e-6,
+                    max_newton_step=10.0,
+                )
+                if lambda_star_info is not None:
+                    epoch_lambda_star_mean.append(lambda_star_info["lambda_star_mean"])
+                    epoch_lambda_star_min.append(lambda_star_info["lambda_star_min"])
+                    epoch_lambda_star_max.append(lambda_star_info["lambda_star_max"])
+                    epoch_lambda_star_grad_abs.append(lambda_star_info["grad_abs_mean"])
+                    epoch_lambda_star_last_batch = np.round(
+                        np.asarray(lambda_star_info["lambda_star_list"], dtype=float), 3
+                    ).tolist()
 
                 # Zero-grad diagnostic: dV*/dλ_pred
                 # zg_frac, dv_dl_mean, _ = compute_zero_grad_stats(v_star, lambda_pred)
@@ -670,7 +774,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 dfl_loss_final = dfl_loss + args.loss_weight * pred_loss
                 optimizer.zero_grad()
                 dfl_loss_final.backward()
-                print(f"lambda_pred: {lambda_pred.detach().cpu().numpy()}, lambda_true: {lambda_true.detach().cpu().numpy()}")
+                lambda_true_sorted = np.sort(lambda_true.detach().cpu().reshape(-1).numpy())
+                lambda_pred_sorted = np.sort(lambda_pred.detach().cpu().reshape(-1).numpy())
+                print(f"lambda_true(sorted): {lambda_true_sorted}")
+                print(f"lambda_pred(sorted): {lambda_pred_sorted}")
+                if epoch_lambda_star_last_batch is not None:
+                    lambda_star_sorted = sorted(epoch_lambda_star_last_batch)
+                    print(f"lambda_star(sorted): {lambda_star_sorted}")
 
                 torch.nn.utils.clip_grad_norm_(params, max_norm=getattr(args, "grad_clip", 10.0))
 
@@ -714,7 +824,26 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
                                                     args.foc, args.voc, args.hc, args.bc, args.beta,
                                                     p)
-            v_eval, _ = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
+            if args.algo == "dfl_sketch":
+                # Sketched y_avg is a smoothed inner-product proxy for the
+                # *training gradient* only. At degenerate LP cells (e.g. low λ)
+                # the K sketches snap to different near-tied vertices and y_avg
+                # becomes a smear over disagreeing deterministic policies; the
+                # extracted policy (soft or greedy) rolls out terribly on the
+                # true MDP. For v* reporting we evaluate the deployable policy
+                # by re-solving the *plain* LP at λ_pred.
+                y_plain_pred, _, _ = lp_solver(H_use, r_flat_use,
+                                               gamma_agg if (agg is not None and _agg_info is not None) else gamma_use)
+                if agg is not None and _agg_info is not None:
+                    y_star_eval = SoftAggDense.disaggregate_y(
+                        y_plain_pred, _agg_info["W"], mdp.r.shape[2])
+                else:
+                    y_star_eval = y_plain_pred
+            elif agg is not None and _agg_info is not None:
+                y_star_eval = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
+            else:
+                y_star_eval = y_star
+            v_eval, _ = eval_y_on_true_mdp(mdp_true, y_star_eval, gamma_use)
             v_star = v_eval.mean().item()
             epoch_rewards.append(v_star)
         
@@ -729,7 +858,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
         
         # For DFL variants (LP-based and qpth-based): track average MSE and full DFL loss per epoch
-        if args.algo in ('dfl', 'dfl_qpth') and epoch_mse:
+        if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_mse:
             train_mse_list.append(np.mean(epoch_mse))
             train_dfl_loss_list.append(np.mean(epoch_dfl_loss))
             train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
@@ -754,15 +883,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         # Policy analysis: aggregate per-epoch (or placeholders when --policy_analysis not set)
         _ep_lam_pred = torch.cat(epoch_lambda_pred)
         _ep_lam_true = torch.cat(epoch_lambda_true)
-        train_lambda_bias_per_epoch.append(float((_ep_lam_pred - _ep_lam_true).mean()))
+        train_lambda_bias_per_epoch.append(float((_ep_lam_pred - _ep_lam_true).abs().mean()))
         if getattr(args, 'policy_analysis', False) and epoch_order_pred:
             _ep_ord_pred = torch.cat(epoch_order_pred)
             _ep_ord_oracle = torch.cat(epoch_order_oracle)
             _ep_inv_pred = torch.cat(epoch_inv_pred)
             _ep_inv_oracle = torch.cat(epoch_inv_oracle)
             _ep_ord_bias = _ep_ord_pred - _ep_ord_oracle
-            train_order_bias_per_epoch.append(float(_ep_ord_bias.mean()))
-            train_inv_bias_per_epoch.append(float((_ep_inv_pred - _ep_inv_oracle).mean()))
+            train_order_bias_per_epoch.append(float(_ep_ord_bias.abs().mean()))
+            train_inv_bias_per_epoch.append(float((_ep_inv_pred - _ep_inv_oracle).abs().mean()))
             train_frac_over_order_per_epoch.append(float((_ep_ord_bias > 0).float().mean()))
         else:
             train_order_bias_per_epoch.append(0.0)
@@ -771,9 +900,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         
         if (epoch + 1) % 1 == 0:
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
-            if args.algo in ('dfl', 'dfl_qpth') and epoch_vstar and epoch_aug_lag and epoch_mse:
+            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_vstar and epoch_aug_lag and epoch_mse:
                 msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
                 msg += f'  zero_grad={train_zero_grad_frac_list[-1]:.1%}  |dV/dλ|={train_dv_dlambda_mean_list[-1]:.4f}'
+            if epoch_lambda_star_mean:
+                msg += (f"  |  λ*≈{np.mean(epoch_lambda_star_mean):.3f}"
+                        f" [{np.mean(epoch_lambda_star_min):.3f}, {np.mean(epoch_lambda_star_max):.3f}]"
+                        f"  |dL/dλ|={np.mean(epoch_lambda_star_grad_abs):.4e}")
             if getattr(args, 'policy_analysis', False):
                 msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
             print(msg)

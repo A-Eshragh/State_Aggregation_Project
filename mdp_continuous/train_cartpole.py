@@ -39,11 +39,22 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    bins_per_dim: int = 8, tau: float = 0.5,
                    use_dfl_phase: bool = True,
                    pretrain_epochs: int = 70,
-                   eval_policy_type: str = "ce"):
+                   eval_policy_type: str = "ce",
+                   behavior_policy=None,
+                   n_ce_steps: int = 2,
+                   n_dfl_steps: int = 5,
+                   dfl_lr: float = None):
     assert eval_policy_type in ("ce", "lp")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
+    if behavior_policy is None:
+        behavior_policy = heuristic_policy
+    # Separate LR for the DFL phase keeps the LP-gradient updates gentle
+    # so features don't drift far from the BC basin (avoids late-iteration
+    # collapse). If unspecified, falls back to cfg.lr.
+    if dfl_lr is None:
+        dfl_lr = cfg.lr
 
     if verbose:
         print("=" * 60)
@@ -77,7 +88,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     if verbose:
         print("Phase 1: Pre-training features on expert actions...")
 
-    data = collect_trajectories(dynamics, heuristic_policy,
+    data = collect_trajectories(dynamics, behavior_policy,
                                 cfg.n_trajectories, cfg.max_steps, device)
     buffer = {k_: v.clone() for k_, v in data.items()}
 
@@ -119,22 +130,22 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                       "Phase 2: CE-only (two-stage) iterations...")
         print(phase_desc)
 
-    # Small warm-up: n_trajectories=1 gives a rank-deficient LP; 5 extra
-    # expert rollouts are enough to make M full-rank without dominating the
-    # pretraining data distribution.
-    warmup = collect_trajectories(dynamics, heuristic_policy,
+    # A small warm-up keeps M full-rank when n_trajectories is tiny.
+    warmup = collect_trajectories(dynamics, behavior_policy,
                                   5, cfg.max_steps, device)
     for key in ["states", "actions", "rewards", "next_states", "dones"]:
         buffer[key] = torch.cat([buffer[key], warmup[key]], dim=0)
     buffer["init_states"] = torch.cat(
         [buffer["init_states"], warmup["init_states"]], dim=0)
+    N = buffer["states"].shape[0]
+    if verbose:
+        print(f"  Offline dataset frozen: {N} transitions, "
+              f"{buffer['init_states'].shape[0]} initial states")
 
     # dfl_optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr)
-    dfl_optimizer = torch.optim.Adam(list(features.parameters()) + [w_head], lr=cfg.lr)
+    dfl_optimizer = torch.optim.Adam(list(features.parameters()) + [w_head], lr=dfl_lr)
     alpha_shape = 2.0
     rho = cfg.rho
-    n_ce_steps = 2       # tiny DAgger CE per iter → reward climbs gradually
-    n_dfl_steps = 5      # LP-DFL gradient steps per iteration
     lp_weight = 1
 
     def solve_lp(M, c, b):
@@ -157,10 +168,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         w_star = solve_lp(M, c, b).detach()
     current_policy = occupancy_to_policy_fn(features, w_star)
 
-    # Per-state smooth policy from the CE classifier — used for evaluation only.
-    # The LP-argmax policy is bimodal in features (phase-transition), which
-    # makes the learning curve a step function. The CE policy's per-state
-    # independence gives a genuinely gradual rise as features improve.
     def ce_policy(states):
         with torch.no_grad():
             f_s = features._state_features(states)
@@ -193,8 +200,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     for iteration in range(cfg.n_iterations):
         t0 = time.time()
 
-        # Rebuild the LP-argmax policy from the latest features/w*
-        # so that "lp" evaluation tracks the current iterate.
         if eval_policy_type == "lp":
             eval_policy = occupancy_to_policy_fn(features, w_star)
 
@@ -205,25 +210,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             best_reward = results["avg_reward"]
             best_state, best_w = snapshot()
 
-        # Collect data with heuristic + exploration (robust to LP-policy collapse).
-        # Using the current LP-derived policy here crashes the buffer when the
-        # basis flips during feature updates.
-        data_policy = epsilon_greedy_policy(heuristic_policy,
-                                            epsilon=cfg.exploration_eps)
-        new_data = collect_trajectories(
-            dynamics, data_policy,
-            max(cfg.n_trajectories, 20), cfg.max_steps, device)
-        for key in ["states", "actions", "rewards", "next_states", "dones"]:
-            buffer[key] = torch.cat([buffer[key], new_data[key]], dim=0)[-cfg.buffer_size:]
-        buffer["init_states"] = torch.cat(
-            [buffer["init_states"], new_data["init_states"]], dim=0)[-cfg.buffer_size:]
-        N = buffer["states"].shape[0]
-
-        # DAgger: relabel all buffer states with the heuristic expert.
-        # This gives a rich CE training signal on the CURRENT state distribution,
-        # which is what we actually need at deployment.
         with torch.no_grad():
-            # dagger_actions = heuristic_policy(buffer["states"]).long()
             dagger_actions = current_policy(buffer["states"]).long()
         dagger_states = buffer["states"]
 
@@ -328,12 +315,20 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
                   bins_per_dim: int = 8, tau: float = 0.5,
                   pretrain_epochs: int = 70,
-                  eval_policy_type: str = "ce"):
+                  eval_policy_type: str = "ce",
+                  behavior_policy=None,
+                  n_ce_steps: int = 2,
+                  n_dfl_steps: int = 5,
+                  dfl_lr: float = None):
     return run_neural_dfl(
         cfg, verbose=verbose, bins_per_dim=bins_per_dim, tau=tau,
         use_dfl_phase=False,
         pretrain_epochs=pretrain_epochs,
         eval_policy_type=eval_policy_type,
+        behavior_policy=behavior_policy,
+        n_ce_steps=n_ce_steps,
+        n_dfl_steps=n_dfl_steps,
+        dfl_lr=dfl_lr,
     )
 
 def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
@@ -569,6 +564,7 @@ def parse_args():
     p.add_argument("--n_trajectories", type=int, default=500)
     p.add_argument("--n_epochs", type=int, default=100)
     p.add_argument("--ridge", type=float, default=1e-4)
+    p.add_argument("--rho", type=float, default=1.0)
     # Soft aggregation
     p.add_argument("--n_clusters", type=int, default=32)
     p.add_argument("--bins_per_dim", type=int, default=8)

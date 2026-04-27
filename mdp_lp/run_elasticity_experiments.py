@@ -18,6 +18,7 @@ from pathlib import Path
 from mdp_lp.train_elasticity import prepare_elasticity_data, train_eval_elasticity
 from mdp_lp.utils import set_seed
 from mdp_lp.plot_elasticity import plot_elasticity_results
+from mdp_lp.soft_state_aggregation import SoftAggDense
 
 
 def main():
@@ -66,7 +67,7 @@ def main():
     parser.add_argument('--n_samples', type=int, default=50, help='Number of samples')
     parser.add_argument('--train_frac', type=float, default=0.5, help='Fraction for train (rest = test). 0.5 = 50/50 split.')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
-    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth'], required=True, help='Algorithm')
+    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.0, help='Weight for prediction loss in DFL (balanced so v* and pred loss have similar gradient scale; no adaptation)')
     parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension')
@@ -81,12 +82,27 @@ def main():
                         help='Number of aggregated states/clusters (M). -1 disables aggregation.')
     parser.add_argument('--sa_tau', type=float, default=0.5, help='Soft aggregation temperature τ')
     parser.add_argument('--sa_r_embed', type=int, default=8, help='Soft aggregation destination embedding dim')
+    parser.add_argument('--agg_fixed_W', action='store_true', default=False,
+                        help='If set, use a fixed random W for SoftAggDense (no learning).')
+    parser.add_argument('--agg_fixed_W_seed', type=int, default=1,
+                        help='Random seed for fixed W when --agg_fixed_W is set.')
 
     # qpth QP regularization (only used for dfl_qpth)
     parser.add_argument('--qp_reg', type=float, default=10.0, help='Quadratic regularization coef for QP-DFL')
+
+    # Sketch-and-solve LP (only used for dfl_sketch)
+    parser.add_argument('--n_sketches', type=int, default=4,
+                        help='Ensemble size K for sketched LP (averaged for smoothing)')
+    parser.add_argument('--sketch_ratio', type=float, default=0.7,
+                        help='Sketched-row count k as fraction of M (k=round(ratio*M); k<M gives smoothing)')
+    parser.add_argument('--sketch_mode', type=str, default='gaussian',
+                        choices=['gaussian', 'rademacher', 'subsample'],
+                        help='Distribution of sketch matrix entries')
+    parser.add_argument('--sketch_seed', type=int, default=None,
+                        help='Optional seed for sketch RNG (varied per epoch/batch internally)')
     # DFL stability: gradient clipping and augmented Lagrangian
     parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
-    parser.add_argument('--aug_lag_rho', type=float, default=10000.0, help='Augmented Lagrangian penalty coefficient ρ (default 10; 100 can dominate and cause λ collapse)')
+    parser.add_argument('--aug_lag_rho', type=float, default=10000.0, help='Augmented Lagrangian penalty coefficifent ρ (default 10; 100 can dominate and cause λ collapse)')
     parser.add_argument('--policy_analysis', action='store_true', help='If set, run policy analysis (1 extra LP per batch for order/inv bias vs oracle). Default: off (1 solve per batch).')
     # Soft-aggregation anti-shortcut knobs (see train_elasticity.py)
     parser.add_argument('--agg_lr_ratio', type=float, default=0.01,
@@ -132,8 +148,11 @@ def main():
         args.beta_2 = 0.0
     
     set_seed(args.seed)
+    requested_n_samples = int(args.n_samples)
     
     train_loader, test_loader, gt_elasticity, p, p_related = prepare_elasticity_data(args)
+    args.requested_n_samples = requested_n_samples
+    args.generated_n_samples = int(args.n_samples)
     
     results_root = Path(args.results_root)
     if args.experiment_type == 'c':
@@ -152,6 +171,34 @@ def main():
     save_dir = save_dir / f"epochs_{args.n_epochs}"
     save_dir.mkdir(parents=True, exist_ok=True)
     args.save_dir = save_dir
+
+    # If using fixed-W aggregation, save W to disk for later landscape plotting/reuse.
+    if args.agg_fixed_W and args.n_agg != -1 and args.algo in ('dfl', 'dfl_qpth'):
+        n_states = args.b_max + args.s_max + 1
+        n_actions = args.q_max + 1
+        agg = SoftAggDense(
+            n_states=n_states,
+            n_actions=n_actions,
+            n_clusters=int(args.n_agg),
+            r_embed=int(getattr(args, "sa_r_embed", 8)),
+            fixed_W=True,
+            fixed_W_seed=int(args.agg_fixed_W_seed),
+        )
+        payload = {
+            "fixed_W_seed": int(args.agg_fixed_W_seed),
+            "n_states": int(n_states),
+            "n_actions": int(n_actions),
+            "n_clusters": int(args.n_agg),
+            "W_fixed": agg.W_fixed.detach().cpu(),
+        }
+        torch.save(payload, save_dir / "agg_W_fixed.pt")
+        (save_dir / "agg_W_fixed_meta.json").write_text(json.dumps({
+            "fixed_W_seed": int(args.agg_fixed_W_seed),
+            "n_states": int(n_states),
+            "n_actions": int(n_actions),
+            "n_clusters": int(args.n_agg),
+        }, indent=2))
+        print(f"[Save] Saved fixed W to {save_dir / 'agg_W_fixed.pt'}")
     
     results = train_eval_elasticity(args, train_loader, test_loader, gt_elasticity)
     
@@ -185,8 +232,10 @@ def main():
         full_data = {**args_dict, **results_serializable}
         full_data['status'] = 'complete'
         full_data['epoch'] = args.n_epochs
-        if getattr(args, 'fixed_p', False) and p is not None:
+        if p is not None:
             full_data['p_values_used'] = convert_to_json_serializable(p)
+        if p_related is not None:
+            full_data['p_related_values_used'] = convert_to_json_serializable(p_related)
         result_file.write_text(json.dumps(full_data, indent=4))
         
         if not result_file.exists() or result_file.stat().st_size == 0:

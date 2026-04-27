@@ -1,8 +1,9 @@
-from .dense_lp_solver import DenseLPSolver, solve_lp_dense, solve_lp_gurobi
-from .differentiable_lp import DifferentiableLPSolver
+"""
+Solver subpackage.
 
-__all__ = [
-    "DenseLPSolver", "solve_lp_dense", "solve_lp_gurobi",
-    "DifferentiableLPSolver"
-]
+Avoid importing optional solver backends (e.g. Gurobi) at import-time.
+Import concrete solvers directly from their modules as needed.
+"""
+
+__all__ = []
 
