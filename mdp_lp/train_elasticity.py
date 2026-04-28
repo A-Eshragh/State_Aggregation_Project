@@ -435,7 +435,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
     pred_model.train()
     if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
-        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=50)
+        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=getattr(args, "pretrain_epochs", 30))
 
     if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
         n_states = args.b_max + args.s_max + 1

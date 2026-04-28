@@ -75,6 +75,7 @@ def main():
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Mode')
     parser.add_argument('--results_root', type=str, default='mdp_lp/results_elasticity',
                         help='Root directory to save results (default: mdp_lp/results_elasticity)')
+    parser.add_argument('--pretrain_epochs', type=int, default=30, help='Number of pretraining epochs')
     parser.add_argument('--seed', type=int, default=1, help='Seed')
 
     # Soft state aggregation (optional; only used for DFL variants)
