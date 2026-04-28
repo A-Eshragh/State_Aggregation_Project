@@ -43,16 +43,16 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    behavior_policy=None,
                    n_ce_steps: int = 2,
                    n_dfl_steps: int = 5,
-                   dfl_lr: float = None):
+                   dfl_lr: float = None,
+                   data: dict = None,
+                   world_model=None):
     assert eval_policy_type in ("ce", "lp")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
     if behavior_policy is None:
         behavior_policy = heuristic_policy
-    # Separate LR for the DFL phase keeps the LP-gradient updates gentle
-    # so features don't drift far from the BC basin (avoids late-iteration
-    # collapse). If unspecified, falls back to cfg.lr.
+
     if dfl_lr is None:
         dfl_lr = cfg.lr
 
@@ -84,16 +84,18 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
     k = features.d_per_action  # state feature dimension
 
-    # Pre-train features to discriminate expert actions
     if verbose:
         print("Phase 1: Pre-training features on expert actions...")
 
-    data = collect_trajectories(dynamics, behavior_policy,
-                                cfg.n_trajectories, cfg.max_steps, device)
+    data_provided = data is not None
+    if not data_provided:
+        data = collect_trajectories(dynamics, behavior_policy,
+                                    cfg.n_trajectories, cfg.max_steps, device)
     buffer = {k_: v.clone() for k_, v in data.items()}
 
     if verbose:
-        print(f"  Collected {buffer['states'].shape[0]} expert transitions")
+        src = "externally supplied" if data_provided else "expert"
+        print(f"  Loaded {buffer['states'].shape[0]} {src} transitions")
 
     w_head = torch.randn(k, A, device=device, requires_grad=True)
     feat_optimizer = torch.optim.Adam(
@@ -130,13 +132,25 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                       "Phase 2: CE-only (two-stage) iterations...")
         print(phase_desc)
 
-    # A small warm-up keeps M full-rank when n_trajectories is tiny.
-    warmup = collect_trajectories(dynamics, behavior_policy,
-                                  5, cfg.max_steps, device)
-    for key in ["states", "actions", "rewards", "next_states", "dones"]:
-        buffer[key] = torch.cat([buffer[key], warmup[key]], dim=0)
-    buffer["init_states"] = torch.cat(
-        [buffer["init_states"], warmup["init_states"]], dim=0)
+    if not data_provided:
+        warmup = collect_trajectories(dynamics, behavior_policy,
+                                      5, cfg.max_steps, device)
+        for key in ["states", "actions", "rewards", "next_states", "dones"]:
+            buffer[key] = torch.cat([buffer[key], warmup[key]], dim=0)
+        buffer["init_states"] = torch.cat(
+            [buffer["init_states"], warmup["init_states"]], dim=0)
+
+    if world_model is not None:
+        with torch.no_grad():
+            delta_pred, r_pred = world_model.predict(
+                buffer["states"], buffer["actions"].long())
+            buffer["next_states"] = buffer["states"] + delta_pred
+            buffer["rewards"] = r_pred
+            buffer["dones"] = dynamics.is_terminal(buffer["next_states"])
+        if verbose:
+            print(f"  [world-model] Replaced (r, s') in {buffer['states'].shape[0]} "
+                  f"transitions with deterministic model predictions")
+
     N = buffer["states"].shape[0]
     if verbose:
         print(f"  Offline dataset frozen: {N} transitions, "
@@ -191,10 +205,11 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         return (
             {kk: v.detach().clone() for kk, v in features.state_dict().items()},
             w_star.detach().clone(),
+            w_head.detach().clone(),
         )
 
     best_reward = ws_results["avg_reward"] if verbose else -float("inf")
-    best_state, best_w = snapshot()
+    best_state, best_w, best_head = snapshot()
 
     history = []
     for iteration in range(cfg.n_iterations):
@@ -208,15 +223,13 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             cfg.max_steps, cfg.gamma, device)
         if results["avg_reward"] > best_reward:
             best_reward = results["avg_reward"]
-            best_state, best_w = snapshot()
+            best_state, best_w, best_head = snapshot()
 
         with torch.no_grad():
             dagger_actions = current_policy(buffer["states"]).long()
         dagger_states = buffer["states"]
 
-        # Phase A: CE training (DAgger) — drives features to expert-accuracy on
-        # the growing state distribution. Required for the LP-derived policy to
-        # be non-pathological.
+        # Phase A: CE training
         ce_log = 0.0
         for _ in range(n_ce_steps):
             dfl_optimizer.zero_grad()
@@ -229,8 +242,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             dfl_optimizer.step()
             ce_log = ce_aux.item()
 
-        # Phase B: DFL — LP-objective gradient on top of the strong features.
-        # Skipped when `use_dfl_phase=False` (two-stage baseline).
+        # Phase B: DFL
         lp_obj_log = 0.0
         aug_lag_log = 0.0
         if use_dfl_phase:
@@ -294,7 +306,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 f"time={elapsed:.1f}s"
             )
 
-    # Final eval + restore best-so-far if the last iterate regressed.
+    # Final eval
     if eval_policy_type == "lp":
         eval_policy = occupancy_to_policy_fn(features, w_star)
     final_results = evaluate_policy(
@@ -305,11 +317,14 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     else:
         features.load_state_dict(best_state)
         w_star = best_w
+        with torch.no_grad():
+            w_head.copy_(best_head)
         current_policy = occupancy_to_policy_fn(features, w_star)
     if verbose:
         print(f"  Best reward over run: {best_reward:.2f}")
 
-    return {"history": history, "features": features}
+    return {"history": history, "features": features, "w_star": w_star,
+            "w_head": w_head, "best_reward": best_reward}
 
 
 def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
@@ -319,7 +334,9 @@ def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
                   behavior_policy=None,
                   n_ce_steps: int = 2,
                   n_dfl_steps: int = 5,
-                  dfl_lr: float = None):
+                  dfl_lr: float = None,
+                  data: dict = None,
+                  world_model=None):
     return run_neural_dfl(
         cfg, verbose=verbose, bins_per_dim=bins_per_dim, tau=tau,
         use_dfl_phase=False,
@@ -329,23 +346,14 @@ def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
         n_ce_steps=n_ce_steps,
         n_dfl_steps=n_dfl_steps,
         dfl_lr=dfl_lr,
+        data=data,
+        world_model=world_model,
     )
 
 def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
                      bins_per_dim: int = 8, n_iterations: int = 100,
                      lr: float = 1e-3, tau: float = 0.5,
                      verbose: bool = True):
-    """Soft state aggregation for CartPole using TRUE dynamics.
-
-    Mirrors mdp_lp/soft_state_aggregation.py:
-      1. Discretize state space into a grid of S = bins_per_dim^4 states
-      2. Compute TRUE P[s,a,s'] and R[s,a] on the grid (nothing estimated)
-      3. Learn soft memberships W[s,m] via NN (softmax over M clusters)
-      4. Aggregate P, R, gamma into an M-cluster MDP
-      5. Solve aggregated LP differentiably (M*A variables, M constraints)
-      6. DFL loss = c^T y* → backprop to membership NN
-      7. Policy: for any continuous state s, use W(s) to weight y_agg
-    """
     from .baselines import DiscretizedCartPole
 
     device = torch.device("cpu")
@@ -515,12 +523,6 @@ def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
 
 
 def plot_learning_curves(history: list, save_path: str = None):
-    """Plot learning curves.
-
-    Args:
-        history: list of eval dicts with 'avg_reward' and 'avg_length'
-        save_path: optional file path to save figure
-    """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     xs = list(range(len(history)))

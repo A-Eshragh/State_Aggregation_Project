@@ -33,10 +33,13 @@ import torch
 from .configs import CartPoleConfig
 from .train_cartpole import run_neural_dfl, run_two_stage, set_seed
 from .cartpole_env import (
+    CartPoleDynamics,
+    collect_trajectories,
     heuristic_policy,
     random_policy,
     epsilon_greedy_policy,
 )
+from .world_model import train_world_model
 
 
 # ── Cache layout ────────────────────────────────────────────────────────
@@ -130,6 +133,18 @@ def _run_one_seed(args_dict: dict) -> dict:
     else:
         raise ValueError(algo)
 
+    runner_extras = {}
+    if args_dict.get("use_world_model", False):
+        device = torch.device("cpu")
+        dynamics = CartPoleDynamics(cfg)
+        buffer = collect_trajectories(dynamics, behavior,
+                                      cfg.n_trajectories, cfg.max_steps, device)
+        wm = train_world_model(buffer,
+                               n_epochs=args_dict["world_epochs"],
+                               lr=args_dict["world_lr"],
+                               verbose=False)
+        runner_extras = {"data": buffer, "world_model": wm}
+
     out = runner(
         cfg,
         verbose=False,
@@ -141,6 +156,7 @@ def _run_one_seed(args_dict: dict) -> dict:
         n_ce_steps=args_dict["n_ce_steps"],
         n_dfl_steps=args_dict["n_dfl_steps"],
         dfl_lr=args_dict["dfl_lr"],
+        **runner_extras,
     )
     rewards = [float(h["avg_reward"]) for h in out["history"]]
     lengths = [float(h["avg_length"]) for h in out["history"]]
@@ -176,12 +192,17 @@ def _job(args, algo: str, seed: int) -> dict:
         "n_ce_steps": args.n_ce_steps,
         "n_dfl_steps": args.n_dfl_steps,
         "dfl_lr": args.dfl_lr,
+        "use_world_model": bool(args.use_world_model),
+        "world_epochs": args.world_epochs,
+        "world_lr": args.world_lr,
         "torch_threads": 1,
     }
 
 
 def _cache_key(prefix: str, args) -> str:
     dfl_lr_tag = "auto" if args.dfl_lr is None else f"{args.dfl_lr}"
+    wm_tag = (f"_wm{args.world_epochs}-{args.world_lr}"
+              if args.use_world_model else "")
     return (
         f"{prefix}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
@@ -191,6 +212,7 @@ def _cache_key(prefix: str, args) -> str:
         f"_nce{args.n_ce_steps}_ndfl{args.n_dfl_steps}"
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
+        f"{wm_tag}"
     )
 
 
@@ -270,38 +292,96 @@ def _stack_curves(runs):
     return arr, L
 
 
+def _smooth(arr1d: np.ndarray, w: int) -> np.ndarray:
+    """Centered rolling mean over a 1d array, edges shrunk to available window."""
+    if w <= 1:
+        return arr1d
+    n = arr1d.shape[0]
+    out = np.empty(n)
+    for i in range(n):
+        lo = max(0, i - w // 2)
+        hi = min(n, i + w // 2 + 1)
+        out[i] = arr1d[lo:hi].mean()
+    return out
+
+
+def _draw_curve(ax, arr, color, ls, label, smooth_w=1):
+    """Plot mean ± SE across seeds, optionally smoothed."""
+    mu = arr.mean(axis=0)
+    se = arr.std(axis=0) / np.sqrt(max(arr.shape[0], 1))
+    xs = np.arange(arr.shape[1])
+    if smooth_w > 1:
+        mu = _smooth(mu, smooth_w)
+        se = _smooth(se, smooth_w)
+    ax.plot(xs, mu, color=color, lw=2.0, ls=ls, label=label)
+    ax.fill_between(xs, mu - se, mu + se, color=color, alpha=0.20)
+
+
 def plot_figure1(args, save_path: str):
     neural = _load_or_none(_cache_key("curve_neural", args))
     twostage = _load_or_none(_cache_key("curve_twostage", args))
+    requested = set(int(s) for s in args.seeds)
 
-    fig, ax = plt.subplots(1, 1, figsize=(6.4, 4.2))
-
-    for label, key, payload, ls in [
-        ("Neural DFL (ours)", "neural_dfl", neural, "-"),
-        ("Two-stage (predict-then-optimize)", "two_stage", twostage, "--"),
-    ]:
+    def _filtered_arr(payload):
         if not payload:
-            continue
-        arr, L = _stack_curves(payload["rewards_per_seed"])
-        if args.show_running_max:
-            arr = _running_max(arr)
-        mu = arr.mean(axis=0)
-        sd = arr.std(axis=0)
-        xs = np.arange(L)
-        ax.plot(xs, mu, color=COLORS[key], lw=2.0, ls=ls, label=label)
-        ax.fill_between(xs, mu - sd, mu + sd, color=COLORS[key], alpha=0.20)
+            return None
+        runs = [r for s, r in zip(payload["seeds"], payload["rewards_per_seed"])
+                if int(s) in requested]
+        if not runs:
+            return None
+        arr, _ = _stack_curves(runs)
+        return arr
 
-    ax.set_xlabel("Training iteration")
-    ax.set_ylabel("Avg. episode reward "
-                  + ("(best-so-far)" if args.show_running_max else "(per iter)"))
-    ax.set_title(
-        "CartPole offline: Neural DFL vs. two-stage\n"
-        f"(biased behavior, td_weight={args.td_weight}; "
-        f"n_seeds={len(args.seeds)})"
-    )
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(bottom=0)
-    ax.legend(loc="lower right", fontsize=10, framealpha=0.9)
+    neural_arr = _filtered_arr(neural)
+    ts_arr = _filtered_arr(twostage)
+
+    series = [
+        ("DFL", "neural_dfl", neural_arr, "-"),
+        ("Two-stage", "two_stage", ts_arr, "--"),
+    ]
+
+
+    suptitle = (f"CartPole DFL vs. Two-stage")
+
+    if args.two_panel:
+        # Two-panel: training dynamics (smoothed per-iter) + deployable max.
+        fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.4), sharey=True)
+        for ax, mode, title in [
+            (axes[0], "per_iter",
+             f"Training dynamics (per-iter, {args.smooth}-iter MA)"),
+            (axes[1], "running_max",
+             "Deployable model quality (running max)"),
+        ]:
+            for label, key, arr, ls in series:
+                if arr is None:
+                    continue
+                a = _running_max(arr) if mode == "running_max" else arr
+                w = 1 if mode == "running_max" else max(int(args.smooth), 1)
+                _draw_curve(ax, a, COLORS[key], ls, label, smooth_w=w)
+            ax.set_xlabel("Training iteration")
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 210)
+        axes[0].set_ylabel("Avg. episode reward")
+        axes[1].legend(loc="lower right", fontsize=9, framealpha=0.9)
+        fig.suptitle(suptitle, fontsize=11)
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(6.4, 4.2))
+        for label, key, arr, ls in series:
+            if arr is None:
+                continue
+            a = _running_max(arr) if args.show_running_max else arr
+            w = 1 if args.show_running_max else max(int(args.smooth), 1)
+            _draw_curve(ax, a, COLORS[key], ls, label, smooth_w=w)
+        ax.set_xlabel("Training iteration")
+        ylab = ("(best-so-far)" if args.show_running_max
+                else f"(per iter, {args.smooth}-iter MA)" if args.smooth > 1
+                else "(per iter)")
+        ax.set_ylabel(f"Avg. episode reward")
+        ax.set_title(suptitle, fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, 210)
+        ax.legend(loc="lower right", fontsize=10, framealpha=0.9)
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
@@ -316,14 +396,20 @@ def print_summary(args):
     if not (neural and twostage):
         return
 
+    requested = set(int(s) for s in args.seeds)
+
+    def _filter(payload):
+        return [r for s, r in zip(payload["seeds"], payload["rewards_per_seed"])
+                if int(s) in requested]
+
     def _stats(runs):
         bests = [max(r) for r in runs]
         finals = [r[-1] for r in runs]
         return (np.mean(bests), np.std(bests),
                 np.mean(finals), np.std(finals))
 
-    nb_m, nb_s, nf_m, nf_s = _stats(neural["rewards_per_seed"])
-    tb_m, tb_s, tf_m, tf_s = _stats(twostage["rewards_per_seed"])
+    nb_m, nb_s, nf_m, nf_s = _stats(_filter(neural))
+    tb_m, tb_s, tf_m, tf_s = _stats(_filter(twostage))
 
     print("\n" + "=" * 60)
     print(f"SUMMARY  (n_seeds = {len(args.seeds)})")
@@ -385,12 +471,27 @@ def parse_args():
     p.add_argument("--eval_policy", type=str, default="ce",
                    choices=["ce", "lp"])
 
+    # Model-based variant: replace observed (r, s') with predictions from a
+    # world model fit on the same offline buffer. Useful for predict-then-
+    # optimize comparisons against the true-MDP figure-1 baseline.
+    p.add_argument("--use_world_model", action="store_true",
+                   help="Fit a world model and use its (r̂, ŝ') in the LP. "
+                        "(s, a) and CE pretrain still use the real buffer.)")
+    p.add_argument("--world_epochs", type=int, default=400)
+    p.add_argument("--world_lr", type=float, default=1e-3)
+
     p.add_argument("--save_path", type=str,
                    default=str(HERE / "figure1_cartpole.pdf"))
     p.add_argument("--show_running_max", action="store_true",
                    help="Plot per-seed best-so-far instead of raw per-iter "
                         "reward (matches what the algorithm actually returns "
                         "via best-so-far restoration).")
+    p.add_argument("--two_panel", action="store_true",
+                   help="Show both panels: smoothed per-iter dynamics (left) "
+                        "and deployable running-max (right). Most honest view.")
+    p.add_argument("--smooth", type=int, default=1,
+                   help="Window size (in iters) for centered moving-average "
+                        "smoothing on the per-iter view. Default 1 = no smoothing.")
     p.add_argument("--plot_only", action="store_true",
                    help="Skip experiments, rebuild plot from cache")
     p.add_argument("--force", action="store_true",
