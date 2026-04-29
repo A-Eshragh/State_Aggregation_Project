@@ -8,6 +8,8 @@ venv/
 *.zip
 .vscode*
 
+.claude/
 **/*result*/
 **/results*.json
 **/*cache*/
+mdp_continuous/figure1_cache/
