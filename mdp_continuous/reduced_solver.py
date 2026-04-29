@@ -219,7 +219,12 @@ class DifferentiableReducedLP(autograd.Function):
 
             # dL/dM_B = -x w_B^T
             grad_M_B = -torch.outer(x, w_B)     # (m, m)
+<<<<<<< HEAD
             grad_M[i].index_copy_(1, Bidx, grad_M_B)
+=======
+            for j_local, j_global in enumerate(Bidx):
+                grad_M[i, :, j_global] = grad_M_B[:, j_local]
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
 
         if not ctx.batched:
             grad_M = grad_M.squeeze(0)

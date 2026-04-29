@@ -8,7 +8,12 @@ venv/
 *.zip
 .vscode*
 
+<<<<<<< HEAD
 .claude/
 **/*result*/
 **/results*.json
 **/*cache*/
+=======
+**/*result*/
+**/results*.json
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3

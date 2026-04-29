@@ -1,3 +1,12 @@
+<<<<<<< HEAD
+=======
+"""
+Main training pipeline for continuous-state LP on CartPole.
+
+Neural features + DFL (end-to-end through differentiable LP).
+"""
+
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
 import argparse
 import random
 import time
@@ -39,10 +48,15 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    n_dfl_steps: int = 5,
                    dfl_lr: float = None,
                    data: dict = None,
+<<<<<<< HEAD
                    world_model=None,
                    solver: str = "lp"):
     assert eval_policy_type in ("ce", "lp")
     assert solver in ("lp", "qpth")
+=======
+                   world_model=None):
+    assert eval_policy_type in ("ce", "lp")
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
@@ -158,6 +172,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     rho = cfg.rho
     lp_weight = 1
 
+<<<<<<< HEAD
     if solver == "qpth":
         # DFL-QP backend: same Gurobi front-end as DFL, but with quadratic
         # regularization (eta/2)||w||^2 + custom KKT-based adjoint. Apples-
@@ -176,6 +191,9 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     # policy comparable across DFL/DFL-QP/DFL-DR/Two-stage at every
     # iteration — the only thing that varies is the features.
     def solve_eval(M, c, b):
+=======
+    def solve_lp(M, c, b):
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
         return differentiable_reduced_lp(M, c, b)
 
     def compute_shaped_rewards(states, actions, rewards):
@@ -192,7 +210,11 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             buffer["states"], buffer["actions"], buffer["rewards"])
         M, c, b = estimate_lp_matrices(
             features, shaped_buffer, gamma=cfg.gamma, ridge=cfg.ridge)
+<<<<<<< HEAD
         w_star = solve_eval(M, c, b).detach()
+=======
+        w_star = solve_lp(M, c, b).detach()
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
     current_policy = occupancy_to_policy_fn(features, w_star)
 
     def ce_policy(states):
@@ -224,6 +246,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     best_reward = ws_results["avg_reward"] if verbose else -float("inf")
     best_state, best_w, best_head = snapshot()
 
+<<<<<<< HEAD
     # Accumulate the *training cost that differs across methods*: the
     # forward solver call inside the DFL phase plus the backward pass
     # through it. Pretrain, eval, and the iter-end LP solve are identical
@@ -231,6 +254,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     solver_forward_time = 0.0
     backward_time = 0.0
 
+=======
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
     history = []
     for iteration in range(cfg.n_iterations):
         t0 = time.time()
@@ -287,10 +312,14 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                     batch["states"], batch["actions"], batch["rewards"])
                 M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
                     features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
+<<<<<<< HEAD
 
                 _t = time.time()
                 w_star_inner = solve_lp(M_shaped, c_shaped, b_shaped)
                 solver_forward_time += time.time() - _t
+=======
+                w_star_inner = solve_lp(M_shaped, c_shaped, b_shaped)
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
 
                 M_true, c_true, b_true = estimate_lp_matrices(
                     features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
@@ -300,9 +329,13 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 aug_lag = rho * violation.pow(2).sum()
 
                 loss = (lp_obj + aug_lag) * lp_weight
+<<<<<<< HEAD
                 _t = time.time()
                 loss.backward()
                 backward_time += time.time() - _t
+=======
+                loss.backward()
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
                 torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
                 dfl_optimizer.step()
 
@@ -315,7 +348,11 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 buffer["states"], buffer["actions"], buffer["rewards"])
             M_eval, c_eval, b_eval = estimate_lp_matrices(
                 features, shaped_full, gamma=cfg.gamma, ridge=cfg.ridge)
+<<<<<<< HEAD
             w_star = solve_eval(M_eval, c_eval, b_eval).detach()
+=======
+            w_star = solve_lp(M_eval, c_eval, b_eval).detach()
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
         current_policy = occupancy_to_policy_fn(features, w_star)
 
         elapsed = time.time() - t0
@@ -349,6 +386,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         print(f"  Best reward over run: {best_reward:.2f}")
 
     return {"history": history, "features": features, "w_star": w_star,
+<<<<<<< HEAD
             "w_head": w_head, "best_reward": best_reward,
             "solver_forward_time": float(solver_forward_time),
             "backward_time": float(backward_time),
@@ -607,6 +645,9 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
             "world_model": world_model,
             "best_reward": float(best_reward),
             "solver_total_time": 0.0}
+=======
+            "w_head": w_head, "best_reward": best_reward}
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
 
 
 def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
@@ -847,12 +888,17 @@ def parse_args():
     p.add_argument("--n_features", type=int, default=128)
     p.add_argument("--n_trajectories", type=int, default=500)
     p.add_argument("--n_epochs", type=int, default=100)
+<<<<<<< HEAD
     p.add_argument("--n_dfl_steps", type=int, default=5)
     p.add_argument("--n_ce_steps", type=int, default=0)
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=1.0)
     p.add_argument("--pretrain_epochs", type=int, default=70)
     p.add_argument("--eval_policy", type=str, default="lp", choices=["ce", "lp"])
+=======
+    p.add_argument("--ridge", type=float, default=1e-4)
+    p.add_argument("--rho", type=float, default=1.0)
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
     # Soft aggregation
     p.add_argument("--n_clusters", type=int, default=32)
     p.add_argument("--bins_per_dim", type=int, default=8)
@@ -885,7 +931,11 @@ def main():
             cfg, n_clusters=args.n_clusters,
             bins_per_dim=args.bins_per_dim,
             n_iterations=args.n_iterations,
+<<<<<<< HEAD
             lr=args.lr, tau=args.tau, pretrain_epochs=args.pretrain_epochs)
+=======
+            lr=args.lr, tau=args.tau)
+>>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
     else:
         out = run_neural_dfl(cfg, bins_per_dim=args.bins_per_dim, tau=args.tau)
 
