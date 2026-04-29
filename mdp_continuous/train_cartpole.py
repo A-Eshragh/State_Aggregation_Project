@@ -159,11 +159,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     lp_weight = 1
 
     if solver == "qpth":
-        # DFL-QP backend: same Gurobi front-end as DFL, but with quadratic
-        # regularization (eta/2)||w||^2 + custom KKT-based adjoint. Apples-
-        # to-apples comparison with the LP path — only the objective term
-        # differs, so the wall-clock difference reflects the genuine extra
-        # cost of the quadratic term (forward + KKT backward).
         qp_eta = float(cfg.qp_eta)
         def solve_lp(M, c, b):
             return differentiable_reduced_qp(M, c, b, eta=qp_eta)
@@ -171,10 +166,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         def solve_lp(M, c, b):
             return differentiable_reduced_lp(M, c, b)
 
-    # Eval-time policy derivation always uses the pure LP, regardless of
-    # which solver the training-step gradient flows through. Keeps the eval
-    # policy comparable across DFL/DFL-QP/DFL-DR/Two-stage at every
-    # iteration — the only thing that varies is the features.
     def solve_eval(M, c, b):
         return differentiable_reduced_lp(M, c, b)
 
@@ -224,10 +215,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     best_reward = ws_results["avg_reward"] if verbose else -float("inf")
     best_state, best_w, best_head = snapshot()
 
-    # Accumulate the *training cost that differs across methods*: the
-    # forward solver call inside the DFL phase plus the backward pass
-    # through it. Pretrain, eval, and the iter-end LP solve are identical
-    # across DFL/DFL-QP/DFL-DR/Two-stage and so excluded.
     solver_forward_time = 0.0
     backward_time = 0.0
 
@@ -377,31 +364,6 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
                        syn_buffer_max: int = 200_000,
                        eps_greedy: float = 0.1,
                        target_update_iters: int = 1):
-    """Offline model-based RL on CartPole: fit a dynamics+reward model on
-    the offline buffer, freeze it, and run a standard model-free RL
-    algorithm against the logged data. Per Levine et al. (2020), §5.4 —
-    "easy" offline MBRL = train a model, then run any RL algorithm.
-
-    Algorithm (defaults are tuned for stability on CartPole):
-      1. Fit a Gaussian dynamics + MSE reward model on the real buffer
-         (n_epochs=`world_epochs`, val early-stop). Freeze it.
-      2. Seed an FQI replay buffer with the real transitions.
-      3. Optional: pre-generate `n_initial_synthetic` k-step rollouts in
-         the model under the behavior policy and add to the replay.
-         OFF by default — even small WM reward errors compound through
-         γ-discounted Bellman backups and destabilise vanilla Q-learning;
-         making the model rollouts stable would require a conservatism
-         term (CQL/MOPO) that we don't add here. The frozen model is
-         still returned for downstream inspection / MPC at deploy time.
-      4. Outer loop: each iteration runs `n_q_steps_per_iter` minibatch
-         DQN updates against a target network and evaluates the greedy
-         policy in the *real* env. With synthetic rollouts off, this is
-         offline FQI with a learned model trained alongside.
-
-    Returns a dict with the same key set the figure pipelines consume:
-      history, best_reward, solver_total_time (=0 — no LP solver here),
-      plus q_net and world_model for downstream inspection.
-    """
     import torch.nn as nn
     import torch.nn.functional as F
     from .world_model import train_world_model
@@ -609,178 +571,6 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
             "solver_total_time": 0.0}
 
 
-def run_soft_agg_dfl(cfg: CartPoleConfig, n_clusters: int = 32,
-                     bins_per_dim: int = 8, n_iterations: int = 100,
-                     lr: float = 1e-3, tau: float = 0.5,
-                     verbose: bool = True):
-    from .baselines import DiscretizedCartPole
-
-    device = torch.device("cpu")
-    dynamics = CartPoleDynamics(cfg)
-    A = 2
-    M = n_clusters
-    gamma_disc = cfg.gamma
-
-    if verbose:
-        print("=" * 60)
-        print(f"Soft State Aggregation (M={M} clusters, "
-              f"{bins_per_dim} bins/dim = {bins_per_dim**4} grid states)")
-        print("=" * 60)
-
-    # ── Step 1: Discretize and compute TRUE dynamics ──
-    if verbose:
-        print("Building true P and R on grid...")
-    disc = DiscretizedCartPole(cfg, bins_per_dim)
-    S = disc.n_states
-    P_np, R_np = disc.build_transition_and_reward()
-    P = torch.tensor(P_np, dtype=torch.float32, device=device)  # (S, A, S)
-    R = torch.tensor(R_np, dtype=torch.float32, device=device)  # (S, A)
-
-    # All grid states as tensor
-    all_states = torch.zeros(S, 4, device=device)
-    for s_idx in range(S):
-        all_states[s_idx] = torch.tensor(disc.index_to_state(s_idx),
-                                         dtype=torch.float32)
-
-    # Zero out reward for absorbing states (self-loop in P).
-    # Without this, the LP exploits absorbing states for infinite reward.
-    is_absorbing = torch.zeros(S, dtype=torch.bool, device=device)
-    for a in range(A):
-        is_absorbing |= (P[torch.arange(S), a, torch.arange(S)] > 0.99)
-    R[is_absorbing] = 0.0
-
-    # State scales for normalization
-    state_scales = torch.tensor(
-        [cfg.x_max, cfg.x_dot_max, cfg.theta_max, cfg.theta_dot_max],
-        device=device)
-
-    # Initial distribution: Gaussian centered at origin
-    norm_states = all_states / state_scales
-    dists = (norm_states ** 2).sum(dim=1)  # squared distance from origin
-    gamma_init = torch.exp(-dists / 0.1)   # concentrated near origin
-    gamma_init = gamma_init / gamma_init.sum()
-
-    if verbose:
-        n_init = int((gamma_init > 1e-4).sum())
-        print(f"  Grid: {S} states, ~{n_init} effective initial states, "
-              f"{int(is_absorbing.sum())} absorbing")
-
-    # ── Step 2: Membership network ──
-    membership_net = torch.nn.Sequential(
-        torch.nn.Linear(4, 128),
-        torch.nn.ReLU(),
-        torch.nn.Linear(128, 128),
-        torch.nn.ReLU(),
-        torch.nn.Linear(128, M),
-    ).to(device)
-
-    optimizer = torch.optim.Adam(membership_net.parameters(), lr=lr)
-    history = []
-
-    for iteration in range(n_iterations):
-        t0 = time.time()
-        optimizer.zero_grad()
-
-        # ── Step 3: Compute memberships ──
-        norm_states = all_states / state_scales
-        logits = membership_net(norm_states)          # (S, M)
-        W = torch.softmax(logits / tau, dim=1)        # (S, M)
-        mass = W.sum(dim=0).clamp_min(1e-8)           # (M,)
-
-        # ── Step 4: Aggregate using TRUE dynamics ──
-        # r_agg[m, a] = sum_s W[s,m] * R[s,a] / mass[m]
-        r_agg = torch.einsum('sm,sa->ma', W, R) / mass.unsqueeze(-1)
-
-        # right[s, a, m'] = sum_{s'} P[s,a,s'] * W[s',m']
-        right = torch.einsum('sap,pm->sam', P, W)     # (S, A, M)
-        # P_agg[m, a, m'] = sum_s W[s,m] * right[s,a,m'] / mass[m]
-        P_agg = torch.einsum('sm,san->man', W, right) / mass[:, None, None]
-
-        # Normalize rows for numerical stability
-        P_agg = P_agg.clamp_min(0.0)
-        P_agg = P_agg / P_agg.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-
-        # gamma_agg[m] = sum_s gamma[s] * W[s,m]
-        gamma_agg = gamma_init @ W                     # (M,)
-        gamma_agg = gamma_agg / gamma_agg.sum().clamp_min(1e-8)
-
-        # ── Step 5: Build and solve aggregated LP ──
-        # H[m, m'*A + a] = delta[m,m'] - gamma * P_agg[m', a, m]
-        H = torch.zeros(M, M * A, device=device)
-        for a in range(A):
-            # Identity part: H[m, m*A+a] += 1
-            H[torch.arange(M), torch.arange(M) * A + a] += 1.0
-            # Transition part: H[m, m'*A+a] -= gamma * P_agg[m', a, m]
-            H[:, a::A] -= gamma_disc * P_agg[:, a, :].T
-
-        c_agg = -r_agg.reshape(-1)  # (M*A,) negative reward for minimization
-
-        # Solve aggregated LP (inner problem with predicted/aggregated params)
-        y_agg = differentiable_reduced_lp(H, c_agg, gamma_agg)
-
-        # ── Outer DFL loss: evaluate y_agg on TRUE (non-aggregated) MDP ──
-        # Disaggregate: y_orig[s, a] = sum_m W[s, m] * y_agg[m, a]
-        y_agg_2d = y_agg.reshape(M, A)                # (M, A)
-        y_orig = W @ y_agg_2d                          # (S, A)
-
-        # True reward: -sum_{s,a} R[s,a] * y_orig[s,a]  (minimize negative reward)
-        reward_loss = -(R * y_orig).sum()
-
-        # True flow constraint violation:
-        #   sum_a y(s,a) - gamma * sum_{s',a} P[s',a,s] * y(s',a) = rho(s)
-        outflow = y_orig.sum(dim=1)                    # (S,)
-        inflow = torch.zeros(S, device=device)
-        for a in range(A):
-            inflow += P[:, a, :].T @ y_orig[:, a]      # (S,)
-        violation = outflow - gamma_disc * inflow - gamma_init
-        constraint_loss = violation.pow(2).sum()
-
-        loss = reward_loss + cfg.rho * constraint_loss
-        loss.backward()
-        grad_norm = sum(p.grad.norm().item() for p in membership_net.parameters()
-                        if p.grad is not None)
-        torch.nn.utils.clip_grad_norm_(membership_net.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        # ── Step 6: Extract policy and evaluate ──
-        with torch.no_grad():
-            y_agg_2d_eval = y_agg.detach().reshape(M, A)  # (M, A)
-
-        def make_policy(net, scales, y2d, t):
-            """Create a policy function that uses memberships + LP solution."""
-            _net = net
-            _scales = scales
-            _y2d = y2d.clone()
-            _tau = t
-            def policy_fn(states):
-                with torch.no_grad():
-                    ns = states / _scales
-                    w = torch.softmax(_net(ns) / _tau, dim=1)  # (B, M)
-                    y_per_action = w @ _y2d                     # (B, A)
-                    return y_per_action.argmax(dim=1)
-            return policy_fn
-
-        current_policy = make_policy(membership_net, state_scales, y_agg_2d_eval, tau)
-        results = evaluate_policy(
-            dynamics, current_policy, cfg.n_eval_episodes,
-            cfg.max_steps, cfg.gamma, device)
-        elapsed = time.time() - t0
-        history.append({"iteration": iteration, **results})
-
-        if verbose:
-            y_nnz = int((y_agg > 1e-8).sum())
-            print(
-                f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
-                f"length={results['avg_length']:.1f} | "
-                f"lp_obj={loss.item():.4f} | "
-                f"nnz={y_nnz}/{M*A} | "
-                f"grad={grad_norm:.4f} | "
-                f"time={elapsed:.1f}s"
-            )
-
-    return {"history": history, "membership_net": membership_net}
-
-
 def plot_learning_curves(history: list, save_path: str = None):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -810,7 +600,7 @@ def plot_learning_curves(history: list, save_path: str = None):
 def parse_args():
     p = argparse.ArgumentParser(description="Continuous MDP DFL on CartPole")
     p.add_argument("--method", type=str, default="soft_agg",
-                   choices=["neural_dfl", "soft_agg"],
+                   choices=["neural_dfl", "soft_agg", "two_stage_mbrl"],
                    help="Training method")
     # Shared
     p.add_argument("--n_iterations", type=int, default=100)
@@ -820,6 +610,7 @@ def parse_args():
     p.add_argument("--reward_type", type=str, default="cos_theta",
                    choices=["cos_theta", "constant"])
     p.add_argument("--save_plot", type=str, default=None)
+    p.add_argument("--n_eval_episodes", type=int, default=50)
     # Neural DFL
     p.add_argument("--n_features", type=int, default=128)
     p.add_argument("--n_trajectories", type=int, default=500)
@@ -837,6 +628,30 @@ def parse_args():
                    help="Softmax temperature for membership")
     p.add_argument("--seed", type=int, default=1,
                    help="Random seed for reproducibility")
+    # World-model knobs — every method that consumes a learned MDP model
+    # uses one unconditionally (neural_dfl swaps the LP estimator's
+    # (r, s') for model predictions; two_stage_mbrl runs DQN on the
+    # frozen model). soft_agg uses the discretised true dynamics and so
+    # has no learned model.
+    p.add_argument("--world_epochs", type=int, default=400,
+                   help="World-model training epochs (Gaussian dynamics + "
+                        "MSE reward, val early-stop).")
+    p.add_argument("--world_lr", type=float, default=1e-3,
+                   help="World-model Adam learning rate.")
+    p.add_argument("--mbrl_q_hidden", type=int, nargs="+", default=[32, 32],
+                   help="MBRL Q-net hidden layer sizes.")
+    p.add_argument("--mbrl_q_lr", type=float, default=3e-4)
+    p.add_argument("--mbrl_q_steps", type=int, default=128,
+                   help="DQN gradient steps per outer iteration.")
+    p.add_argument("--mbrl_q_batch_size", type=int, default=256)
+    p.add_argument("--mbrl_rollouts_per_iter", type=int, default=0,
+                   help="Per-iter k-step model rollouts. Off by default — "
+                        "see run_two_stage_mbrl docstring for why.")
+    p.add_argument("--mbrl_rollout_length", type=int, default=1)
+    p.add_argument("--mbrl_n_initial_synthetic", type=int, default=0,
+                   help="One-shot synthetic transitions to add to the "
+                        "replay before training. Off by default.")
+    p.add_argument("--mbrl_eps_greedy", type=float, default=0.1)
     return p.parse_args()
 
 
@@ -854,7 +669,8 @@ def main():
         n_trajectories=args.n_trajectories,
         n_epochs=args.n_epochs,
         ridge=args.ridge,
-        rho=10.0
+        rho=10.0,
+        n_eval_episodes=args.n_eval_episodes,
     )
 
     if args.method == "soft_agg":
@@ -863,8 +679,43 @@ def main():
             bins_per_dim=args.bins_per_dim,
             n_iterations=args.n_iterations,
             lr=args.lr, tau=args.tau, pretrain_epochs=args.pretrain_epochs)
+    elif args.method == "two_stage_mbrl":
+        out = run_two_stage_mbrl(
+            cfg, verbose=True,
+            bins_per_dim=args.bins_per_dim, tau=args.tau,
+            world_epochs=args.world_epochs,
+            world_lr=args.world_lr,
+            q_hidden=tuple(args.mbrl_q_hidden),
+            q_lr=args.mbrl_q_lr,
+            q_batch_size=args.mbrl_q_batch_size,
+            n_q_steps_per_iter=args.mbrl_q_steps,
+            rollouts_per_iter=args.mbrl_rollouts_per_iter,
+            rollout_length=args.mbrl_rollout_length,
+            n_initial_synthetic=args.mbrl_n_initial_synthetic,
+            eps_greedy=args.mbrl_eps_greedy,
+        )
     else:
-        out = run_neural_dfl(cfg, bins_per_dim=args.bins_per_dim, tau=args.tau)
+        from .world_model import train_world_model
+        device = torch.device("cpu")
+        dynamics = CartPoleDynamics(cfg)
+        buf = collect_trajectories(dynamics, heuristic_policy,
+                                   cfg.n_trajectories, cfg.max_steps,
+                                   device)
+        print(f"[WM] Fitting world model on {buf['states'].shape[0]} "
+              f"transitions for {args.world_epochs} epochs...")
+        wm = train_world_model(buf, n_epochs=args.world_epochs,
+                               lr=args.world_lr, verbose=True)
+
+        out = run_neural_dfl(
+            cfg, verbose=True,
+            bins_per_dim=args.bins_per_dim, tau=args.tau,
+            pretrain_epochs=args.pretrain_epochs,
+            eval_policy_type=args.eval_policy,
+            n_ce_steps=args.n_ce_steps,
+            n_dfl_steps=args.n_dfl_steps,
+            data=buf,
+            world_model=wm,
+        )
 
     plot_learning_curves(out["history"], save_path=args.save_plot)
 
