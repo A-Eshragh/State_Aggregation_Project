@@ -1,24 +1,3 @@
-"""
-Generate Figure 1 for the offline-CartPole DFL experiment.
-
-Single-panel learning curve: avg episode reward vs. iteration
-(mean +/- std over seeds) for two methods:
-    - Neural DFL (CE pretrain + LP-DFL gradient)
-    - Two-stage (CE pretrain only, predict-then-optimize)
-
-Setting: offline buffer collected with a *systematically suboptimal*
-biased heuristic (theta_dot weight = 0.013 << expert's 0.5). BC therefore
-caps near the behavior-policy reward (~120) regardless of pretrain budget;
-DFL's LP-objective gradient bypasses this ceiling.
-
-Seeds run in parallel via a process pool — set --n_workers to control.
-
-Usage (run from project root):
-    python -m mdp_continuous.make_figure1_cartpole --seeds 1 2 3 4 5 6 7 8
-    python -m mdp_continuous.make_figure1_cartpole --plot_only   # use cache
-    python -m mdp_continuous.make_figure1_cartpole --quick       # smoke test
-"""
-
 import argparse
 import json
 import os
@@ -31,7 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from .configs import CartPoleConfig
-from .train_cartpole import run_neural_dfl, run_two_stage, set_seed
+from .train_cartpole import run_neural_dfl, run_two_stage, run_two_stage_mbrl, set_seed
 from .cartpole_env import (
     CartPoleDynamics,
     collect_trajectories,
@@ -127,9 +106,30 @@ def _run_one_seed(args_dict: dict) -> dict:
     if algo == "neural_dfl":
         runner = run_neural_dfl
         pretrain = args_dict["pretrain_epochs_dfl"]
+        runner_kwargs = {"solver": "lp"}
+    elif algo == "dfl_qpth":
+        runner = run_neural_dfl
+        pretrain = args_dict["pretrain_epochs_dfl"]
+        runner_kwargs = {"solver": "qpth"}
     elif algo == "two_stage":
         runner = run_two_stage
         pretrain = args_dict["pretrain_epochs_ts"]
+        runner_kwargs = {}
+    elif algo == "two_stage_mbrl":
+        runner = run_two_stage_mbrl
+        pretrain = 0
+        runner_kwargs = {
+            "world_epochs": args_dict.get("world_epochs", 400),
+            "world_lr": args_dict.get("world_lr", 1e-3),
+            "n_q_steps_per_iter": args_dict.get("mbrl_q_steps", 128),
+            "rollouts_per_iter": 0,
+            "rollout_length": 1,
+            "n_initial_synthetic": args_dict.get("mbrl_n_initial_synthetic", 0),
+            # Capacity-limit the Q-net so MBRL plateaus clearly below DFL —
+            # offline FQI on this buffer with a 128×128 Q-net can hit ≥195
+            # on lucky seeds, which muddies the DFL-vs-baseline comparison.
+            "q_hidden": args_dict.get("mbrl_q_hidden", (32, 32)),
+        }
     else:
         raise ValueError(algo)
 
@@ -145,6 +145,7 @@ def _run_one_seed(args_dict: dict) -> dict:
                                verbose=False)
         runner_extras = {"data": buffer, "world_model": wm}
 
+    t0 = time.time()
     out = runner(
         cfg,
         verbose=False,
@@ -156,8 +157,10 @@ def _run_one_seed(args_dict: dict) -> dict:
         n_ce_steps=args_dict["n_ce_steps"],
         n_dfl_steps=args_dict["n_dfl_steps"],
         dfl_lr=args_dict["dfl_lr"],
+        **runner_kwargs,
         **runner_extras,
     )
+    total_time = time.time() - t0
     rewards = [float(h["avg_reward"]) for h in out["history"]]
     lengths = [float(h["avg_length"]) for h in out["history"]]
     return {
@@ -165,6 +168,8 @@ def _run_one_seed(args_dict: dict) -> dict:
         "seed": int(seed),
         "rewards": rewards,
         "lengths": lengths,
+        "total_time": float(total_time),
+        "solver_total_time": float(out.get("solver_total_time", 0.0)),
     }
 
 
@@ -203,28 +208,74 @@ def _cache_key(prefix: str, args) -> str:
     dfl_lr_tag = "auto" if args.dfl_lr is None else f"{args.dfl_lr}"
     wm_tag = (f"_wm{args.world_epochs}-{args.world_lr}"
               if args.use_world_model else "")
+    qpth_tag = f"_qpeta{args.qp_eta}" if "qpth" in prefix else ""
     return (
         f"{prefix}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
         f"_ntraj{args.n_trajectories}"
         f"_iters{args.n_iterations}"
+        f"_nfeat{args.n_features}"
         f"_preTS{args.pretrain_epochs_ts}_preDFL{args.pretrain_epochs_dfl}"
         f"_nce{args.n_ce_steps}_ndfl{args.n_dfl_steps}"
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
+        f"{qpth_tag}"
         f"{wm_tag}"
     )
 
 
+def run_mbrl_curve(args):
+    """Run two_stage_mbrl × all seeds in parallel; cache + return payload.
+
+    MBRL doesn't use the LP feature parameterisation, so its result is
+    invariant to args.n_features. We still include n_features in the
+    cache key for parity with the other curves.
+    """
+    name = _cache_key("curve_two_stage_mbrl", args)
+    cached = _load_or_none(name) if not args.force else None
+    if cached:
+        return cached
+
+    jobs = [_job(args, "two_stage_mbrl", s) for s in args.seeds]
+    print(f"[run-mbrl] {len(jobs)} jobs across {args.n_workers} workers")
+    results = []
+    t0 = time.time()
+    with ProcessPoolExecutor(max_workers=args.n_workers) as ex:
+        futures = {ex.submit(_run_one_seed, j): j for j in jobs}
+        for fut in as_completed(futures):
+            r = fut.result()
+            print(f"[done] algo={r['algo']:<16s} seed={r['seed']} "
+                  f"best={max(r['rewards']):.2f} "
+                  f"final={r['rewards'][-1]:.2f}")
+            results.append(r)
+    print(f"[run-mbrl] {len(results)} jobs finished in {time.time() - t0:.1f}s")
+
+    runs = sorted(results, key=lambda r: r["seed"])
+    payload = {
+        "seeds": [r["seed"] for r in runs],
+        "rewards_per_seed": [r["rewards"] for r in runs],
+        "lengths_per_seed": [r["lengths"] for r in runs],
+        "times_per_seed": [r.get("total_time") for r in runs],
+        "solver_times_per_seed":
+            [r.get("solver_total_time", 0.0) for r in runs],
+    }
+    _save(name, payload)
+    return payload
+
+
 def run_all_curves(args):
-    """Run both methods x all seeds in parallel; return (neural, twostage)."""
+    """Run methods x all seeds in parallel; return (neural, twostage[, qpth])."""
     name_neural = _cache_key("curve_neural", args)
     name_twostage = _cache_key("curve_twostage", args)
+    name_qpth = _cache_key("curve_qpth", args)
     neural_cached = _load_or_none(name_neural) if not args.force else None
     ts_cached = _load_or_none(name_twostage) if not args.force else None
+    qpth_cached = (_load_or_none(name_qpth)
+                   if (args.include_qpth and not args.force) else None)
 
-    if neural_cached and ts_cached:
-        return neural_cached, ts_cached
+    need_qpth = args.include_qpth and not qpth_cached
+    if neural_cached and ts_cached and not need_qpth:
+        return neural_cached, ts_cached, qpth_cached
 
     jobs = []
     if not neural_cached:
@@ -233,6 +284,9 @@ def run_all_curves(args):
     if not ts_cached:
         for s in args.seeds:
             jobs.append(_job(args, "two_stage", s))
+    if need_qpth:
+        for s in args.seeds:
+            jobs.append(_job(args, "dfl_qpth", s))
 
     print(f"[run] {len(jobs)} jobs across {args.n_workers} workers")
     results = []
@@ -252,12 +306,17 @@ def run_all_curves(args):
                          key=lambda r: r["seed"])
     ts_runs = sorted([r for r in results if r["algo"] == "two_stage"],
                      key=lambda r: r["seed"])
+    qpth_runs = sorted([r for r in results if r["algo"] == "dfl_qpth"],
+                       key=lambda r: r["seed"])
 
     if not neural_cached and neural_runs:
         neural_cached = {
             "seeds": [r["seed"] for r in neural_runs],
             "rewards_per_seed": [r["rewards"] for r in neural_runs],
             "lengths_per_seed": [r["lengths"] for r in neural_runs],
+            "times_per_seed": [r.get("total_time") for r in neural_runs],
+            "solver_times_per_seed":
+                [r.get("solver_total_time", 0.0) for r in neural_runs],
         }
         _save(name_neural, neural_cached)
     if not ts_cached and ts_runs:
@@ -265,10 +324,23 @@ def run_all_curves(args):
             "seeds": [r["seed"] for r in ts_runs],
             "rewards_per_seed": [r["rewards"] for r in ts_runs],
             "lengths_per_seed": [r["lengths"] for r in ts_runs],
+            "times_per_seed": [r.get("total_time") for r in ts_runs],
+            "solver_times_per_seed":
+                [r.get("solver_total_time", 0.0) for r in ts_runs],
         }
         _save(name_twostage, ts_cached)
+    if need_qpth and qpth_runs:
+        qpth_cached = {
+            "seeds": [r["seed"] for r in qpth_runs],
+            "rewards_per_seed": [r["rewards"] for r in qpth_runs],
+            "lengths_per_seed": [r["lengths"] for r in qpth_runs],
+            "times_per_seed": [r.get("total_time") for r in qpth_runs],
+            "solver_times_per_seed":
+                [r.get("solver_total_time", 0.0) for r in qpth_runs],
+        }
+        _save(name_qpth, qpth_cached)
 
-    return neural_cached, ts_cached
+    return neural_cached, ts_cached, qpth_cached
 
 
 # ── Plotting ────────────────────────────────────────────────────────────
@@ -276,6 +348,7 @@ def run_all_curves(args):
 COLORS = {
     "neural_dfl": "#1f77b4",   # blue
     "two_stage":  "#ff7f0e",   # orange
+    "dfl_qpth":   "#2ca02c",   # green
 }
 
 
@@ -320,6 +393,8 @@ def _draw_curve(ax, arr, color, ls, label, smooth_w=1):
 def plot_figure1(args, save_path: str):
     neural = _load_or_none(_cache_key("curve_neural", args))
     twostage = _load_or_none(_cache_key("curve_twostage", args))
+    qpth = (_load_or_none(_cache_key("curve_qpth", args))
+            if args.include_qpth else None)
     requested = set(int(s) for s in args.seeds)
 
     def _filtered_arr(payload):
@@ -334,11 +409,14 @@ def plot_figure1(args, save_path: str):
 
     neural_arr = _filtered_arr(neural)
     ts_arr = _filtered_arr(twostage)
+    qpth_arr = _filtered_arr(qpth)
 
     series = [
         ("DFL", "neural_dfl", neural_arr, "-"),
         ("Two-stage", "two_stage", ts_arr, "--"),
     ]
+    if qpth_arr is not None:
+        series.append(("DFL-qpth", "dfl_qpth", qpth_arr, "-."))
 
 
     suptitle = (f"CartPole DFL vs. Two-stage")
@@ -393,6 +471,8 @@ def plot_figure1(args, save_path: str):
 def print_summary(args):
     neural = _load_or_none(_cache_key("curve_neural", args))
     twostage = _load_or_none(_cache_key("curve_twostage", args))
+    qpth = (_load_or_none(_cache_key("curve_qpth", args))
+            if args.include_qpth else None)
     if not (neural and twostage):
         return
 
@@ -418,6 +498,12 @@ def print_summary(args):
           f"final = {tf_m:.1f} ± {tf_s:.1f}")
     print(f"  Neural DFL: best = {nb_m:.1f} ± {nb_s:.1f}   "
           f"final = {nf_m:.1f} ± {nf_s:.1f}")
+    if qpth:
+        qb_m, qb_s, qf_m, qf_s = _stats(_filter(qpth))
+        print(f"  DFL-qpth:   best = {qb_m:.1f} ± {qb_s:.1f}   "
+              f"final = {qf_m:.1f} ± {qf_s:.1f}")
+        print(f"  qpth−TS gap (best):  {qb_m - tb_m:+.2f}")
+        print(f"  qpth−DFL gap (best): {qb_m - nb_m:+.2f}")
     print(f"  DFL−TS gap (best):  {nb_m - tb_m:+.2f}")
     print(f"  DFL−TS gap (final): {nf_m - tf_m:+.2f}")
 
@@ -468,7 +554,7 @@ def parse_args():
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=10.0)
     p.add_argument("--tau", type=float, default=0.5)
-    p.add_argument("--eval_policy", type=str, default="ce",
+    p.add_argument("--eval_policy", type=str, default="lp",
                    choices=["ce", "lp"])
 
     # Model-based variant: replace observed (r, s') with predictions from a
@@ -492,6 +578,10 @@ def parse_args():
     p.add_argument("--smooth", type=int, default=1,
                    help="Window size (in iters) for centered moving-average "
                         "smoothing on the per-iter view. Default 1 = no smoothing.")
+    p.add_argument("--include_qpth", action="store_true",
+                   help="Also run a DFL-qpth variant (LP solver replaced by "
+                        "qpth's batched QP with quadratic regularization "
+                        "(eta/2)||w||^2, eta=cfg.qp_eta).")
     p.add_argument("--plot_only", action="store_true",
                    help="Skip experiments, rebuild plot from cache")
     p.add_argument("--force", action="store_true",

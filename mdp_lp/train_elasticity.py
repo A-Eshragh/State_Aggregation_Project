@@ -27,6 +27,7 @@ from mdp_lp.solvers.differentiable_qp import DifferentiableQPSolver
 from mdp_lp.soft_state_aggregation import SoftAggDense
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 from mdp_lp.solvers.sketched_lp import sketched_lp
+from mdp_lp.solvers.perturbed_lp import perturbed_lp
 from mdp_lp.inventory_poisson_grad import poisson_pmf
 
 
@@ -46,6 +47,24 @@ def _sketched_lp_from_args(H, r, gamma, args, batch_idx=0, epoch=0):
         sketch_mode=str(getattr(args, "sketch_mode", "gaussian")),
         sketch_seed=seed_for_call,
         beta=float(getattr(args, "beta", 0.95)),
+    )
+
+
+def _perturbed_lp_from_args(H, r, gamma, args, batch_idx=0, epoch=0):
+    """Helper: pull Berthet-style perturbed-LP hyperparameters from args."""
+    base_seed = getattr(args, "perturb_seed", None)
+    if base_seed is None:
+        seed_for_call = None
+    else:
+        # Vary the seed per (epoch, batch) so perturbations stay independent
+        # across iterations but reproducible given a fixed --perturb_seed.
+        seed_for_call = int(base_seed) + 10007 * int(epoch) + int(batch_idx)
+    return perturbed_lp(
+        H, r, gamma,
+        n_perturb=int(getattr(args, "n_perturb", 4)),
+        sigma=float(getattr(args, "sigma_perturb", 0.3)),
+        perturb_mode=str(getattr(args, "perturb_mode", "gaussian")),
+        perturb_seed=seed_for_call,
     )
 
 
@@ -434,10 +453,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     #     save_full_partial = False
 
     pred_model.train()
-    if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
-        pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=getattr(args, "pretrain_epochs", 30))
+    pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=getattr(args, "pretrain_epochs", 30))
 
-    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
+    if getattr(args, "n_agg", -1) != -1 and args.algo in ("dfl", "dfl_qpth", "dfl_sketch", "dfl_berthet"):
         n_states = args.b_max + args.s_max + 1
         n_actions = args.q_max + 1
         _rng_state = torch.get_rng_state()
@@ -503,7 +521,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma = torch.clamp(gamma, min=1e-8)
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
             gamma_use = gamma
-            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
+            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch", "dfl_berthet"):
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
                 if agg is not None:
@@ -517,10 +535,11 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     else:
                         # y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_use)
                         y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_use)
-                elif args.algo == "dfl_sketch":
+                elif args.algo in ("dfl_sketch", "dfl_berthet"):
                     # Initial-pass v* reporting: use the *plain* LP solution
-                    # (the sketched y_avg is a stochastic mix of vertices and
-                    # rolls out badly on the true MDP at degenerate cells).
+                    # (the smoothed y_avg, whether sketch or perturb, is a
+                    # stochastic mix of vertices and rolls out badly on the
+                    # true MDP at degenerate cells).
                     if agg is not None and _agg_info is not None:
                         y_plain, _, _ = lp_solver(H_use, r_flat_use, gamma_agg)
                     else:
@@ -619,7 +638,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
             gamma_use = gamma
 
-            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch"):
+            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch", "dfl_berthet"):
                 # Optionally aggregate (P, r, gamma) into M=n_agg clusters.
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
@@ -650,6 +669,15 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                                                         batch_idx=batch_idx, epoch=epoch)
                     else:
                         y_star = _sketched_lp_from_args(H_use, r_flat_use, gamma_use, args,
+                                                        batch_idx=batch_idx, epoch=epoch)
+                    epoch_solver_time += (time.time() - t0)
+                elif args.algo == "dfl_berthet":
+                    t0 = time.time()
+                    if agg is not None and _agg_info is not None:
+                        y_star = _perturbed_lp_from_args(H_use, r_flat_use, gamma_agg, args,
+                                                        batch_idx=batch_idx, epoch=epoch)
+                    else:
+                        y_star = _perturbed_lp_from_args(H_use, r_flat_use, gamma_use, args,
                                                         batch_idx=batch_idx, epoch=epoch)
                     epoch_solver_time += (time.time() - t0)
                 elif args.algo == "dfl_qpth":
@@ -692,16 +720,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     gamma_true_agg = torch.einsum("bs,bsm->bm", gamma_use, W).clamp_min(1e-8)
                     gamma_true_agg = gamma_true_agg / gamma_true_agg.sum(dim=1, keepdim=True).clamp_min(1e-8)
                     H_true_agg = mdp_true.build_H(P_true_agg)             # (B, M, M*A)
-                    if args.algo == "dfl_sketch":
-                        # Keep y_star from the PRED-aggregated sketched solve
-                        # above. Re-solving the LP in TRUE-projected space here
-                        # kills the direct λ_pred → y_star gradient — only W
-                        # would carry the signal, and W alone can absorb all
-                        # input variation, causing the predictor to collapse
-                        # to a near-constant. Evaluating the PRED y_star
-                        # against TRUE-projected (r,γ,H) matches the
-                        # formulation diagnose_solver_gradients and
-                        # compute_loss_grad already use.
+                    if args.algo in ("dfl_sketch", "dfl_berthet"):
                         pass
                     else:
                         # y_star = DifferentiableLPSolver.apply(H_true_agg, r_true_agg.reshape(batch_size, -1), gamma_true_agg)
@@ -824,14 +843,14 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             mdp_true = create_inventory_from_lambda(lambda_true, args.b_max, args.s_max, args.q_max,
                                                     args.foc, args.voc, args.hc, args.bc, args.beta,
                                                     p)
-            if args.algo == "dfl_sketch":
-                # Sketched y_avg is a smoothed inner-product proxy for the
-                # *training gradient* only. At degenerate LP cells (e.g. low λ)
-                # the K sketches snap to different near-tied vertices and y_avg
-                # becomes a smear over disagreeing deterministic policies; the
-                # extracted policy (soft or greedy) rolls out terribly on the
-                # true MDP. For v* reporting we evaluate the deployable policy
-                # by re-solving the *plain* LP at λ_pred.
+            if args.algo in ("dfl_sketch", "dfl_berthet"):
+                # Smoothed y_avg (sketched or perturbed) is a training-gradient
+                # proxy only. At degenerate LP cells (e.g. low λ) the K
+                # ensemble members snap to different near-tied vertices and
+                # y_avg becomes a smear over disagreeing deterministic
+                # policies; the extracted policy (soft or greedy) rolls out
+                # terribly on the true MDP. For v* reporting we evaluate the
+                # deployable policy by re-solving the *plain* LP at λ_pred.
                 y_plain_pred, _, _ = lp_solver(H_use, r_flat_use,
                                                gamma_agg if (agg is not None and _agg_info is not None) else gamma_use)
                 if agg is not None and _agg_info is not None:
@@ -858,7 +877,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
         
         # For DFL variants (LP-based and qpth-based): track average MSE and full DFL loss per epoch
-        if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_mse:
+        if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet') and epoch_mse:
             train_mse_list.append(np.mean(epoch_mse))
             train_dfl_loss_list.append(np.mean(epoch_dfl_loss))
             train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
@@ -900,7 +919,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         
         if (epoch + 1) % 1 == 0:
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
-            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_vstar and epoch_aug_lag and epoch_mse:
+            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet') and epoch_vstar and epoch_aug_lag and epoch_mse:
                 msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
                 msg += f'  zero_grad={train_zero_grad_frac_list[-1]:.1%}  |dV/dλ|={train_dv_dlambda_mean_list[-1]:.4f}'
             if epoch_lambda_star_mean:

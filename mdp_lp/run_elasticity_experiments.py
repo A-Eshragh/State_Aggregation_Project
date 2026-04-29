@@ -67,7 +67,7 @@ def main():
     parser.add_argument('--n_samples', type=int, default=50, help='Number of samples')
     parser.add_argument('--train_frac', type=float, default=0.5, help='Fraction for train (rest = test). 0.5 = 50/50 split.')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
-    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch'], required=True, help='Algorithm')
+    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.0, help='Weight for prediction loss in DFL (balanced so v* and pred loss have similar gradient scale; no adaptation)')
     parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension')
@@ -101,6 +101,17 @@ def main():
                         help='Distribution of sketch matrix entries')
     parser.add_argument('--sketch_seed', type=int, default=None,
                         help='Optional seed for sketch RNG (varied per epoch/batch internally)')
+
+    # Berthet-style perturbed-cost LP (only used for dfl_berthet)
+    parser.add_argument('--n_perturb', type=int, default=4,
+                        help='Ensemble size K for Berthet perturbed LP (averaged for smoothing)')
+    parser.add_argument('--sigma_perturb', type=float, default=0.3,
+                        help='Cost-noise std σ for Berthet perturbed LP')
+    parser.add_argument('--perturb_mode', type=str, default='gaussian',
+                        choices=['gaussian', 'rademacher'],
+                        help='Distribution of cost perturbation entries')
+    parser.add_argument('--perturb_seed', type=int, default=None,
+                        help='Optional seed for perturb RNG (varied per epoch/batch internally)')
     # DFL stability: gradient clipping and augmented Lagrangian
     parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
     parser.add_argument('--aug_lag_rho', type=float, default=10000.0, help='Augmented Lagrangian penalty coefficifent ρ (default 10; 100 can dominate and cause λ collapse)')

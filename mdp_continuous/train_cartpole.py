@@ -1,9 +1,3 @@
-"""
-Main training pipeline for continuous-state LP on CartPole.
-
-Neural features + DFL (end-to-end through differentiable LP).
-"""
-
 import argparse
 import random
 import time
@@ -45,8 +39,10 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    n_dfl_steps: int = 5,
                    dfl_lr: float = None,
                    data: dict = None,
-                   world_model=None):
+                   world_model=None,
+                   solver: str = "lp"):
     assert eval_policy_type in ("ce", "lp")
+    assert solver in ("lp", "qpth")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
@@ -162,7 +158,24 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     rho = cfg.rho
     lp_weight = 1
 
-    def solve_lp(M, c, b):
+    if solver == "qpth":
+        # DFL-QP backend: same Gurobi front-end as DFL, but with quadratic
+        # regularization (eta/2)||w||^2 + custom KKT-based adjoint. Apples-
+        # to-apples comparison with the LP path — only the objective term
+        # differs, so the wall-clock difference reflects the genuine extra
+        # cost of the quadratic term (forward + KKT backward).
+        qp_eta = float(cfg.qp_eta)
+        def solve_lp(M, c, b):
+            return differentiable_reduced_qp(M, c, b, eta=qp_eta)
+    else:
+        def solve_lp(M, c, b):
+            return differentiable_reduced_lp(M, c, b)
+
+    # Eval-time policy derivation always uses the pure LP, regardless of
+    # which solver the training-step gradient flows through. Keeps the eval
+    # policy comparable across DFL/DFL-QP/DFL-DR/Two-stage at every
+    # iteration — the only thing that varies is the features.
+    def solve_eval(M, c, b):
         return differentiable_reduced_lp(M, c, b)
 
     def compute_shaped_rewards(states, actions, rewards):
@@ -179,7 +192,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             buffer["states"], buffer["actions"], buffer["rewards"])
         M, c, b = estimate_lp_matrices(
             features, shaped_buffer, gamma=cfg.gamma, ridge=cfg.ridge)
-        w_star = solve_lp(M, c, b).detach()
+        w_star = solve_eval(M, c, b).detach()
     current_policy = occupancy_to_policy_fn(features, w_star)
 
     def ce_policy(states):
@@ -210,6 +223,13 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
     best_reward = ws_results["avg_reward"] if verbose else -float("inf")
     best_state, best_w, best_head = snapshot()
+
+    # Accumulate the *training cost that differs across methods*: the
+    # forward solver call inside the DFL phase plus the backward pass
+    # through it. Pretrain, eval, and the iter-end LP solve are identical
+    # across DFL/DFL-QP/DFL-DR/Two-stage and so excluded.
+    solver_forward_time = 0.0
+    backward_time = 0.0
 
     history = []
     for iteration in range(cfg.n_iterations):
@@ -267,7 +287,10 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                     batch["states"], batch["actions"], batch["rewards"])
                 M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
                     features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
+
+                _t = time.time()
                 w_star_inner = solve_lp(M_shaped, c_shaped, b_shaped)
+                solver_forward_time += time.time() - _t
 
                 M_true, c_true, b_true = estimate_lp_matrices(
                     features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
@@ -277,7 +300,9 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 aug_lag = rho * violation.pow(2).sum()
 
                 loss = (lp_obj + aug_lag) * lp_weight
+                _t = time.time()
                 loss.backward()
+                backward_time += time.time() - _t
                 torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
                 dfl_optimizer.step()
 
@@ -290,7 +315,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 buffer["states"], buffer["actions"], buffer["rewards"])
             M_eval, c_eval, b_eval = estimate_lp_matrices(
                 features, shaped_full, gamma=cfg.gamma, ridge=cfg.ridge)
-            w_star = solve_lp(M_eval, c_eval, b_eval).detach()
+            w_star = solve_eval(M_eval, c_eval, b_eval).detach()
         current_policy = occupancy_to_policy_fn(features, w_star)
 
         elapsed = time.time() - t0
@@ -324,7 +349,264 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         print(f"  Best reward over run: {best_reward:.2f}")
 
     return {"history": history, "features": features, "w_star": w_star,
-            "w_head": w_head, "best_reward": best_reward}
+            "w_head": w_head, "best_reward": best_reward,
+            "solver_forward_time": float(solver_forward_time),
+            "backward_time": float(backward_time),
+            "solver_total_time": float(solver_forward_time + backward_time)}
+
+
+def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
+                       bins_per_dim: int = 8, tau: float = 0.5,
+                       pretrain_epochs: int = 0,
+                       eval_policy_type: str = "lp",
+                       behavior_policy=None,
+                       n_ce_steps: int = 0,
+                       n_dfl_steps: int = 0,
+                       dfl_lr: float = None,
+                       data: dict = None,
+                       world_model=None,
+                       world_epochs: int = 400,
+                       world_lr: float = 1e-3,
+                       q_hidden=(128, 128),
+                       q_lr: float = 3e-4,
+                       q_batch_size: int = 256,
+                       n_q_steps_per_iter: int = 128,
+                       rollouts_per_iter: int = 0,
+                       rollout_length: int = 1,
+                       n_initial_synthetic: int = 0,
+                       syn_buffer_max: int = 200_000,
+                       eps_greedy: float = 0.1,
+                       target_update_iters: int = 1):
+    """Offline model-based RL on CartPole: fit a dynamics+reward model on
+    the offline buffer, freeze it, and run a standard model-free RL
+    algorithm against the logged data. Per Levine et al. (2020), §5.4 —
+    "easy" offline MBRL = train a model, then run any RL algorithm.
+
+    Algorithm (defaults are tuned for stability on CartPole):
+      1. Fit a Gaussian dynamics + MSE reward model on the real buffer
+         (n_epochs=`world_epochs`, val early-stop). Freeze it.
+      2. Seed an FQI replay buffer with the real transitions.
+      3. Optional: pre-generate `n_initial_synthetic` k-step rollouts in
+         the model under the behavior policy and add to the replay.
+         OFF by default — even small WM reward errors compound through
+         γ-discounted Bellman backups and destabilise vanilla Q-learning;
+         making the model rollouts stable would require a conservatism
+         term (CQL/MOPO) that we don't add here. The frozen model is
+         still returned for downstream inspection / MPC at deploy time.
+      4. Outer loop: each iteration runs `n_q_steps_per_iter` minibatch
+         DQN updates against a target network and evaluates the greedy
+         policy in the *real* env. With synthetic rollouts off, this is
+         offline FQI with a learned model trained alongside.
+
+    Returns a dict with the same key set the figure pipelines consume:
+      history, best_reward, solver_total_time (=0 — no LP solver here),
+      plus q_net and world_model for downstream inspection.
+    """
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from .world_model import train_world_model
+
+    del pretrain_epochs, eval_policy_type, n_ce_steps, n_dfl_steps, dfl_lr  # unused
+    del bins_per_dim, tau
+
+    device = torch.device("cpu")
+    dynamics = CartPoleDynamics(cfg)
+    A = 2
+    if behavior_policy is None:
+        behavior_policy = heuristic_policy
+
+    if verbose:
+        print("=" * 60)
+        print("Two-Stage MBRL — DQN on a frozen learned world model")
+        print("=" * 60)
+
+    # ── 1. Offline buffer ───────────────────────────────────────────
+    if data is None:
+        if verbose:
+            print(f"  Collecting {cfg.n_trajectories} offline trajectories...")
+        data = collect_trajectories(dynamics, behavior_policy,
+                                    cfg.n_trajectories, cfg.max_steps, device)
+    real = {k_: v.clone() for k_, v in data.items()}
+    state_dim = real["states"].shape[1]
+    state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0], device=device)
+
+    if verbose:
+        print(f"  Real buffer: {real['states'].shape[0]} transitions, "
+              f"{real['init_states'].shape[0]} initial states")
+
+    # ── 2. World model (fit then freeze) ────────────────────────────
+    if world_model is None:
+        if verbose:
+            print(f"  Fitting world model ({world_epochs} epochs)...")
+        world_model = train_world_model(real, n_epochs=world_epochs,
+                                        lr=world_lr, verbose=verbose)
+    for p in world_model.parameters():
+        p.requires_grad_(False)
+    world_model.eval()
+
+    # ── 3. Q-network + target network ───────────────────────────────
+    def make_q_net():
+        layers, prev = [], state_dim
+        for h in q_hidden:
+            layers += [nn.Linear(prev, h), nn.ReLU()]
+            prev = h
+        layers.append(nn.Linear(prev, A))
+        return nn.Sequential(*layers).to(device)
+
+    q_net = make_q_net()
+    q_target = make_q_net()
+    q_target.load_state_dict(q_net.state_dict())
+    for p in q_target.parameters():
+        p.requires_grad_(False)
+    optimizer = torch.optim.Adam(q_net.parameters(), lr=q_lr)
+
+    def q_policy(states, eps):
+        with torch.no_grad():
+            qvals = q_net(states / state_scales)
+            greedy = qvals.argmax(dim=1)
+            if eps <= 0.0:
+                return greedy
+            rand = torch.randint(0, A, (states.shape[0],), device=device)
+            mask = torch.rand(states.shape[0], device=device) < eps
+            return torch.where(mask, rand, greedy)
+
+    # ── 4. Replay (pre-allocated, FIFO) ─────────────────────────────
+    # Seed the replay with the real offline buffer. Without this, the Q
+    # net only sees rollouts under ε-greedy(Q) where Q is random at
+    # init — those rollouts are near-uniform, and the Q just learns the
+    # value of a random policy (~9 steps on CartPole). Mixing in the
+    # logged behavior-policy transitions is the standard offline-MBRL
+    # recipe (cf. MBPO / MOPO use real + model data).
+    rb_s  = torch.zeros(syn_buffer_max, state_dim, device=device)
+    rb_a  = torch.zeros(syn_buffer_max, dtype=torch.long, device=device)
+    rb_r  = torch.zeros(syn_buffer_max, device=device)
+    rb_sn = torch.zeros(syn_buffer_max, state_dim, device=device)
+    rb_d  = torch.zeros(syn_buffer_max, dtype=torch.bool, device=device)
+    rb_pos, rb_size = 0, 0
+
+    def rb_add(s, a, r, sn, d):
+        nonlocal rb_pos, rb_size
+        n = s.shape[0]
+        if n == 0:
+            return
+        # Wrap around in up to two contiguous slices.
+        idx = (torch.arange(n, device=device) + rb_pos) % syn_buffer_max
+        rb_s[idx]  = s
+        rb_a[idx]  = a
+        rb_r[idx]  = r
+        rb_sn[idx] = sn
+        rb_d[idx]  = d
+        rb_pos = int((rb_pos + n) % syn_buffer_max)
+        rb_size = int(min(rb_size + n, syn_buffer_max))
+
+    rb_add(real["states"], real["actions"].long(), real["rewards"],
+           real["next_states"], real["dones"].bool())
+    if verbose:
+        print(f"  Replay seeded with {rb_size} real transitions")
+
+    # ── 4b. One-shot synthetic data via the frozen world model ─────
+    # Roll out the behavior policy in the model to expand state-action
+    # coverage without distribution shift. This is the model-based step:
+    # the Q-net later trains on real + model-augmented data via FQI.
+    if n_initial_synthetic > 0:
+        from .world_model import generate_synthetic_buffer
+        n_branches = max(n_initial_synthetic // max(rollout_length, 1), 1)
+        with torch.no_grad():
+            syn = generate_synthetic_buffer(
+                world_model, real, n_total=n_initial_synthetic,
+                terminal_fn=dynamics.is_terminal,
+                rollout_length=max(rollout_length, 1),
+                action_policy=lambda s: behavior_policy(s).long())
+        if syn["states"].numel() > 0:
+            rb_add(syn["states"], syn["actions"].long(), syn["rewards"],
+                   syn["next_states"], syn["dones"].bool())
+            if verbose:
+                print(f"  Replay augmented with {syn['states'].shape[0]} "
+                      f"synthetic transitions (rollout_length="
+                      f"{max(rollout_length, 1)})")
+
+    def rb_sample(B):
+        idx = torch.randint(0, rb_size, (B,), device=device)
+        return rb_s[idx], rb_a[idx], rb_r[idx], rb_sn[idx], rb_d[idx]
+
+    # ── 5. Dyna outer loop ──────────────────────────────────────────
+    history = []
+    best_reward = -float("inf")
+    real_states = real["states"]
+    N_real = real_states.shape[0]
+    init_states_real = real["init_states"]
+
+    for iteration in range(cfg.n_iterations):
+        t0 = time.time()
+
+        # Rollout k steps in the model under the behavior policy. Using
+        # the offline behavior policy (rather than ε-greedy(Q)) keeps the
+        # synthetic data in-distribution; ε-greedy on a random-init Q-net
+        # generates near-uniform actions that drag Q to the value of a
+        # random policy. This is the simplest stable MBRL recipe.
+        if rollouts_per_iter > 0 and rollout_length > 0:
+            starts = torch.randint(0, N_real, (rollouts_per_iter,),
+                                   device=device)
+            s = real_states[starts].clone()
+            alive = torch.ones(rollouts_per_iter, dtype=torch.bool,
+                               device=device)
+            with torch.no_grad():
+                for _ in range(rollout_length):
+                    if not alive.any():
+                        break
+                    s_act = s[alive]
+                    a_act = behavior_policy(s_act).long()
+                    sn_act, r_act = world_model.sample_next(
+                        s_act, a_act, deterministic=True)
+                    done_act = dynamics.is_terminal(sn_act)
+                    rb_add(s_act, a_act, r_act, sn_act, done_act)
+                    s_new = s.clone()
+                    s_new[alive] = sn_act
+                    s = s_new
+                    alive_next = alive.clone()
+                    alive_next[alive] = ~done_act
+                    alive = alive_next
+
+        # DQN updates against the target net.
+        loss_log = 0.0
+        if rb_size >= q_batch_size:
+            for _ in range(n_q_steps_per_iter):
+                bs, ba, br, bsn, bd = rb_sample(q_batch_size)
+                with torch.no_grad():
+                    q_next = q_target(bsn / state_scales).max(dim=1).values
+                    target = br + cfg.gamma * (~bd).float() * q_next
+                q_pred = q_net(bs / state_scales).gather(
+                    1, ba.unsqueeze(1)).squeeze(1)
+                loss = F.smooth_l1_loss(q_pred, target)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_net.parameters(), max_norm=1.0)
+                optimizer.step()
+                loss_log = loss.item()
+
+        if (iteration + 1) % target_update_iters == 0:
+            q_target.load_state_dict(q_net.state_dict())
+
+        # Evaluate greedy(Q) on the *real* env.
+        results = evaluate_policy(
+            dynamics, lambda st: q_policy(st, eps=0.0),
+            cfg.n_eval_episodes, cfg.max_steps, cfg.gamma, device)
+        if results["avg_reward"] > best_reward:
+            best_reward = results["avg_reward"]
+        history.append({"iteration": iteration, **results})
+
+        if verbose:
+            elapsed = time.time() - t0
+            print(f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
+                  f"length={results['avg_length']:.1f} | "
+                  f"q_loss={loss_log:.4f} | "
+                  f"syn={rb_size:>6d} | time={elapsed:.1f}s")
+
+    return {"history": history,
+            "q_net": q_net,
+            "world_model": world_model,
+            "best_reward": float(best_reward),
+            "solver_total_time": 0.0}
 
 
 def run_two_stage(cfg: CartPoleConfig, verbose: bool = True,
@@ -565,8 +847,12 @@ def parse_args():
     p.add_argument("--n_features", type=int, default=128)
     p.add_argument("--n_trajectories", type=int, default=500)
     p.add_argument("--n_epochs", type=int, default=100)
+    p.add_argument("--n_dfl_steps", type=int, default=5)
+    p.add_argument("--n_ce_steps", type=int, default=0)
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=1.0)
+    p.add_argument("--pretrain_epochs", type=int, default=70)
+    p.add_argument("--eval_policy", type=str, default="lp", choices=["ce", "lp"])
     # Soft aggregation
     p.add_argument("--n_clusters", type=int, default=32)
     p.add_argument("--bins_per_dim", type=int, default=8)
@@ -599,7 +885,7 @@ def main():
             cfg, n_clusters=args.n_clusters,
             bins_per_dim=args.bins_per_dim,
             n_iterations=args.n_iterations,
-            lr=args.lr, tau=args.tau)
+            lr=args.lr, tau=args.tau, pretrain_epochs=args.pretrain_epochs)
     else:
         out = run_neural_dfl(cfg, bins_per_dim=args.bins_per_dim, tau=args.tau)
 
