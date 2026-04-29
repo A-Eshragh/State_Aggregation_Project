@@ -52,7 +52,7 @@ def _sweep_cache_key(prefix: str, args, n_features: int) -> str:
     )
 
 
-ALGOS_BASE = ("neural_dfl", "two_stage")
+ALGOS_BASE = ("neural_dfl",)
 
 
 def _algos_to_run(args):
@@ -126,12 +126,10 @@ def run_sweep(args):
 
 LABELS = {
     "neural_dfl": "DFL",
-    "two_stage":  "Two-stage",
     "dfl_qpth":   "DFL-qpth",
 }
 LINESTYLES = {
     "neural_dfl": "-",
-    "two_stage":  "--",
     "dfl_qpth":   "-.",
 }
 

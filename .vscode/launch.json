@@ -22,7 +22,6 @@
                 "--n_iterations",
                 "20",
                 "--n_features",
-<<<<<<< HEAD
                 "1024",
                 "--n_trajectories",
                 "1",
@@ -32,11 +31,6 @@
                 "lp",
                 "--seed",
                 "3",
-=======
-                "128",
-                "--n_trajectories",
-                "1",
->>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
             ],
             "console": "integratedTerminal"
         },
@@ -117,7 +111,6 @@
             "console": "integratedTerminal"
         },
         {
-<<<<<<< HEAD
             "name": "single_elasticity_dfl_berthet",
             "type": "debugpy",
             "request": "launch",
@@ -152,8 +145,6 @@
             ]
         },
         {
-=======
->>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
             "name": "single_elasticity_dfl_sketch",
             "type": "debugpy",
             "request": "launch",
@@ -168,19 +159,11 @@
                 "--n_epochs",
                 "50",
                 "--n_samples",
-<<<<<<< HEAD
                 "20",
                 "--lr",
                 "0.005",
                 "--n_agg",
                 "10",
-=======
-                "50",
-                "--lr",
-                "0.005",
-                "--n_agg",
-                "-1",
->>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
                 "--aug_lag_rho",
                 "1.0",
                 "--seed",
@@ -188,15 +171,9 @@
                 "--pretrain_epochs",
                 "50",
                 "--n_sketches",
-<<<<<<< HEAD
                 "4",
                 "--sketch_ratio",
                 "0.3",
-=======
-                "32",
-                "--sketch_ratio",
-                "0.6",
->>>>>>> 8196c135130e99b57cc2090ef143ec96efa74bb3
                 "--sketch_mode",
                 "gaussian",
                 "--sketch_seed",
