@@ -1,36 +1,3 @@
-"""Berthet-style perturbed-cost LP solver with ensemble averaging.
-
-For each ensemble member m = 1..K we solve
-
-    max  (r + sigma * Z_m)^T y
-    s.t. H y = gamma
-         y >= 0
-
-with Z_m drawn i.i.d. from N(0, I) (gaussian) or {-1, +1}^{MA} (rademacher),
-then return the ensemble-averaged primal y_avg = (1/K) sum_m y^(m).
-
-Differentiability comes from Berthet et al. (2020), "Learning with
-Differentiable Perturbed Optimizers." The key facts:
-
-    1. H- and gamma-gradients flow through DifferentiableLPSolver as usual
-       (basis-sensitivity at each perturbed solve, averaged across K).
-
-    2. The r-gradient is NOT zero on average, even though each individual
-       perturbed LP has ∂y/∂r = 0 within its basis. By Stein's identity for
-       Gaussian Z,
-           ∂E[y_i]/∂r_j = (1/sigma) E[Z_j (y_i - E[y_i])].
-       The Monte-Carlo estimator of this Jacobian J (B, MA, MA) is
-           J[b, i, j] = (1/(sigma*K)) sum_k Z[k, j] * (y_per[k, b, i] - y_avg[b, i]).
-       We inject this gradient into autograd via the identity trick
-           y_returned = y_avg_detached_in_r + einsum(J.detach(), r - r.detach())
-       which is value-equal to y_avg but has Jacobian J w.r.t. r.
-
-The DifferentiableLPSolver path is fed r.detach() + sigma * Z_m so that the
-existing solver-side r-channel (which is hard-zeroed) is bypassed; H- and
-gamma-gradients still flow through that path correctly. The Stein term
-contributes zero to the value but the right gradient on r.
-"""
-
 from __future__ import annotations
 
 from typing import Optional

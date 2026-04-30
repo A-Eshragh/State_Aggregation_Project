@@ -55,29 +55,25 @@ class DifferentiableLPSolver(autograd.Function):
         H, r, gamma, y_star, basis = ctx.saved_tensors
         batch, S, SA = H.shape
 
-        device = H.device
-        dtype = H.dtype
-
-        grad_H = torch.zeros_like(H)
         # We only use r_true in the loss, so direct term is 0; no gradient through r.
         grad_r = torch.zeros_like(r)
-        grad_gamma = torch.zeros_like(gamma)
 
-        for b in range(batch):
-            B = basis[b]                 # (S,)
-            H_B = H[b, :, B]             # (S, S)
-            y_B = y_star[b, B]           # (S,)
+        # Batched basis-sensitivity: avoids the per-batch / per-column Python
+        # loops that were the dominant CPU cost for K*B sketched LPs.
+        idx = basis.unsqueeze(1).expand(-1, S, -1)               # (batch, S, S)
+        H_B = torch.gather(H, 2, idx)                            # (batch, S, S)
+        y_B = torch.gather(y_star, 1, basis)                     # (batch, S)
+        grad_y_B = torch.gather(grad_y, 1, basis)                # (batch, S)
 
-            # Differentiate y_B = H_B^{-1} gamma with upstream gradient grad_y_B.
-            # If L depends on y_B, then:
-            #   dL/dgamma = H_B^{-T} (dL/dy_B)
-            #   dL/dH_B   = - (H_B^{-T} (dL/dy_B)) (y_B)^T
-            grad_y_B = grad_y[b, B]      # (S,)
-            x = torch.linalg.solve(H_B.T, grad_y_B)  # (S,)
-            grad_gamma[b] = x
-            grad_H_B = -torch.outer(x, y_B)          # (S,S)
-            for i, col_idx in enumerate(B):
-                grad_H[b, :, col_idx] = grad_H_B[:, i]
+        # Solve H_B^T x = grad_y_B for each batch element in one call.
+        x = torch.linalg.solve(
+            H_B.transpose(1, 2), grad_y_B.unsqueeze(-1)
+        ).squeeze(-1)                                            # (batch, S)
+        grad_gamma = x
+
+        grad_H_B = -x.unsqueeze(2) * y_B.unsqueeze(1)            # (batch, S, S)
+        grad_H = torch.zeros_like(H)
+        grad_H.scatter_(2, idx, grad_H_B)
 
         return grad_H, grad_r, grad_gamma
 

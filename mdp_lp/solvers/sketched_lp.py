@@ -1,34 +1,3 @@
-"""Stochastic-sketch ensemble LP solver for the (aggregated) occupancy LP.
-
-For each ensemble member m = 1..K we solve
-
-    max  r^T y
-    s.t. (S_m H_aug) y = (S_m gamma_aug)
-         y >= 0
-
-where H_aug stacks H with the redundant total-mass anchor row 1^T y = 1/(1-beta),
-and S_m is a (k+1, M+1) row sketch that draws k random Gaussian / Rademacher /
-subsample combinations of the M original rows AND ALWAYS preserves the anchor.
-The anchor guarantees the sketched LP stays bounded for any k <= M, while the
-random rows replace the rest of H with low-dimensional combinations -- different
-across m -- so the optimal vertex flips and the ensemble average y_avg lives
-in the interior of the polytope, smoothing y(theta).
-
-The original LP automatically satisfies 1^T y = 1/(1-beta), so adding the anchor
-to H is redundant and does not alter the original optimum. After sketching with
-k < M, the anchor becomes informative and replaces what would otherwise need a
-box constraint.
-
-Forward:
-    Pre-sample K sketches, build (S_m H_aug, S_m gamma_aug, r) for each, batch
-    them as K*B independent LPs, and call DifferentiableLPSolver once.
-
-Backward:
-    Each sketch backprops through its own LP basis sensitivity (handled by
-    DifferentiableLPSolver). Averaging is linear, so autograd produces the
-    mean of per-sketch gradients automatically.
-"""
-
 from __future__ import annotations
 
 import math

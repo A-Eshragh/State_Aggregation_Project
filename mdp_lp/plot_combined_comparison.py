@@ -1093,6 +1093,152 @@ def plot_landscape_comparison(lambda_values, r_true, H_true, gamma_true,
         print(f"  λ*  (d) sketched          = {lambda_stars[3]:.3f}   shift {shifts[3]:+.3f}")
 
 
+def plot_loss_landscape_sketch_rho(
+    lambda_values, r_true, H_true, gamma_true, agg, mdp_true,
+    rhos=(0.01, 1.0, 100.0),
+    sketch_ratios=(0.2, 0.7),
+    sketch_K=8,
+    sketch_seed=0,
+    sketch_mode="gaussian",
+    output_dir=None,
+    cache_dir=None,
+    recompute=None,
+):
+    """2x3 loss-landscape comparison across (sketch on/off) × ρ in soft-agg.
+
+    Each column corresponds to one ρ; each subplot overlays the no-sketch
+    curve and one curve per sketch ratio. Top row is L(λ); bottom row is
+    autograd dL/dλ via DifferentiableLPSolver / sketched_lp.
+    """
+    if output_dir is None:
+        output_dir = _default_plot_results_dir()
+    if cache_dir is None:
+        cache_dir = os.path.join(output_dir, "cache")
+    recompute_tags = set(recompute or [])
+
+    sketch_cfgs = [None] + [
+        {"n_sketches": int(sketch_K),
+         "sketch_ratio": float(r),
+         "sketch_mode": str(sketch_mode),
+         "sketch_seed": int(sketch_seed)}
+        for r in sketch_ratios
+    ]
+    sketch_labels = ["no sketch"] + [
+        rf"sketch $k/M={float(r):.2f}$" for r in sketch_ratios
+    ]
+    # charcoal / blue / orange — matches plot_landscape_comparison palette
+    base_colors = ['#455A64', '#1565C0', '#E65100']
+    sketch_colors = base_colors[:len(sketch_cfgs)]
+
+    problem_meta = _current_problem_meta()
+    n_clusters = int(getattr(agg, 'n_clusters', 0)) if agg is not None else 0
+    agg_tag = f"softaggM{n_clusters}" if agg is not None else "noagg"
+
+    L_grid, g_grid = {}, {}
+    for rho in rhos:
+        for cfg, lbl in zip(sketch_cfgs, sketch_labels):
+            cfg_tag = "none" if cfg is None else f"r{cfg['sketch_ratio']:.2f}_K{cfg['n_sketches']}"
+            tag = f"sketchrho_{agg_tag}__rho{rho:g}__sk_{cfg_tag}"
+            print(f"[sketch-rho] sweeping rho={rho:g}  cfg={cfg_tag}")
+            L, g = cached_sweep_loss_grad(
+                tag=tag,
+                cache_dir=cache_dir,
+                recompute_tags=recompute_tags,
+                lambda_values=lambda_values,
+                r_true=r_true,
+                H_true=H_true,
+                gamma_true=gamma_true,
+                agg=agg,
+                rho=float(rho),
+                label=lbl,
+                sketch_cfg=cfg,
+                mdp_true=mdp_true,
+                extra_meta={**problem_meta, "n_clusters": n_clusters},
+            )
+            L_grid[(rho, lbl)] = np.asarray(L, dtype=float)
+            g_grid[(rho, lbl)] = np.asarray(g, dtype=float)
+
+    prev_rc = plt.rcParams.copy()
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.labelsize': 13,
+        'axes.titlesize': 13,
+        'axes.linewidth': 0.9,
+        'legend.fontsize': 9.5,
+        'legend.frameon': True,
+        'legend.framealpha': 0.92,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    })
+
+    lam_true_color = '#D32F2F'
+    minimiser_color = '#2E7D32'
+    plateau_color = '#9E9E9E'
+
+    n_cols = len(rhos)
+    fig_width = 4.93 * n_cols
+    try:
+        fig, axes = plt.subplots(
+            2, n_cols, figsize=(fig_width, 7.4),
+            gridspec_kw={'hspace': 0.34, 'wspace': 0.30})
+
+        for col, rho in enumerate(rhos):
+            ax_top, ax_bot = axes[0, col], axes[1, col]
+            for cfg, lbl, c in zip(sketch_cfgs, sketch_labels, sketch_colors):
+                L = L_grid[(rho, lbl)]
+                g = g_grid[(rho, lbl)]
+
+                ax_top.plot(lambda_values, L, color=c, lw=1.6,
+                            solid_capstyle='round', label=lbl)
+                lam_star = float(lambda_values[int(np.argmin(L))])
+                ax_top.plot(lam_star, float(L.min()), marker='o',
+                            mfc=minimiser_color, mec='white', ms=6,
+                            mew=1.0, ls='', zorder=5)
+
+                ax_bot.plot(lambda_values, g, color=c, lw=1.6,
+                            solid_capstyle='round')
+                if cfg is None:
+                    flat = _longest_flat_run(lambda_values, g,
+                                             abs_thresh=0.01, min_frac=0.35)
+                    if flat is not None:
+                        ax_bot.axvspan(*flat, color=plateau_color,
+                                       alpha=0.22, lw=0)
+
+            for ax in (ax_top, ax_bot):
+                ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--',
+                           lw=1.3, alpha=0.9, zorder=3)
+                ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+                ax.set_xlim(lambda_values[0], lambda_values[-1])
+
+            ax_bot.axhline(0.0, color='black', lw=1.0, alpha=0.80)
+            ax_top.set_title(rf'$\rho={rho:g}$', pad=8)
+            ax_bot.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
+
+        axes[0, 0].set_ylabel(r'Loss  $\mathcal{L}(\lambda)$')
+        axes[1, 0].set_ylabel(r'Gradient  $d\mathcal{L}/d\lambda$')
+        axes[0, 0].legend(loc='best', fontsize=9)
+
+        suffix = f'_softaggM{n_clusters}' if agg is not None else '_noagg'
+        out_path = os.path.join(output_dir, f'loss_landscape_sketch_rho{suffix}.pdf')
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+    finally:
+        plt.rcParams.update(prev_rc)
+
+    print(f"\nSaved sketch×ρ landscape (M={n_clusters}) to {out_path}")
+    for rho in rhos:
+        for lbl in sketch_labels:
+            L = L_grid[(rho, lbl)]
+            lam_star = float(lambda_values[int(np.argmin(L))])
+            print(f"  λ* ({lbl:<22s}, ρ={rho:>6g}) = {lam_star:6.3f}   "
+                  f"shift {lam_star - LAMBDA_TRUE:+.3f}")
+
+
 def diagnose_solver_gradients(lambda_values, agg, output_dir,
                               rho=0.01, qp_reg=1.0, recompute=False):
     """Evidence that DifferentiableLPSolver's autograd gradient is
@@ -1581,6 +1727,22 @@ def main():
     parser.add_argument('--sketch-seed', type=int, default=0,
                         help='Sketch RNG seed (held fixed across λ so the curve is '
                              'deterministic and reproducible).')
+    # 2x3 sketch × ρ landscape figure.
+    parser.add_argument('--sketch-rho-fig', action='store_true',
+                        help='Produce the 2x3 sketch × ρ landscape comparison figure '
+                             '(loss_landscape_sketch_rho.pdf).')
+    parser.add_argument('--sketch-rho-fig-rhos', type=float, nargs='+',
+                        default=[0.01, 1.0, 100.0],
+                        help='ρ values for --sketch-rho-fig columns.')
+    parser.add_argument('--sketch-rho-fig-ratios', type=float, nargs='+',
+                        default=[0.2, 0.7],
+                        help='Sketch k/M ratios overlaid in each subplot of '
+                             '--sketch-rho-fig (in addition to the no-sketch curve).')
+    parser.add_argument('--sketch-rho-fig-no-agg', action='store_true',
+                        help='Run --sketch-rho-fig on the original (S=N_STATES) LP '
+                             'instead of the soft-aggregated LP. Useful for showing '
+                             'sketching\'s smoothing effect without the smoothing that '
+                             'soft-agg already provides.')
     parser.add_argument('--landscape-trainable-w', action='store_true',
                         help='Build SoftAggDense in plot_landscape_comparison with the '
                              'trainable embedding-network W. Default is fixed random W '
@@ -1673,6 +1835,32 @@ def main():
             "sketch_mode": str(args.sketch_mode),
             "sketch_seed": int(args.sketch_seed),
         }
+
+    if args.sketch_rho_fig:
+        out_dir = _default_plot_results_dir()
+        if args.sketch_rho_fig_no_agg:
+            agg = None
+            print("[sketch-rho] using ORIGINAL LP (no soft aggregation)")
+        else:
+            torch.manual_seed(seed_3col)
+            agg = SoftAggDense(n_states=N_STATES, n_actions=N_ACTIONS,
+                               n_clusters=args.cluster_3col, r_embed=8,
+                               fixed_W=True, fixed_W_seed=seed_3col)
+            agg.eval()
+            print(f"[sketch-rho] using soft-agg LP (M={args.cluster_3col})")
+        plot_loss_landscape_sketch_rho(
+            lambda_values, r_true, H_true, gamma_true,
+            agg=agg, mdp_true=mdp_true,
+            rhos=tuple(float(r) for r in args.sketch_rho_fig_rhos),
+            sketch_ratios=tuple(float(r) for r in args.sketch_rho_fig_ratios),
+            sketch_K=int(args.sketch_K),
+            sketch_seed=int(args.sketch_seed),
+            sketch_mode=str(args.sketch_mode),
+            output_dir=out_dir,
+            cache_dir=cache_dir,
+            recompute=recompute,
+        )
+        return
 
     if args.plot_3col_only:
         plot_landscape_comparison(

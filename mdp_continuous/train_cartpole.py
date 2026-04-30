@@ -673,13 +673,7 @@ def main():
         n_eval_episodes=args.n_eval_episodes,
     )
 
-    if args.method == "soft_agg":
-        out = run_soft_agg_dfl(
-            cfg, n_clusters=args.n_clusters,
-            bins_per_dim=args.bins_per_dim,
-            n_iterations=args.n_iterations,
-            lr=args.lr, tau=args.tau, pretrain_epochs=args.pretrain_epochs)
-    elif args.method == "two_stage_mbrl":
+    if args.method == "two_stage_mbrl":
         out = run_two_stage_mbrl(
             cfg, verbose=True,
             bins_per_dim=args.bins_per_dim, tau=args.tau,

@@ -65,7 +65,7 @@ def main():
     # Training parameters
     parser.add_argument('--n_epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--n_samples', type=int, default=50, help='Number of samples')
-    parser.add_argument('--train_frac', type=float, default=0.5, help='Fraction for train (rest = test). 0.5 = 50/50 split.')
+    parser.add_argument('--train_frac', type=float, default=0.25, help='Fraction for train (rest = test). 0.25 = 1:3 train/test split.')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
     parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.0, help='Weight for prediction loss in DFL (balanced so v* and pred loss have similar gradient scale; no adaptation)')
@@ -167,10 +167,11 @@ def main():
     args.generated_n_samples = int(args.n_samples)
     
     results_root = Path(args.results_root)
+    algo_folder = f"dfl_sketch_ngg_{args.n_agg}" if args.algo == 'dfl_sketch' else args.algo
     if args.experiment_type == 'c':
-        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / args.algo / f"beta2_{args.beta_2}"
+        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / algo_folder / f"beta2_{args.beta_2}"
     else:
-        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / args.algo
+        save_dir = results_root / f"exp_{args.experiment_type}" / args.cost_case / algo_folder
     if args.tag:
         save_dir = save_dir / f"tag_{args.tag}"
 
