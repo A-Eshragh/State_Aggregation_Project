@@ -756,20 +756,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                                                     args.foc, args.voc, args.hc, args.bc, args.beta,
                                                     p)
             if args.algo in ("dfl_sketch", "dfl_berthet"):
-                # Smoothed y_avg (sketched or perturbed) is a training-gradient
-                # proxy only. At degenerate LP cells (e.g. low λ) the K
-                # ensemble members snap to different near-tied vertices and
-                # y_avg becomes a smear over disagreeing deterministic
-                # policies; the extracted policy (soft or greedy) rolls out
-                # terribly on the true MDP. For v* reporting we evaluate the
-                # deployable policy by re-solving the *plain* LP at λ_pred.
-                y_plain_pred, _, _ = lp_solver(H_use, r_flat_use,
-                                               gamma_agg if (agg is not None and _agg_info is not None) else gamma_use)
-                if agg is not None and _agg_info is not None:
-                    y_star_eval = SoftAggDense.disaggregate_y(
-                        y_plain_pred, _agg_info["W"], mdp.r.shape[2])
-                else:
-                    y_star_eval = y_plain_pred
+                # Match the test-time eval (lines ~974-998): solve the plain LP
+                # on the full-dim predicted MDP at lambda_pred and evaluate on
+                # the full-dim true MDP. Reporting v* via the aggregated solve
+                # + disaggregate underestimates deployable quality by ~5x
+                # because an M-dim policy cannot represent the S-dim optimum.
+                mdp_pred_full = create_inventory_from_lambda(
+                    lambda_pred_pos, args.b_max, args.s_max, args.q_max,
+                    args.foc, args.voc, args.hc, args.bc, args.beta, p
+                )
+                y_star_eval, _, _, _ = solve_lp(mdp_pred_full, lp_solver)
             elif agg is not None and _agg_info is not None:
                 y_star_eval = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
             else:

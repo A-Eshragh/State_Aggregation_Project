@@ -89,7 +89,7 @@ def main():
                         help='Random seed for fixed W when --agg_fixed_W is set.')
 
     # qpth QP regularization (only used for dfl_qpth)
-    parser.add_argument('--qp_reg', type=float, default=10.0, help='Quadratic regularization coef for QP-DFL')
+    parser.add_argument('--qp_reg', type=float, default=20.0, help='Quadratic regularization coef for QP-DFL')
 
     # Sketch-and-solve LP (only used for dfl_sketch)
     parser.add_argument('--n_sketches', type=int, default=4,

@@ -56,7 +56,7 @@ class SoftAggDense(nn.Module):
             self.register_buffer("W_fixed", W_fixed)
         else:
             # NOTE:Method 1: W depends on P
-            self.W_logits = nn.Linear(n_states * n_actions, n_clusters)
+            # self.W_logits = nn.Linear(n_states * n_actions, n_clusters)
 
             # NOTE:Method 2: W doesn't depend on P and r
             # self.W_logits = nn.Parameter(torch.randn(self.n_states, self.n_clusters))

@@ -1,0 +1,316 @@
+"""Render the 3-panel figures for both inventory MDP and CartPole.
+
+Single rendering pipeline; data-loading helpers are imported from each
+dataset's existing module so this file only owns the plotting logic.
+
+Usage:
+    python make_figures.py            # render both datasets (default)
+    python make_figures.py inventory  # only mdp_lp
+    python make_figures.py cartpole   # only mdp_continuous
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from mdp_lp import make_figure_3panel as inv_mod
+from mdp_continuous import make_figure_3panel as cp_mod
+from mdp_continuous import make_figure1_cartpole as m1
+from mdp_continuous import sweep_n_features as snf
+
+
+ROOT = Path(__file__).resolve().parent
+
+RC = {
+    "font.family": "serif", "font.size": 20, "axes.labelsize": 18,
+    "axes.titlesize": 20, "legend.fontsize": 13, "xtick.labelsize": 16,
+    "ytick.labelsize": 18, "pdf.fonttype": 42, "ps.fonttype": 42,
+}
+LABELS = {
+    "twostage": "Two-stage", "dfl": "DFL-LP", "dfl_qpth": "DFL-QP",
+    "dfl_sketch": "DFL-SA", "neural_dfl": "DFL-LP", "dfl_dr": "DFL-SA",
+    "two_stage_mbrl": "Two-stage",
+}
+COLORS = {
+    "twostage": "#ff7f0e", "dfl": "#1f77b4", "dfl_qpth": "#2ca02c",
+    "dfl_sketch": "#9467bd", "neural_dfl": "#1f77b4", "dfl_dr": "#9467bd",
+    "two_stage_mbrl": "#ff7f0e",
+}
+LS = {
+    "twostage": "--", "dfl": "-", "dfl_qpth": "-", "dfl_sketch": "-",
+    "neural_dfl": "-", "dfl_dr": "-", "two_stage_mbrl": "--",
+}
+INV_COST_ORDER = ("twostage", "dfl", "dfl_qpth", "dfl_sketch")
+CP_COST_ORDER  = ("two_stage_mbrl", "neural_dfl", "dfl_qpth", "dfl_dr")
+
+
+# ── Shared rendering primitives ──────────────────────────────────────────
+
+def _save(draw, path: Path) -> None:
+    prev = plt.rcParams.copy()
+    plt.rcParams.update(RC)
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    draw(ax)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    plt.rcParams.update(prev)
+    print(f"Saved {path}")
+
+
+def _curve(ax, arr: np.ndarray, key: str, label: str) -> None:
+    mu = arr.mean(axis=0)
+    se = (arr.std(axis=0, ddof=1) / np.sqrt(arr.shape[0])
+          if arr.shape[0] > 1 else np.zeros_like(mu))
+    xs = np.arange(arr.shape[1])
+    ax.plot(xs, mu, color=COLORS[key], ls=LS[key], lw=2.0, label=label)
+    ax.fill_between(xs, mu - se, mu + se, color=COLORS[key], alpha=0.2)
+
+
+def _href(ax, mu: float, se: float, x_lo: float, x_hi: float,
+          key: str, label: str) -> None:
+    """Horizontal reference band — used for non-sweep methods in panel 2."""
+    ax.axhline(mu, color=COLORS[key], ls="--", lw=1.6,
+               alpha=0.85, label=label)
+    ax.fill_between([x_lo, x_hi], [mu - se, mu - se],
+                    [mu + se, mu + se], color=COLORS[key], alpha=0.12)
+
+
+def _bars(ax, keys: List[str], means: List[float], ses: List[float],
+          *, log: bool = False,
+          labels: Optional[List[str]] = None) -> None:
+    if not keys:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                transform=ax.transAxes)
+        return
+    x = np.arange(len(keys))
+    ax.bar(x, means, yerr=ses, capsize=4, width=0.65,
+           color=[COLORS[k] for k in keys], alpha=0.88,
+           edgecolor="black", linewidth=0.6,
+           error_kw=dict(ecolor="black", lw=0.8))
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels if labels is not None
+                       else [LABELS[k] for k in keys])
+    if log:
+        ax.set_yscale("log")
+
+
+def _mse(xs: np.ndarray):
+    if xs.size == 0: return float("nan"), float("nan")
+    if xs.size == 1: return float(xs[0]), 0.0
+    return float(xs.mean()), float(xs.std(ddof=1) / np.sqrt(xs.size))
+
+
+# ── Inventory MDP (mdp_lp) ───────────────────────────────────────────────
+
+def render_inventory(out: Path, results_root: Path,
+                     seeds: Optional[List[int]] = None) -> None:
+    grouped, sketch_by_nagg = inv_mod.collect_runs(
+        exp="b", cost="normal_margin", sketch_K=8, sketch_r=0.2,
+        seeds=seeds, sketch_canonical_nagg=10, results_root=results_root,
+    )
+
+    def curves(ax):
+        for m in ("twostage", "dfl", "dfl_qpth", "dfl_sketch"):
+            arr = inv_mod._per_epoch_train_reward(grouped.get(m, []))
+            if arr is not None:
+                _curve(ax, arr, m, LABELS[m])
+        ax.set(xlabel="Training epoch", ylabel="Training reward",
+               title="Inventory MDP — Training curves")
+        ax.grid(True, alpha=0.3); ax.legend(loc="lower right")
+
+    def quality(ax):
+        # All four methods as bars; DFL-SA expands across M=10/20/30.
+        keys, labels, means, ses = [], [], [], []
+        def _add(key, label, vals):
+            if vals.size == 0: return
+            mu, se = _mse(vals)
+            keys.append(key); labels.append(label)
+            means.append(mu); ses.append(se)
+        _add("twostage", LABELS["twostage"],
+             inv_mod._test_regret_pct(grouped.get("twostage", [])))
+        _add("dfl", LABELS["dfl"],
+             inv_mod._test_regret_pct(grouped.get("dfl", [])))
+        _add("dfl_qpth", LABELS["dfl_qpth"],
+             inv_mod._test_regret_pct(grouped.get("dfl_qpth", [])))
+        for n_agg in sorted(k for k in sketch_by_nagg if k > 0):
+            _add("dfl_sketch", f"DFL-SA\nM={n_agg}",
+                 inv_mod._test_regret_pct(sketch_by_nagg[n_agg]))
+        _bars(ax, keys, means, ses, labels=labels)
+        ax.set(ylabel="Test regret",
+               title="Inventory MDP — Decision quality")
+        ax.set_ylim(10, 20)
+        ax.tick_params(axis="x", labelsize=RC["xtick.labelsize"] - 1)
+        ax.grid(True, axis="y", alpha=0.3, ls=":")
+        ax.set_axisbelow(True)
+
+    def cost(ax):
+        # Use full per-epoch wall-clock for every method so two-stage's
+        # MSE-only training is compared on the same accounting as DFL
+        # methods' MSE + decision-aware solver passes.
+        keys, means, ses = [], [], []
+        for m in INV_COST_ORDER:
+            totals = []
+            for d in grouped.get(m, []):
+                ts = d.get("train_time") or []
+                if ts:
+                    totals.append(float(np.sum(ts)))
+            v = np.array(totals)
+            if v.size:
+                mu, s = _mse(v)
+                keys.append(m); means.append(mu); ses.append(s)
+        _bars(ax, keys, means, ses, log=False)
+        ax.set(ylabel="Total training time (s)",
+               title="Inventory MDP — Compute cost")
+        ax.grid(True, axis="y", alpha=0.3)
+
+    _save(curves, out / "inventory_training_curves.pdf")
+    _save(quality, out / "inventory_decision_quality.pdf")
+    _save(cost,    out / "inventory_compute_cost.pdf")
+
+
+# ── CartPole (mdp_continuous) ────────────────────────────────────
+
+def _cp_args():
+    """Match the args that produced mdp_continuous/figure_3panel.pdf."""
+    saved = sys.argv
+    try:
+        sys.argv = [
+            "x", "--plot_only",
+            "--n_iterations", "60",
+            "--mbrl_n_iterations", "60",
+            "--seeds", *[str(s) for s in range(1, 21)],
+        ]
+        return cp_mod.parse_args()
+    finally:
+        sys.argv = saved
+
+
+def render_cartpole(out: Path) -> None:
+    args = _cp_args()
+    requested = set(int(s) for s in args.seeds)
+    m1_ns = cp_mod._m1_args(args)
+    snf_ns = cp_mod._snf_args(args)
+    dr_nf = cp_mod.pick_best_dr(args, snf_ns)
+
+    neural_p = m1._load_or_none(m1._cache_key("curve_neural", m1_ns))
+    qpth_p   = m1._load_or_none(m1._cache_key("curve_qpth", m1_ns))
+    mbrl_p   = m1._load_or_none(
+        m1._cache_key("curve_two_stage_mbrl", cp_mod._mbrl_args(args)))
+    dr_p     = (snf._load_or_none(
+        snf._sweep_cache_key("curve_neural_dfl", snf_ns, dr_nf))
+        if dr_nf is not None else None)
+
+    arr = lambda p: cp_mod._curve_from_payload(p, requested)
+    neural_a, qpth_a, mbrl_a, dr_a = (arr(neural_p), arr(qpth_p),
+                                      arr(mbrl_p), arr(dr_p))
+
+    def curves(ax):
+        series = [(k, a) for k, a in (("neural_dfl", neural_a),
+                                      ("dfl_qpth", qpth_a),
+                                      ("dfl_dr", dr_a),
+                                      ("two_stage_mbrl", mbrl_a))
+                  if a is not None]
+        L = min(a.shape[1] for _, a in series) if series else 0
+        for k, a in series:
+            d = a[:, :L]
+            if args.show_running_max:
+                d = np.maximum.accumulate(d, axis=1)
+            _curve(ax, d, k, LABELS[k])
+        ax.set(xlabel="Training iteration",
+               ylabel=("Avg. episode reward"
+                       if args.show_running_max else "Avg. episode reward"),
+               title="CartPole — Training curves")
+        ax.grid(True, alpha=0.3); ax.set_ylim(0, 210)
+        ax.legend(loc="lower right")
+
+    def quality(ax):
+        metric = "best" if args.show_running_max else "final"
+
+        def _final(arr):
+            v = (np.maximum.accumulate(arr, axis=1)[:, -1]
+                 if metric == "best" else arr[:, -1])
+            return 200.0 - v.astype(float)  # reward → regret
+
+        # All four methods as bars; DFL-SA expands across d=16/32/64.
+        keys, labels, means, ses = [], [], [], []
+        def _add(key, label, vals):
+            if vals is None or vals.size == 0: return
+            mu, se = _mse(vals)
+            keys.append(key); labels.append(label)
+            means.append(mu); ses.append(se)
+        _add("two_stage_mbrl", LABELS["two_stage_mbrl"],
+             _final(mbrl_a) if mbrl_a is not None else np.array([]))
+        _add("neural_dfl", LABELS["neural_dfl"],
+             _final(neural_a) if neural_a is not None else np.array([]))
+        _add("dfl_qpth", LABELS["dfl_qpth"],
+             _final(qpth_a) if qpth_a is not None else np.array([]))
+        for d in (16, 32, 64):
+            payload = snf._load_or_none(
+                snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
+            runs = cp_mod._filtered_runs(payload, requested) if payload else None
+            if not runs:
+                continue
+            vals = (np.array([max(r) for r in runs], dtype=float)
+                    if metric == "best"
+                    else np.array([r[-1] for r in runs], dtype=float))
+            _add("dfl_dr", f"DFL-SA\nd={d}", 200.0 - vals)
+        _bars(ax, keys, means, ses, labels=labels)
+        ax.set(ylabel=f"Test regret",
+               title="CartPole — Decision quality")
+        ax.set_ylim(0, 120)
+        ax.tick_params(axis="x", labelsize=RC["xtick.labelsize"] - 2)
+        ax.grid(True, axis="y", alpha=0.3, ls=":")
+        ax.set_axisbelow(True)
+
+    def cost(ax):
+        # Full wall-clock per seed for every method (apples-to-apples).
+        payloads = {"neural_dfl": neural_p, "dfl_qpth": qpth_p,
+                    "dfl_dr": dr_p, "two_stage_mbrl": mbrl_p}
+        keys, means, ses = [], [], []
+        for k in CP_COST_ORDER:
+            ts = cp_mod._times_from_payload(payloads[k], requested,
+                                            key="times_per_seed")
+            if ts is None or ts.size == 0:
+                continue
+            keys.append(k)
+            means.append(float(ts.mean()))
+            ses.append(float(ts.std() / np.sqrt(max(ts.size, 1))))
+        _bars(ax, keys, means, ses, log=False)
+        ax.set(ylabel="Total training time (s)",
+               title="CartPole — Compute cost")
+        ax.grid(True, axis="y", alpha=0.3)
+
+    _save(curves,  out / "cartpole_training_curves.pdf")
+    _save(quality, out / "cartpole_decision_quality.pdf")
+    _save(cost,    out / "cartpole_compute_cost.pdf")
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("which", choices=["inventory", "cartpole", "all"],
+                   nargs="?", default="all")
+    p.add_argument("--out_dir", default=str(ROOT / "figures"))
+    p.add_argument("--inv_results_root",
+                   default=str(ROOT / "mdp_lp/results/normal_margin_pretrain_30"))
+    p.add_argument("--seeds", type=int, nargs="*", default=None,
+                   help="Inventory MDP only: restrict to these seeds.")
+    args = p.parse_args()
+    out = Path(args.out_dir)
+    if args.which in ("inventory", "all"):
+        render_inventory(out, Path(args.inv_results_root), args.seeds)
+    if args.which in ("cartpole", "all"):
+        render_cartpole(out)
+
+
+if __name__ == "__main__":
+    main()

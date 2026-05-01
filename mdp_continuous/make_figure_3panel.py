@@ -41,7 +41,7 @@ LABELS = {
     "neural_dfl":      "DFL",
     "dfl_qpth":        "DFL-QP",
     "dfl_dr":          "DFL-DR",
-    "two_stage_mbrl":  "Two-stage MBRL",
+    "two_stage_mbrl":  "Two-stage",
 }
 COLORS = {
     "neural_dfl":      "#1f77b4",   # blue
@@ -54,6 +54,20 @@ LINESTYLES = {
     "dfl_qpth":        "-",
     "dfl_dr":          "-",
     "two_stage_mbrl":  "--",
+}
+# Order of methods for the compute-cost bar chart.
+COST_BAR_ORDER = ("dfl_qpth", "neural_dfl", "dfl_dr", "two_stage_mbrl")
+
+_RC_PARAMS = {
+    "font.family": "serif",
+    "font.size": 14,
+    "axes.labelsize": 16,
+    "axes.titlesize": 16,
+    "legend.fontsize": 13,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
 }
 
 
@@ -193,49 +207,20 @@ def _decision_quality_curve(args, sweep_args, algo, metric):
 
 # ── Plot ────────────────────────────────────────────────────────────────
 
-def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
-    requested = set(int(s) for s in args.seeds)
-
-    # Pull cached curves at default n_features.
-    neural_payload = m1._load_or_none(m1._cache_key("curve_neural", m1_ns))
-    qpth_payload = m1._load_or_none(m1._cache_key("curve_qpth", m1_ns))
-    mbrl_payload = m1._load_or_none(
-        m1._cache_key("curve_two_stage_mbrl", _mbrl_args(args)))
-
-    neural_arr = _curve_from_payload(neural_payload, requested)
-    qpth_arr = _curve_from_payload(qpth_payload, requested)
-    mbrl_arr = _curve_from_payload(mbrl_payload, requested)
-
-    # DFL-DR: training curve at chosen reduced n_features.
-    dr_arr = None
-    dr_payload = None
-    if dr_nf is not None:
-        dr_payload = snf._load_or_none(
-            snf._sweep_cache_key("curve_neural_dfl", snf_ns, dr_nf))
-        dr_arr = _curve_from_payload(dr_payload, requested)
-
-    fig, axes = plt.subplots(1, 3, figsize=(15.6, 4.4))
-
-    # ── Panel 1: training curves ─────────────────────────────────────
-    # DFL/DFL-QP/Two-stage share the same architecture (n_features=128)
-    # and so naturally align at iter 0. DFL-DR uses a smaller architecture
-    # (n_features=dr_nf), which gives it an intrinsically lower iter-0
-    # LP-derived policy — this gap is preserved in the plot.
-    ax = axes[0]
-    panel1 = [
-        ("neural_dfl",     LABELS["neural_dfl"],     neural_arr),
-        ("dfl_qpth",       LABELS["dfl_qpth"],       qpth_arr),
-        ("dfl_dr",
-         f"{LABELS['dfl_dr']} (n_feat={dr_nf})" if dr_nf is not None
-         else LABELS["dfl_dr"],
-         dr_arr),
-        ("two_stage_mbrl", LABELS["two_stage_mbrl"], mbrl_arr),
+def _draw_panel_training_curves(ax, args, m1_ns, snf_ns, dr_nf,
+                                neural_arr, qpth_arr, mbrl_arr, dr_arr):
+    """Panel 1 — training curves (running-max best-so-far if requested)."""
+    panel = [
+        ("neural_dfl",     neural_arr),
+        ("dfl_qpth",       qpth_arr),
+        ("dfl_dr",         dr_arr),
+        ("two_stage_mbrl", mbrl_arr),
     ]
-    for key, label, arr in panel1:
+    for key, arr in panel:
         if arr is None:
             continue
         a = np.maximum.accumulate(arr, axis=1) if args.show_running_max else arr
-        _draw_curve(ax, a, COLORS[key], LINESTYLES[key], label)
+        _draw_curve(ax, a, COLORS[key], LINESTYLES[key], LABELS[key])
     ax.set_xlabel("Training iteration")
     ylab = ("Avg. episode reward (best-so-far)"
             if args.show_running_max else "Avg. episode reward")
@@ -243,12 +228,12 @@ def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
     ax.set_title("Training curves")
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 210)
-    ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
+    ax.legend(loc="lower right", framealpha=0.9)
 
-    # ── Panel 2: decision quality vs n_features ──────────────────────
-    # MBRL doesn't use the LP feature parameterisation, so it has no
-    # n_features axis — plot it as a horizontal reference instead.
-    ax = axes[1]
+
+def _draw_panel_decision_quality(ax, args, m1_ns, snf_ns, dr_nf,
+                                 neural_arr, qpth_arr, mbrl_arr, dr_arr):
+    """Panel 2 — decision quality vs feature dimension."""
     metric = "best" if args.show_running_max else "final"
     panel2_algos = ["neural_dfl"]
     if args.include_qpth_sweep:
@@ -269,14 +254,14 @@ def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
         se_m = float(mbrl_vals.std() / np.sqrt(max(mbrl_vals.size, 1)))
         ax.axhline(mu_m, color=COLORS["two_stage_mbrl"],
                    ls=LINESTYLES["two_stage_mbrl"], lw=2.0,
-                   label=f"{LABELS['two_stage_mbrl']} (no n_feat dep.)")
+                   label=LABELS["two_stage_mbrl"])
         ax.fill_between(snf_ns.n_features_list,
                         [mu_m - se_m] * len(snf_ns.n_features_list),
                         [mu_m + se_m] * len(snf_ns.n_features_list),
                         color=COLORS["two_stage_mbrl"], alpha=0.15)
     if dr_nf is not None:
         ax.axvline(dr_nf, color=COLORS["dfl_dr"], ls=":", lw=1.2,
-                   alpha=0.8, label=f"DR pick (n_feat={dr_nf})")
+                   alpha=0.8, label=LABELS["dfl_dr"])
     ax.set_xscale("log", base=2)
     ax.set_xlabel("n_features")
     ylab = "best-so-far reward" if metric == "best" else "final-iter reward"
@@ -284,26 +269,24 @@ def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
     ax.set_title("Decision quality vs feature dimension")
     ax.grid(True, which="both", alpha=0.3)
     ax.set_ylim(0, 210)
-    ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
+    ax.legend(loc="lower right", framealpha=0.9)
 
-    # ── Panel 3: training time ──────────────────────────────────────
-    # Use solver-only time = forward solver + backward inside the DFL
-    # phase. This is the part that differs across DFL/DFL-QP/DFL-DR/TS;
-    # pretrain, evaluation, and the iter-end LP solve are identical
-    # across methods and so excluded.
-    ax = axes[2]
+
+def _draw_panel_compute_cost(ax, args, m1_ns, snf_ns, dr_nf,
+                             neural_payload, qpth_payload,
+                             mbrl_payload, dr_payload):
+    """Panel 3 — compute cost (solver+backward for DFL methods, full
+    wall-clock for two-stage)."""
+    requested = set(int(s) for s in args.seeds)
     bar_keys, bar_means, bar_ses = [], [], []
-    time_sources = [
-        ("neural_dfl",     neural_payload),
-        ("dfl_qpth",       qpth_payload),
-        ("dfl_dr",         dr_payload),
-        ("two_stage_mbrl", mbrl_payload),
-    ]
-    for key, payload in time_sources:
-        # MBRL has no LP solver; report its full wall-clock instead. For
-        # DFL/DFL-QP/DFL-DR we keep the solver-only number (forward solve
-        # + backward through the LP/QP), which is the part that differs
-        # across those methods.
+    payload_by_key = {
+        "neural_dfl":     neural_payload,
+        "dfl_qpth":       qpth_payload,
+        "dfl_dr":         dr_payload,
+        "two_stage_mbrl": mbrl_payload,
+    }
+    for key in COST_BAR_ORDER:
+        payload = payload_by_key[key]
         time_key = ("times_per_seed" if key == "two_stage_mbrl"
                     else "solver_times_per_seed")
         ts = _times_from_payload(payload, requested, key=time_key)
@@ -315,39 +298,77 @@ def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
         bar_keys.append(key)
         bar_means.append(float(ts.mean()))
         bar_ses.append(float(ts.std() / np.sqrt(max(ts.size, 1))))
-    source_label = ("forward solver + backward (DFL phase only); "
-                    "MBRL: full wall-clock")
     if bar_keys:
         xs = np.arange(len(bar_keys))
-        labels = [
-            f"{LABELS[k]} (n_feat={dr_nf})" if k == "dfl_dr" and dr_nf is not None
-            else LABELS[k]
-            for k in bar_keys
-        ]
+        labels = [LABELS[k] for k in bar_keys]
         ax.bar(xs, bar_means, yerr=bar_ses, capsize=4,
                color=[COLORS[k] for k in bar_keys], alpha=0.85,
                edgecolor="black", linewidth=0.5)
         ax.set_xticks(xs)
-        ax.set_xticklabels(labels, rotation=15, ha="right")
+        ax.set_xticklabels(labels)
     else:
         ax.text(0.5, 0.5,
                 "No timing data in cache.\nRe-run with --force.",
-                ha="center", va="center", transform=ax.transAxes,
-                fontsize=11)
+                ha="center", va="center", transform=ax.transAxes)
     ax.set_ylabel("Wall-clock training time (s)")
-    title = "Training cost"
-    if source_label:
-        title += f"\n({source_label})"
-    ax.set_title(title)
+    ax.set_title("Compute cost")
     ax.grid(True, axis="y", alpha=0.3)
 
-    fig.suptitle("Offline CartPole — DFL vs DFL-QP vs DFL-DR vs Two-stage MBRL",
-                 fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    pdf_path = os.path.splitext(save_path)[0] + ".pdf"
-    fig.savefig(pdf_path, bbox_inches="tight")
-    print(f"Saved figure to {save_path} and {pdf_path}")
+
+def _save_panel_pdf(draw_fn, save_path):
+    prev_rc = plt.rcParams.copy()
+    plt.rcParams.update(_RC_PARAMS)
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    draw_fn(ax)
+    fig.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)
+    plt.rcParams.update(prev_rc)
+    print(f"Saved figure to {save_path}")
+
+
+def plot_three_panel(args, m1_ns, snf_ns, dr_nf, save_path):
+    """Save three separate single-panel PDFs derived from `save_path`'s stem."""
+    requested = set(int(s) for s in args.seeds)
+
+    # Pull cached curves at default n_features.
+    neural_payload = m1._load_or_none(m1._cache_key("curve_neural", m1_ns))
+    qpth_payload = m1._load_or_none(m1._cache_key("curve_qpth", m1_ns))
+    mbrl_payload = m1._load_or_none(
+        m1._cache_key("curve_two_stage_mbrl", _mbrl_args(args)))
+
+    neural_arr = _curve_from_payload(neural_payload, requested)
+    qpth_arr = _curve_from_payload(qpth_payload, requested)
+    mbrl_arr = _curve_from_payload(mbrl_payload, requested)
+
+    dr_arr = None
+    dr_payload = None
+    if dr_nf is not None:
+        dr_payload = snf._load_or_none(
+            snf._sweep_cache_key("curve_neural_dfl", snf_ns, dr_nf))
+        dr_arr = _curve_from_payload(dr_payload, requested)
+
+    base = Path(save_path).with_suffix("")
+    suffix = Path(save_path).suffix or ".pdf"
+    if suffix.lower() != ".pdf":
+        suffix = ".pdf"  # always write PDFs from the split-panel path
+    p1 = base.with_name(base.name + "_training_curves").with_suffix(suffix)
+    p2 = base.with_name(base.name + "_decision_quality").with_suffix(suffix)
+    p3 = base.with_name(base.name + "_compute_cost").with_suffix(suffix)
+
+    _save_panel_pdf(
+        lambda ax: _draw_panel_training_curves(
+            ax, args, m1_ns, snf_ns, dr_nf,
+            neural_arr, qpth_arr, mbrl_arr, dr_arr), p1)
+    _save_panel_pdf(
+        lambda ax: _draw_panel_decision_quality(
+            ax, args, m1_ns, snf_ns, dr_nf,
+            neural_arr, qpth_arr, mbrl_arr, dr_arr), p2)
+    _save_panel_pdf(
+        lambda ax: _draw_panel_compute_cost(
+            ax, args, m1_ns, snf_ns, dr_nf,
+            neural_payload, qpth_payload, mbrl_payload, dr_payload), p3)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -377,10 +398,11 @@ def parse_args():
     p.add_argument("--pretrain_epochs_ts", type=int, default=30)
     p.add_argument("--pretrain_epochs_dfl", type=int, default=30)
     p.add_argument("--n_iterations", type=int, default=20)
-    p.add_argument("--mbrl_n_iterations", type=int, default=None,
+    p.add_argument("--mbrl_n_iterations", type=int, default=100,
                    help="Override n_iterations for MBRL only. Lets MBRL run "
                         "longer than DFL/QP/TS without invalidating their "
-                        "iters=20 caches. None → use --n_iterations.")
+                        "iters=20 caches. Default 100 matches the cached "
+                        "MBRL runs; pass None to use --n_iterations.")
     p.add_argument("--n_eval_episodes", type=int, default=100)
     p.add_argument("--n_ce_steps", type=int, default=0)
     p.add_argument("--n_dfl_steps", type=int, default=5)
