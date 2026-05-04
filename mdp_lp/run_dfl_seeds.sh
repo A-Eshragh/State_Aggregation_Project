@@ -5,32 +5,31 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 SEEDS=(1 2 3 4 5 6 7 8 9 10)
-# SEEDS=(5)
+# SEEDS=(2)
 # SEEDS=(6 7 8 9 10)
 EXPERIMENT_TYPE="b"
 COST_CASE="normal_margin"
 BC=10
 N_SAMPLES=10
 PRETRAIN_EPOCHS=30
-# MDP dimensions: M = B_MAX + S_MAX + 1, A = Q_MAX + 1.
-# Defaults (5/30/30) give M=36, A=31 — what the tuning was done at.
 B_MAX=5
 S_MAX=30
 Q_MAX=30
 DIM_TAG="s${S_MAX}q${Q_MAX}"
 AUG_LAG_RHO_DFL=10000.0
+AUG_LAG_RHO_NOAGG=10.0
 AUG_LAG_RHO_SKETCH=0.1
 RESULTS_ROOT="mdp_lp/results/${COST_CASE}_pretrain_${PRETRAIN_EPOCHS}"
 
 CONFIGS=(
     # "twostage|twostage|-1|50|0.01||||"
     # "dfl|dfl|-1|50|0.01||||"
-    "dfl_qpth|dfl_qpth|-1|50|0.01|10.0|||"
+    # "dfl_qpth|dfl_qpth|-1|50|0.01|10.0|||"
     # "dfl_sketch_agg5|dfl_sketch|5|50|0.01|16|0.2|gaussian|"
     # "dfl_sketch_agg10|dfl_sketch|10|50|0.01|8|0.2|gaussian|"
     # "dfl_sketch_agg20|dfl_sketch|20|50|0.01|8|0.2|gaussian|"
     # "dfl_sketch_agg30|dfl_sketch|30|50|0.01|8|0.2|gaussian|"
-#   "dfl_sketch_noagg|dfl_sketch|-1|50|0.01|8|0.7|gaussian|"
+   "dfl_sketch_noagg|dfl_sketch|-1|50|0.01|8|0.2|gaussian|"
 )
 
 for SEED in "${SEEDS[@]}"; do
@@ -43,8 +42,12 @@ for SEED in "${SEEDS[@]}"; do
       N_SKETCHES="${EXTRA1:-4}"
       SKETCH_RATIO="${EXTRA2:-0.7}"
       SKETCH_MODE="${EXTRA3:-gaussian}"
+      DEFAULT_RHO="$AUG_LAG_RHO_SKETCH"
+      if [[ "$NAME" == "dfl_sketch_noagg" ]]; then
+        DEFAULT_RHO="$AUG_LAG_RHO_NOAGG"
+      fi
       # Per-config ρ override (9th field) takes precedence over the sketch default.
-      RHO="${EXTRA4:-$AUG_LAG_RHO_SKETCH}"
+      RHO="${EXTRA4:-$DEFAULT_RHO}"
       EXTRA_ARGS+=(
         --n_sketches "$N_SKETCHES"
         --sketch_ratio "$SKETCH_RATIO"
@@ -54,7 +57,7 @@ for SEED in "${SEEDS[@]}"; do
       )
       TAG="${TAG}_K${N_SKETCHES}_r${SKETCH_RATIO}_${SKETCH_MODE}"
     elif [[ "$ALGO" == "dfl_qpth" ]]; then
-      QP_REG=10.0
+      QP_REG=0.001
       EXTRA_ARGS+=(--qp_reg "$QP_REG" --aug_lag_rho "$AUG_LAG_RHO_DFL")
       TAG="${TAG}_nagg_${N_AGG}_qpreg${QP_REG}"
     elif [[ "$ALGO" == "dfl" ]]; then

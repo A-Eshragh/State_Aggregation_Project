@@ -660,6 +660,103 @@ def plot_all(lambda_values, methods, output_dir='mdp_lp/plot_results'):
     print(f"\nSaved 5 figures to {output_dir}/combined_*.pdf")
 
 
+def _sketched_lp_with_cost(H, r, gamma, *,
+                            n_sketches=8, sketch_ratio=0.7,
+                            sketch_mode="gaussian", sketch_seed=0,
+                            beta=0.95, cost_sigma=0.0):
+    """Local extension of ``sketched_lp.sketched_lp`` that supports
+    cost-side perturbation in addition to constraint-side row sketching.
+
+    For each ensemble member k = 1..K, we solve
+        y_k = argmax_{y >= 0}  (r + sigma * eps_k)^T y
+              s.t.   (S_k H_aug) y = (S_k gamma_aug)
+    and return the ensemble mean. When cost_sigma == 0 this matches
+    ``sketched_lp`` exactly (row sketch only). When sketch_ratio == 1.0
+    and use_anchor=False, the row sketch reduces to the identity and we
+    get cost-side smoothing only (matching ``sketch_smoothing_demo``'s
+    cost-sketch curve). The combined setting decorrelates basis hops via
+    BOTH a different polytope and a different cost direction per
+    ensemble member, which is the regime that produces the demo's smooth
+    landscape on this MDP-scale problem.
+    """
+    import math
+    if H.dim() != 3:
+        raise ValueError(f"H must be (B, M, M*A); got {tuple(H.shape)}")
+    B, M, MA = H.shape
+    if r.shape != (B, MA):
+        raise ValueError(f"r must be (B, M*A); got {tuple(r.shape)}")
+    if gamma.shape != (B, M):
+        raise ValueError(f"gamma must be (B, M); got {tuple(gamma.shape)}")
+
+    K = int(n_sketches)
+    if K < 1:
+        raise ValueError("n_sketches must be >= 1")
+    k = max(1, int(round(float(sketch_ratio) * M)))
+    k = min(k, M)
+    dtype, device = H.dtype, H.device
+
+    use_anchor = k < M
+    if use_anchor:
+        total_mass = 1.0 / max(1e-6, 1.0 - float(beta))
+        anchor_row = torch.ones(B, 1, MA, dtype=dtype, device=device)
+        anchor_rhs = torch.full((B, 1), total_mass, dtype=dtype, device=device)
+        H_aug = torch.cat([H, anchor_row], dim=1)
+        gamma_aug = torch.cat([gamma, anchor_rhs], dim=1)
+    else:
+        H_aug = H
+        gamma_aug = gamma
+
+    gen = torch.Generator(device=device).manual_seed(int(sketch_seed))
+
+    S_list = []
+    for _ in range(K):
+        if sketch_mode == "gaussian":
+            S_rand = (torch.randn(k, M, generator=gen, dtype=dtype,
+                                  device=device) / math.sqrt(float(k)))
+        elif sketch_mode == "rademacher":
+            signs = (torch.randint(0, 2, (k, M), generator=gen,
+                                    dtype=torch.int64, device=device).to(dtype)
+                     * 2.0 - 1.0)
+            S_rand = signs / math.sqrt(float(k))
+        elif sketch_mode == "subsample":
+            perm = torch.randperm(M, generator=gen, device=device)[:k]
+            S_rand = torch.zeros(k, M, dtype=dtype, device=device)
+            S_rand[torch.arange(k, device=device), perm] = math.sqrt(
+                float(M) / float(k))
+        else:
+            raise ValueError(f"Unknown sketch mode {sketch_mode!r}")
+        if use_anchor:
+            S_top = torch.cat(
+                [S_rand, torch.zeros(k, 1, dtype=dtype, device=device)], dim=1)
+            anchor_pick = torch.zeros(1, M + 1, dtype=dtype, device=device)
+            anchor_pick[0, M] = 1.0
+            S_m = torch.cat([S_top, anchor_pick], dim=0)
+        else:
+            S_m = S_rand
+        S_list.append(S_m)
+    S_stack = torch.stack(S_list, dim=0)
+    k_eff = S_stack.shape[1]
+
+    SH = torch.einsum("kij,bjp->kbip", S_stack, H_aug)
+    Sg = torch.einsum("kij,bj->kbi", S_stack, gamma_aug)
+
+    KB = K * B
+    SH_flat = SH.reshape(KB, k_eff, MA)
+    Sg_flat = Sg.reshape(KB, k_eff)
+
+    if float(cost_sigma) > 0.0:
+        cost_eps = torch.randn(K, B, MA, generator=gen, dtype=dtype,
+                                device=device)
+        r_per = r.unsqueeze(0) + float(cost_sigma) * cost_eps  # (K, B, MA)
+        r_flat = r_per.reshape(KB, MA).contiguous()
+    else:
+        r_flat = r.unsqueeze(0).expand(K, B, MA).reshape(KB, MA).contiguous()
+
+    y_flat = DifferentiableLPSolver.apply(SH_flat, r_flat, Sg_flat)
+    y_per = y_flat.reshape(K, B, MA)
+    return y_per.mean(dim=0)
+
+
 def compute_loss_grad(lam_val, r_true, H_true, gamma_true,
                       agg=None, rho=0.0, tau=0.5,
                       sketch_cfg=None,
@@ -733,15 +830,29 @@ def compute_loss_grad(lam_val, r_true, H_true, gamma_true,
         H = mdp.build_H(mdp.P)
         r_flat = mdp.r.reshape(1, -1)
         if sketch_cfg is not None:
-            from mdp_lp.solvers.sketched_lp import sketched_lp
-            y_star = sketched_lp(
-                H, r_flat, gamma,
-                n_sketches=int(sketch_cfg.get("n_sketches", 4)),
-                sketch_ratio=float(sketch_cfg.get("sketch_ratio", 0.7)),
-                sketch_mode=str(sketch_cfg.get("sketch_mode", "gaussian")),
-                sketch_seed=int(sketch_cfg.get("sketch_seed", 0)),
-                beta=float(BETA),
-            )
+            cost_sigma = float(sketch_cfg.get("cost_sigma", 0.0))
+            if cost_sigma > 0.0:
+                # Combined row + cost-side sketching (local extension; does
+                # NOT modify sketched_lp.py).
+                y_star = _sketched_lp_with_cost(
+                    H, r_flat, gamma,
+                    n_sketches=int(sketch_cfg.get("n_sketches", 4)),
+                    sketch_ratio=float(sketch_cfg.get("sketch_ratio", 0.7)),
+                    sketch_mode=str(sketch_cfg.get("sketch_mode", "gaussian")),
+                    sketch_seed=int(sketch_cfg.get("sketch_seed", 0)),
+                    beta=float(BETA),
+                    cost_sigma=cost_sigma,
+                )
+            else:
+                from mdp_lp.solvers.sketched_lp import sketched_lp
+                y_star = sketched_lp(
+                    H, r_flat, gamma,
+                    n_sketches=int(sketch_cfg.get("n_sketches", 4)),
+                    sketch_ratio=float(sketch_cfg.get("sketch_ratio", 0.7)),
+                    sketch_mode=str(sketch_cfg.get("sketch_mode", "gaussian")),
+                    sketch_seed=int(sketch_cfg.get("sketch_seed", 0)),
+                    beta=float(BETA),
+                )
         else:
             y_star = DifferentiableLPSolver.apply(H, r_flat, gamma)
 
@@ -1239,6 +1350,287 @@ def plot_loss_landscape_sketch_rho(
                   f"shift {lam_star - LAMBDA_TRUE:+.3f}")
 
 
+def plot_three_methods_row(
+    lambda_values, r_true, H_true, gamma_true,
+    rho=10.0,
+    sketch_K=24,
+    sketch_ratio=0.5,
+    sketch_mode="gaussian",
+    sketch_seed=0,
+    cost_sigma=0.3,
+    output_dir=None,
+    cache_dir=None,
+    recompute=None,
+    out_name='landscape_three_methods_row.pdf',
+):
+    """2x3 figure on the original (un-aggregated) LP. Top row: loss
+    landscape; bottom row: autograd dL/dλ. Columns:
+        (a) -r_true^T y*(λ)                                          — original DFL loss
+        (b) L_aug    = -r_true^T y*       + ρ ||γ_true - H_true y*||²  — aug. Lagrangian
+        (c) L_sketch = -r_true^T ȳ_sketch + ρ ||γ_true - H_true ȳ||²   — aug. Lagrangian + sketch
+
+    Panel (a) exhibits the bare staircase. Panel (b) keeps y* and adds the
+    feasibility penalty (curvature where (a) is flat, but the kinks remain
+    — penalty changes the value but not the underlying y*, so the kinks
+    persist). Panel (c) replaces y* with the K-sketch ensemble mean ȳ
+    using BOTH constraint-side row sketching (k/M ratio) and cost-side
+    Gaussian perturbation (cost_sigma). The two sources of stochasticity
+    decorrelate basis hops across the K ensemble members, which is the
+    regime that produces the smooth landscape seen in
+    sketch_smoothing_demo.pdf.
+
+    Caching: each sweep is keyed by (tag, problem constants, rho, sketch
+    config) via cached_sweep_loss_grad's npz cache. Results are reused
+    whenever the meta matches and recomputed otherwise; every fresh sweep
+    is written back to {cache_dir}/three_row_*.npz.
+    """
+    if output_dir is None:
+        output_dir = _default_plot_results_dir()
+    if cache_dir is None:
+        cache_dir = os.path.join(output_dir, "cache")
+    recompute_tags = set(recompute or [])
+    problem_meta = _current_problem_meta()
+
+    # ── (a) plain LP, rho=0 → loss = -r_true^T y* ──
+    print("[3-row] (a) -r_true^T y*, rho=0 ...")
+    L_a, g_a = cached_sweep_loss_grad(
+        tag="three_row_orig",
+        cache_dir=cache_dir, recompute_tags=recompute_tags,
+        lambda_values=lambda_values,
+        r_true=r_true, H_true=H_true, gamma_true=gamma_true,
+        rho=0.0, label="orig",
+        extra_meta={**problem_meta, "panel": "a"},
+    )
+    L_orig = np.asarray(L_a, dtype=float)
+    g_orig = np.asarray(g_a, dtype=float)
+
+    # ── (b) plain LP + augmented Lagrangian, rho>0 ──
+    print(f"[3-row] (b) augmented Lagrangian, rho={rho:g} ...")
+    L_b, g_b = cached_sweep_loss_grad(
+        tag="three_row_aug",
+        cache_dir=cache_dir, recompute_tags=recompute_tags,
+        lambda_values=lambda_values,
+        r_true=r_true, H_true=H_true, gamma_true=gamma_true,
+        rho=float(rho), label=f"aug-lag rho={rho:g}",
+        extra_meta={**problem_meta, "panel": "b"},
+    )
+    L_aug = np.asarray(L_b, dtype=float)
+    g_aug = np.asarray(g_b, dtype=float)
+
+    # ── (c) sketched LP + augmented Lagrangian, same rho ──
+    sketch_cfg = {
+        "n_sketches": int(sketch_K),
+        "sketch_ratio": float(sketch_ratio),
+        "sketch_mode": str(sketch_mode),
+        "sketch_seed": int(sketch_seed),
+        "cost_sigma": float(cost_sigma),
+    }
+    print(f"[3-row] (c) aug. Lagrangian + sketch, rho={rho:g}, "
+          f"K={sketch_K}, k/M={sketch_ratio:g}, σ={cost_sigma:g}, "
+          f"mode={sketch_mode} ...")
+    L_c, g_c = cached_sweep_loss_grad(
+        tag="three_row_aug_sketch",
+        cache_dir=cache_dir, recompute_tags=recompute_tags,
+        lambda_values=lambda_values,
+        r_true=r_true, H_true=H_true, gamma_true=gamma_true,
+        rho=float(rho),
+        label=f"aug-lag+sketch rho={rho:g} K={sketch_K} σ={cost_sigma:g}",
+        sketch_cfg=sketch_cfg,
+        extra_meta={**problem_meta, "panel": "c"},
+    )
+    L_sketch = np.asarray(L_c, dtype=float)
+    g_sketch = np.asarray(g_c, dtype=float)
+
+    # ── Diagnostics: penalty contribution vs reward range ──
+    # Both (a) and (b) share the same y*, so L_aug - L_orig isolates the
+    # penalty term ρ ||γ_true - H_true y*||² across the λ sweep. If the
+    # ratio below is small, panels (a) and (b) will look visually
+    # identical even though their gradients differ — bump rho.
+    pen = L_aug - L_orig
+    rew_range = float(L_orig.max() - L_orig.min())
+    pen_max = float(pen.max())
+    pen_min = float(pen.min())
+    pen_mean = float(pen.mean())
+    print(f"[3-row] diagnostics @ ρ={rho:g}:")
+    print(f"  reward range  -r^T y*  : {rew_range:.4e}")
+    print(f"  penalty range          : [{pen_min:.4e}, {pen_max:.4e}]   "
+          f"mean {pen_mean:.4e}")
+    if rew_range > 0:
+        ratio = pen_max / rew_range
+        print(f"  max(penalty) / range(-r^T y*) = {ratio:.3%}")
+        if ratio < 0.05:
+            print("  WARNING: penalty < 5% of reward range — panels (a) and "
+                  "(b) will look visually identical even though their "
+                  "gradients differ. Bump rho (try ρ × 100).")
+
+    # All three panels are losses → use argmin everywhere. (Tried
+    # zero-crossing of g, but on LP-staircased losses g can hit zero in a
+    # locally-flat segment while L keeps dropping past it via basis-change
+    # discontinuities — argmin(L) is the honest visual minimum.)
+    idx_a = int(np.argmin(L_orig))
+    idx_b = int(np.argmin(L_aug))
+    idx_c = int(np.argmin(L_sketch))
+    lam_stars = [float(lambda_values[idx_a]),
+                 float(lambda_values[idx_b]),
+                 float(lambda_values[idx_c])]
+    star_vals = [float(L_orig[idx_a]),
+                 float(L_aug[idx_b]),
+                 float(L_sketch[idx_c])]
+
+    prev_rc = plt.rcParams.copy()
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.labelsize': 13,
+        'axes.titlesize': 13,
+        'axes.linewidth': 0.9,
+        'legend.fontsize': 9.5,
+        'legend.frameon': True,
+        'legend.framealpha': 0.92,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    })
+
+    # Finite-difference gradients (centred, raw — basis-change spikes are
+    # part of the honest picture). The dot's y-value is computed below
+    # via a wide-stride FD that skips the local spike at argmin.
+    fd_curves = [np.gradient(L_orig, lambda_values),
+                 np.gradient(L_aug,  lambda_values),
+                 np.gradient(L_sketch, lambda_values)]
+    fd_dot_stride = max(1, len(lambda_values) // 80)
+    def _wide_fd_at(L_arr, idx):
+        i_lo = max(0, idx - fd_dot_stride)
+        i_hi = min(len(L_arr) - 1, idx + fd_dot_stride)
+        if i_hi == i_lo:
+            return 0.0
+        return float((L_arr[i_hi] - L_arr[i_lo]) /
+                     (lambda_values[i_hi] - lambda_values[i_lo]))
+    fd_dot_vals = [
+        _wide_fd_at(L_orig,   int(np.argmin(L_orig))),
+        _wide_fd_at(L_aug,    int(np.argmin(L_aug))),
+        _wide_fd_at(L_sketch, int(np.argmin(L_sketch))),
+    ]
+
+    try:
+        fig, axes = plt.subplots(3, 3, figsize=(14.8, 10.8),
+                                 gridspec_kw={'hspace': 0.34, 'wspace': 0.30})
+
+        titles = [
+            r'(a) $-r_{\mathrm{true}}^{\!\top}\,y^{*}(\lambda)$',
+            r'(b) Augmented Lagrangian',
+            r'(c) Aug. Lagrangian + Sketch',
+        ]
+        ylabels = [
+            r'$-r_{\mathrm{true}}^{\!\top}\,y^{*}(\lambda)$',
+            r'$\mathcal{L}_{\mathrm{aug}}(\lambda)$',
+            r'$\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}(\lambda)$',
+        ]
+        loss_curves = [L_orig, L_aug, L_sketch]
+        grad_curves = [g_orig, g_aug, g_sketch]
+        colors = ['#455A64', '#E65100', '#1565C0']
+        lam_true_color = '#D32F2F'
+        minimiser_color = '#2E7D32'
+
+        # Row 1: loss landscapes.
+        for ax, y, ttl, lbl, c, lam_s, sv in zip(
+                axes[0], loss_curves, titles, ylabels, colors, lam_stars,
+                star_vals):
+            ax.plot(lambda_values, y, lw=1.8, color=c, solid_capstyle='round')
+            ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
+                       alpha=0.9,
+                       label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
+            ax.plot(lam_s, sv, marker='o', mfc=minimiser_color, mec='white',
+                    ms=9, mew=1.3, ls='', zorder=5,
+                    label=rf'$\lambda^{{*}}={lam_s:.2f}$')
+            ax.set_title(ttl, pad=8)
+            ax.set_ylabel(lbl)
+            ax.set_xlim(lambda_values[0], lambda_values[-1])
+            ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+            ax.legend(loc='best')
+
+        # Row 2: autograd dL/dλ (within-basis derivative; misses LP kinks).
+        autograd_ylabels = [
+            r'$d(-r_{\mathrm{true}}^{\!\top} y^{*})/d\lambda$  (autograd)',
+            r'$d\mathcal{L}_{\mathrm{aug}}/d\lambda$  (autograd)',
+            r'$d\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}/d\lambda$  (autograd)',
+        ]
+        for ax, g, c, lam_s, lbl in zip(
+                axes[1], grad_curves, colors, lam_stars, autograd_ylabels):
+            ax.plot(lambda_values, g, lw=1.8, color=c, solid_capstyle='round')
+            ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
+                       alpha=0.9,
+                       label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
+            ax.axhline(0.0, color='black', lw=1.0, alpha=0.80)
+
+            g_at_star = float(np.interp(lam_s, lambda_values, g))
+            ax.plot(lam_s, g_at_star, marker='o', mfc=minimiser_color,
+                    mec='white', ms=9, mew=1.3, ls='', zorder=5,
+                    label=rf'$\lambda^{{*}}={lam_s:.2f}$')
+
+            ax.set_ylabel(lbl)
+            ax.set_xlim(lambda_values[0], lambda_values[-1])
+            ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+            ax.legend(loc='best')
+
+        # Row 3: finite-difference dL/dλ. FD captures basis-change drops, so
+        # its zero coincides with argmin(L) on smooth panels.
+        fd_ylabels = [
+            r'$d(-r_{\mathrm{true}}^{\!\top} y^{*})/d\lambda$  (finite diff.)',
+            r'$d\mathcal{L}_{\mathrm{aug}}/d\lambda$  (finite diff.)',
+            r'$d\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}/d\lambda$  (finite diff.)',
+        ]
+        for ax, gfd, c, lam_s, lbl, gfd_dot in zip(
+                axes[2], fd_curves, colors, lam_stars, fd_ylabels,
+                fd_dot_vals):
+            ax.plot(lambda_values, gfd, lw=1.8, color=c, solid_capstyle='round')
+            ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
+                       alpha=0.9,
+                       label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
+            ax.axhline(0.0, color='black', lw=1.0, alpha=0.80)
+
+            ax.plot(lam_s, gfd_dot, marker='o', mfc=minimiser_color,
+                    mec='white', ms=9, mew=1.3, ls='', zorder=5,
+                    label=rf'$\lambda^{{*}}={lam_s:.2f}$')
+
+            ax.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
+            ax.set_ylabel(lbl)
+            ax.set_xlim(lambda_values[0], lambda_values[-1])
+            ax.grid(True, alpha=0.35, ls=':', lw=0.7)
+            ax.legend(loc='best')
+
+        out_path = os.path.join(output_dir, out_name)
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+    finally:
+        plt.rcParams.update(prev_rc)
+
+    print(f"\nSaved 3x3 three-methods landscape+gradient to {out_path}")
+    print(f"  λ*  (a) -r^T y*                                                        = {lam_stars[0]:.3f}   loss {star_vals[0]:.4f}")
+    print(f"  λ*  (b) aug-lag (ρ={rho:g})                                             = {lam_stars[1]:.3f}   loss {star_vals[1]:.4f}")
+    print(f"  λ*  (c) aug-lag + sketch (ρ={rho:g}, K={sketch_K}, k/M={sketch_ratio:g}, σ={cost_sigma:g}) = {lam_stars[2]:.3f}   loss {star_vals[2]:.4f}")
+    print(f"  λ_true                                                                  = {LAMBDA_TRUE:.3f}")
+    print(f"  TV(g_orig)={float(np.abs(np.diff(g_orig)).sum()):.3e}   "
+          f"TV(g_aug)={float(np.abs(np.diff(g_aug)).sum()):.3e}   "
+          f"TV(g_sketch)={float(np.abs(np.diff(g_sketch)).sum()):.3e}")
+    print("  ↳ TV(g_sketch) should be << TV(g_orig); if not, increase K or "
+          "cost_sigma.")
+    return {
+        'lambda_values': np.asarray(lambda_values, dtype=float),
+        'L_orig': L_orig,
+        'L_aug': L_aug,
+        'L_sketch': L_sketch,
+        'g_orig': g_orig,
+        'g_aug': g_aug,
+        'g_sketch': g_sketch,
+        'lam_stars': lam_stars,
+        'star_vals': star_vals,
+    }
+
+
 def diagnose_solver_gradients(lambda_values, agg, output_dir,
                               rho=0.01, qp_reg=1.0, recompute=False):
     """Evidence that DifferentiableLPSolver's autograd gradient is
@@ -1727,6 +2119,40 @@ def main():
     parser.add_argument('--sketch-seed', type=int, default=0,
                         help='Sketch RNG seed (held fixed across λ so the curve is '
                              'deterministic and reproducible).')
+    # 1x3 three-methods row: r^T y* | aug. Lagrangian | sketch-and-solve.
+    parser.add_argument('--three-methods-row', action='store_true',
+                        help='Produce a 2x3 figure: row 1 = loss landscape, '
+                             'row 2 = autograd dL/dλ. Columns: '
+                             '(a) -r_true^T y*, (b) augmented Lagrangian, '
+                             '(c) augmented Lagrangian + sketch. Saved as '
+                             'landscape_three_methods_row.pdf.')
+    parser.add_argument('--three-methods-rho', type=float, default=10.0,
+                        help='ρ used in the augmented-Lagrangian columns (b) '
+                             'and (c) of --three-methods-row.')
+    parser.add_argument('--three-methods-K', type=int, default=128,
+                        help='Number of sketches K averaged in panel (c) of '
+                             '--three-methods-row. Override of --sketch-K so '
+                             'this figure can use a more aggressive default '
+                             'without affecting other figures.')
+    parser.add_argument('--three-methods-ratio', type=float, default=0.7,
+                        help='Row-sketch keep ratio k/M in panel (c) of '
+                             '--three-methods-row. Smaller = more aggressive '
+                             'constraint relaxation (more decorrelation '
+                             'between sketches, but also more bias in the '
+                             'ensemble-mean LP solution — which shifts the '
+                             'augmented-Lagrangian minimum away from '
+                             'lambda_true).')
+    parser.add_argument('--three-methods-cost-sigma', type=float, default=0.0,
+                        help='Cost-side perturbation noise scale σ in panel '
+                             '(c) of --three-methods-row. Each of the K '
+                             'sketches solves max (r + σ ε_k)^T y under a '
+                             'different row-sketched constraint set. Larger '
+                             'σ adds bias to the LP optimum (each perturbed '
+                             'argmax sits at a different vertex), which '
+                             'shifts the augmented-Lagrangian minimum away '
+                             'from lambda_true. Default 0 keeps cost '
+                             'unbiased and relies on row sketching alone for '
+                             'smoothing.')
     # 2x3 sketch × ρ landscape figure.
     parser.add_argument('--sketch-rho-fig', action='store_true',
                         help='Produce the 2x3 sketch × ρ landscape comparison figure '
@@ -1835,6 +2261,22 @@ def main():
             "sketch_mode": str(args.sketch_mode),
             "sketch_seed": int(args.sketch_seed),
         }
+
+    if args.three_methods_row:
+        out_dir = _default_plot_results_dir()
+        plot_three_methods_row(
+            lambda_values, r_true, H_true, gamma_true,
+            rho=float(args.three_methods_rho),
+            sketch_K=int(args.three_methods_K),
+            sketch_ratio=float(args.three_methods_ratio),
+            sketch_mode=str(args.sketch_mode),
+            sketch_seed=int(args.sketch_seed),
+            cost_sigma=float(args.three_methods_cost_sigma),
+            output_dir=out_dir,
+            cache_dir=cache_dir,
+            recompute=recompute,
+        )
+        return
 
     if args.sketch_rho_fig:
         out_dir = _default_plot_results_dir()

@@ -89,7 +89,32 @@ def main():
                         help='Random seed for fixed W when --agg_fixed_W is set.')
 
     # qpth QP regularization (only used for dfl_qpth)
-    parser.add_argument('--qp_reg', type=float, default=20.0, help='Quadratic regularization coef for QP-DFL')
+    parser.add_argument('--qp_reg', type=float, default=10.0, help='Quadratic regularization coef for QP-DFL')
+    parser.add_argument('--qpth_kkt_tol', type=float, default=1e-3,
+                        help='Skip optimizer step if qpth\'s post-solve KKT residual exceeds this. '
+                             'Catches PDIPM non-convergence (transient one-epoch nosedives).')
+    parser.add_argument('--qpth_grad_clip', type=float, default=1.0,
+                        help='Per-step grad-norm clip applied ONLY in the dfl_qpth path. '
+                             'Default 1.0 (tighter than --grad_clip=10.0 used elsewhere) — '
+                             'at high aug_lag_rho the implicit gradient through qpth blows '
+                             'up to 10^4-10^5 norm, and a smaller clip keeps the dive shallow '
+                             'enough for MSE pull-back to recover before v* goes negative.')
+
+    # Epoch-level step rejection: revert to start-of-epoch params if v* drops
+    # by more than (1 - thresh) of the previous epoch's mean v*. Surgical fix
+    # for the dive-and-recover pattern at high aug_lag_rho — the converged QP
+    # has fine residuals but its gradient blows up, clip masks magnitude not
+    # direction, and 5-7 sequential max-norm steps push lambda_pred far enough
+    # for v* to go negative. Off by default (existing runs unchanged).
+    parser.add_argument('--enable_step_reject', action='store_true', default=False,
+                        help='Revert end-of-epoch params if v* drops sharply (epoch-level rollback).')
+    parser.add_argument('--step_reject_thresh', type=float, default=0.5,
+                        help='Revert if new_epoch_vstar < thresh * prev_epoch_vstar. '
+                             'Default 0.5 = reject if v* halves in one epoch.')
+    parser.add_argument('--step_reject_max_consec', type=int, default=3,
+                        help='Cap on consecutive rollbacks before accepting a bad step '
+                             '(prevents infinite-rollback when the gradient direction '
+                             'is locally hopeless). Default 3.')
 
     # Sketch-and-solve LP (only used for dfl_sketch)
     parser.add_argument('--n_sketches', type=int, default=4,

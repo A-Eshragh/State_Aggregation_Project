@@ -15,7 +15,7 @@ from .make_figure1_cartpole import _job, _run_one_seed, COLORS
 
 
 HERE = Path(__file__).resolve().parent
-CACHE_DIR = HERE / "figure_nfeat_cache"
+CACHE_DIR = HERE / "results" / "dfl_vs_qpth"
 
 
 def _cache_path(name: str) -> Path:

@@ -92,6 +92,60 @@ def estimate_lp_matrices(
     return M, c, b
 
 
+def estimate_lp_matrices_shared(
+    feature_model,
+    trajectory_data: dict,
+    gamma: float = 0.99,
+    n_actions: int = 2,
+    ridge: float = 1e-4,
+):
+    """Compute (M, b, Phi_sa) — everything in the LP system that does NOT
+    depend on rewards. Lets the caller derive multiple c-vectors (e.g.,
+    shaped vs true rewards) from the same Phi_sa with a cheap N×d matmul,
+    avoiding a second feature-net forward + (m,N)@(N,d) reduction.
+
+    c is recovered as: c = -(Phi_sa * rewards.unsqueeze(1)).sum(0) / N.
+    """
+    states = trajectory_data["states"]
+    actions = trajectory_data["actions"]
+    next_states = trajectory_data["next_states"]
+    dones = trajectory_data["dones"]
+    init_states = trajectory_data["init_states"]
+
+    N = states.shape[0]
+
+    Phi_sa = feature_model.phi(states, actions)
+    d = Phi_sa.shape[1]
+
+    Psi_next = feature_model.psi(next_states)
+    m = Psi_next.shape[1]
+    mask = (~dones).float().unsqueeze(1)
+
+    PsiT_P_Phi = (Psi_next * mask).T @ Phi_sa / N
+
+    Psi_s = feature_model.psi(states)
+    Phi_sum_a = torch.zeros(N, d, device=states.device, dtype=states.dtype)
+    for a in range(n_actions):
+        a_vec = torch.full((N,), a, device=states.device, dtype=torch.long)
+        Phi_sum_a = Phi_sum_a + feature_model.phi(states, a_vec)
+    PsiT_B_Phi = Psi_s.T @ Phi_sum_a / N
+
+    M = PsiT_B_Phi - gamma * PsiT_P_Phi
+    if ridge > 0:
+        m_dim, d_dim = M.shape
+        ridge_mat = torch.zeros_like(M)
+        for start in range(0, d_dim, m_dim):
+            end = min(start + m_dim, d_dim)
+            blk = end - start
+            ridge_mat[:blk, start:end] = ridge * torch.eye(
+                blk, device=M.device, dtype=M.dtype)
+        M = M + ridge_mat
+
+    b = feature_model.psi(init_states).mean(dim=0)
+
+    return M, b, Phi_sa
+
+
 def estimate_lp_matrices_batched(
     feature_model,
     trajectory_data: dict,

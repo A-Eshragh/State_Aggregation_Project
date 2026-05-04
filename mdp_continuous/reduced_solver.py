@@ -1,19 +1,3 @@
-"""
-LP solver for the reduced continuous-MDP system.
-
-Solves:
-    minimize   c^T w
-    subject to Mw = b
-               w >= 0
-
-where M in R^{m x d}, c in R^d, b in R^m.
-
-This is the projected occupancy LP:  w* gives y(s,a) = sum_j w_j phi_j(s,a).
-
-Uses Gurobi for forward solve and basis-restricted sensitivity for backward
-(same approach as mdp_lp/solvers/differentiable_lp.py).
-"""
-
 import torch
 import torch.autograd as autograd
 import numpy as np
@@ -54,6 +38,13 @@ def solve_reduced_lp_gurobi(M: torch.Tensor, c: torch.Tensor, b: torch.Tensor):
     model.Params.OutputFlag = 0
     model.Params.FeasibilityTol = 1e-6
     model.Params.OptimalityTol = 1e-6
+    model.Params.Method = 2
+    # Pin Gurobi to 1 thread per call. Under N-parallel ProcessPoolExecutor
+    # workers (e.g. 8), default `Threads=0` (auto) lets each Gurobi grab
+    # many cores → oversubscription on the shared LLC/DRAM bus, which was
+    # erasing barrier's solo speedup in production. Solo penalty ~5-9%;
+    # parallel benefit is much larger.
+    model.Params.Threads = 8
 
     w = model.addMVar(shape=d, lb=0.0, vtype=GRB.CONTINUOUS)
     model.setObjective(c_np @ w, GRB.MINIMIZE)
@@ -65,6 +56,7 @@ def solve_reduced_lp_gurobi(M: torch.Tensor, c: torch.Tensor, b: torch.Tensor):
         penalty = 1e3
         model2 = gp.Model()
         model2.Params.OutputFlag = 0
+        model2.Params.Threads = 1
 
         w2 = model2.addMVar(shape=d, lb=0.0, vtype=GRB.CONTINUOUS)
         sp = model2.addMVar(shape=m, lb=0.0, vtype=GRB.CONTINUOUS)
@@ -120,17 +112,23 @@ def solve_reduced_lp_gurobi(M: torch.Tensor, c: torch.Tensor, b: torch.Tensor):
 
 def _pad_basis(basis_idx, m, d, w_star):
     """Ensure basis has exactly m elements by padding with largest-w columns."""
-    if basis_idx.numel() >= m:
+    have = basis_idx.numel()
+    if have >= m:
         return basis_idx[:m]
 
-    existing = set(basis_idx.tolist())
-    remaining = [(j, w_star[j].item()) for j in range(d) if j not in existing]
-    remaining.sort(key=lambda x: -x[1])
-    for j, _ in remaining:
-        if basis_idx.numel() >= m:
-            break
-        basis_idx = torch.cat([basis_idx, torch.tensor([j], dtype=torch.long)])
-    return basis_idx
+    # Vectorized: mask out the existing basis, then topk over the rest.
+    # Avoids per-element .item() syncs and repeated torch.cat reallocs.
+    mask = torch.ones(d, dtype=torch.bool)
+    mask[basis_idx] = False
+    candidate_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
+    candidate_w = w_star.detach()[candidate_idx]
+    k = m - have
+    if candidate_idx.numel() <= k:
+        pad = candidate_idx
+    else:
+        topk = torch.topk(candidate_w, k=k, largest=True).indices
+        pad = candidate_idx[topk]
+    return torch.cat([basis_idx, pad.to(basis_idx.dtype)])
 
 
 def solve_reduced_lp_batch(M: torch.Tensor, c: torch.Tensor, b: torch.Tensor):
@@ -238,19 +236,6 @@ def differentiable_reduced_lp(M, c, b):
 
 def solve_reduced_qp_gurobi(M: torch.Tensor, c: torch.Tensor,
                              b: torch.Tensor, eta: float = 0.01):
-    """Solve a reduced QP with Gurobi.
-
-    minimize   c^T w  +  (eta/2) ||w||^2
-    subject to Mw = b,  w >= 0
-
-    The quadratic term spreads weight across more variables than
-    a pure LP (which always sits at a sparse vertex).
-
-    Returns:
-        w_star:  (d,)
-        active:  (d,)  bool — which variables are positive
-        dual:    (m,)  dual values (lambda)
-    """
     M_np = M.detach().cpu().numpy().astype(np.float64)
     c_np = c.detach().cpu().numpy().astype(np.float64)
     b_np = b.detach().cpu().numpy().astype(np.float64)
@@ -260,6 +245,7 @@ def solve_reduced_qp_gurobi(M: torch.Tensor, c: torch.Tensor,
     model.Params.OutputFlag = 0
     model.Params.FeasibilityTol = 1e-6
     model.Params.OptimalityTol = 1e-6
+    model.Params.Threads = 1  # avoid oversubscription under N-parallel workers
 
     w = model.addMVar(shape=d, lb=0.0, vtype=GRB.CONTINUOUS)
 
@@ -275,6 +261,7 @@ def solve_reduced_qp_gurobi(M: torch.Tensor, c: torch.Tensor,
         d_aug = d + 2 * m
         model2 = gp.Model()
         model2.Params.OutputFlag = 0
+        model2.Params.Threads = 1
 
         all_v = model2.addMVar(shape=d_aug, lb=0.0, vtype=GRB.CONTINUOUS)
         M_aug = np.hstack([M_np, np.eye(m), -np.eye(m)])
@@ -308,24 +295,6 @@ def solve_reduced_qp_gurobi(M: torch.Tensor, c: torch.Tensor,
 
 
 class DifferentiableReducedQP(autograd.Function):
-    """Differentiable QP via KKT-based adjoint backward.
-
-    Forward:  Gurobi solves  min c^T w + (eta/2)||w||^2  s.t. Mw=b, w>=0
-    Backward: Implicit differentiation on the KKT system for the active set
-              A = {j : w_j > 0}:
-
-              [eta I_A,  M_A^T] [w_A   ]   [-c_A]
-              [M_A,      0    ] [lambda ] = [b   ]
-
-              Adjoint:
-              v_lam = (M_A M_A^T)^{-1} M_A g_A
-              v_w   = (g_A - M_A^T v_lam) / eta
-
-              dL/dc_A  = -v_w
-              dL/db    = v_lam
-              dL/dM_A  = -(outer(lambda, v_w) + outer(v_lam, w_A))
-    """
-
     @staticmethod
     def forward(ctx, M, c, b, eta):
         with torch.no_grad():
@@ -377,6 +346,79 @@ class DifferentiableReducedQP(autograd.Function):
 def differentiable_reduced_qp(M, c, b, eta=0.01):
     """User-facing differentiable reduced QP call (with w >= 0)."""
     return DifferentiableReducedQP.apply(M, c, b, eta)
+
+
+
+_QPTH_FN = None
+
+
+def _get_qpth_qpfunction(eps: float = 1e-7, max_iter: int = 50):
+    """Lazy singleton — qpth import is heavy and may not be installed."""
+    global _QPTH_FN
+    if _QPTH_FN is None:
+        from qpth.qp import QPFunction, QPSolvers
+        _QPTH_FN = QPFunction(
+            eps=eps, maxIter=max_iter, solver=QPSolvers.PDIPM_BATCHED,
+            verbose=-1,
+        )
+    return _QPTH_FN
+
+
+def differentiable_qp_qpth(M, c, b, eta: float = 0.01,
+                           feas_tol: float = 1e-3):
+    """qpth-based differentiable reduced QP — replaces Gurobi-QP forward+adjoint.
+
+    Solves   min  c^T w + (eta/2) ||w||^2   s.t.  M w = b,  w >= 0
+
+    qpth's PDIPM is GPU-batched and natively differentiable, so we get
+    autograd for free (no custom backward). Avoids the per-call Gurobi
+    Python overhead that dominates the Gurobi-QP path.
+
+    Non-convergence guard: if qpth's PDIPM hits maxIter without satisfying
+    eps, the returned w may violate (Mw=b) or be slightly negative. We
+    expose the KKT residual via the second return so the caller can skip
+    the optimizer step on bad solves (rather than silently clamping).
+
+    Args:
+        M, c, b: same convention as the Gurobi reduced QP — single-instance
+            shapes (m, d), (d,), (m,).
+        eta: quadratic regularization strength (>0 required by PDIPM).
+        feas_tol: max allowed equality + non-negativity residual.
+
+    Returns:
+        w_star:  (d,) torch tensor, autograd-tracked through M, c, b.
+        kkt_res: (scalar tensor) max(|Mw - b|, max(-w, 0)) — for bad-step
+            detection; the caller decides what to do with it.
+    """
+    if eta <= 0:
+        raise ValueError(f"eta must be > 0 for qpth (PDIPM); got {eta}")
+
+    qp_fn = _get_qpth_qpfunction()
+
+    M_b = M.unsqueeze(0)            # (1, m, d)
+    c_b = c.unsqueeze(0)            # (1, d)
+    b_b = b.unsqueeze(0)            # (1, m)
+    d = M.shape[1]
+    device = M.device
+    dtype = M.dtype
+
+    # qpth: min 0.5 w^T Q w + p^T w  s.t.  Gw <= h, Aw = b
+    Q = (eta * torch.eye(d, device=device, dtype=dtype)).unsqueeze(0)  # (1, d, d)
+    p = c_b
+    G = (-torch.eye(d, device=device, dtype=dtype)).unsqueeze(0)       # (1, d, d)
+    h = torch.zeros(1, d, device=device, dtype=dtype)
+    A = M_b
+    bb = b_b
+
+    w_batched = qp_fn(Q, p, G, h, A, bb)   # (1, d)
+    w_star = w_batched.squeeze(0)
+
+    # KKT residual *before* any feasibility patching.
+    eq_res = (M @ w_star - b).abs().max()
+    nn_res = (-w_star).clamp(min=0.0).max()
+    kkt_res = torch.max(eq_res, nn_res)
+
+    return w_star, kkt_res
 
 
 def differentiable_unconstrained_qp(M, c, b, eta=1.0):

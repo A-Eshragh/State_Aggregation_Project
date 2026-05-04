@@ -31,6 +31,7 @@ def solve_occupancy_qp_qpth(
     gamma: torch.Tensor,
     reg: float,
     qp_solver,
+    return_residual: bool = False,
 ):
     """
     Args:
@@ -39,9 +40,17 @@ def solve_occupancy_qp_qpth(
         gamma: (B, S)
         reg: nonnegative quadratic regularization coefficient
         qp_solver: qpth.qp.QPFunction instance
+        return_residual: if True, also return a per-batch KKT residual so
+            the caller can detect non-convergence and skip the optimizer
+            step. The previous silent `clamp(min=0)` masked exactly this
+            failure mode (PDIPM exhausting its iteration budget without
+            satisfying eps), causing transient one-epoch nosedives during
+            training (see plan two-issues-i-found-keen-hearth).
 
     Returns:
-        y: (B, SA) solution
+        y: (B, SA) solution.
+        kkt_res (only if return_residual=True): (B,) tensor with
+            max(|H y - gamma|, max(-y, 0)) per batch element.
     """
     if reg < 0:
         raise ValueError(f"reg must be >= 0, got {reg}")
@@ -66,7 +75,19 @@ def solve_occupancy_qp_qpth(
     b = gamma
 
     y = qp_solver(Q, p, G, h, A, b)
-    # PDIPM may return slightly negative values; clamp to maintain feasibility
-    y = y.clamp(min=0.0)
-    return y
+
+    if return_residual:
+        # Compute residual *before* any feasibility patching so the caller
+        # can see real PDIPM failures and decide whether to skip the step.
+        with torch.no_grad():
+            eq_res = (torch.bmm(H, y.unsqueeze(-1)).squeeze(-1) - gamma).abs().max(dim=1).values  # (B,)
+            nn_res = (-y).clamp(min=0.0).max(dim=1).values                                       # (B,)
+            kkt_res = torch.maximum(eq_res, nn_res)
+        return y, kkt_res
+
+    # Backward-compat path (no residual requested, e.g. eval-only callers
+    # under torch.no_grad): keep the safety clamp so slightly-negative
+    # PDIPM iterates don't break downstream non-negativity assumptions.
+    # Gradient-bearing training callers MUST pass return_residual=True.
+    return y.clamp(min=0.0)
 

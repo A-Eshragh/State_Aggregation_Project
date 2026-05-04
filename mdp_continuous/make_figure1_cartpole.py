@@ -23,7 +23,7 @@ from .world_model import train_world_model
 
 # ── Cache layout ────────────────────────────────────────────────────────
 HERE = Path(__file__).resolve().parent
-CACHE_DIR = HERE / "figure1_cache"
+CACHE_DIR = HERE / "results" / "dfl_vs_qpth"
 
 
 def _cache_path(name: str) -> Path:
@@ -108,9 +108,12 @@ def _run_one_seed(args_dict: dict) -> dict:
         pretrain = args_dict["pretrain_epochs_dfl"]
         runner_kwargs = {"solver": "lp"}
     elif algo == "dfl_qpth":
+        # Historical name — actually runs Gurobi-QP, not the qpth library.
+        # Kept as-is so existing caches/figures stay valid; the panel-3
+        # bar labelled "DFL-QP" has always meant the Gurobi-QP path.
         runner = run_neural_dfl
         pretrain = args_dict["pretrain_epochs_dfl"]
-        runner_kwargs = {"solver": "qpth"}
+        runner_kwargs = {"solver": "gurobi_qp"}
     elif algo == "two_stage_mbrl":
         runner = run_two_stage_mbrl
         pretrain = 0

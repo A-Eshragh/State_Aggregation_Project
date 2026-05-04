@@ -18,10 +18,10 @@ def set_seed(seed: int):
 from .configs import CartPoleConfig
 from .cartpole_env import CartPoleDynamics, collect_trajectories, random_policy, heuristic_policy, epsilon_greedy_policy
 from .features import ActionIndexedFeatures, ContinuousActionFeatures
-from .lp_matrices import estimate_lp_matrices
+from .lp_matrices import estimate_lp_matrices, estimate_lp_matrices_shared
 from .reduced_solver import (
     solve_reduced_qp_gurobi, differentiable_reduced_lp, differentiable_reduced_qp,
-    differentiable_unconstrained_qp,
+    differentiable_unconstrained_qp, differentiable_qp_qpth,
 )
 from .policy import (
     occupancy_to_policy_fn,
@@ -42,7 +42,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    world_model=None,
                    solver: str = "lp"):
     assert eval_policy_type in ("ce", "lp")
-    assert solver in ("lp", "qpth")
+    assert solver in ("lp", "gurobi_qp", "qpth")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
@@ -158,11 +158,21 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
     rho = cfg.rho
     lp_weight = 1
 
-    if solver == "qpth":
+    if solver == "gurobi_qp":
+        # Reduced QP solved by Gurobi's interior-point: min c^T w + (eta/2)||w||^2
+        # s.t. Mw=b, w>=0. Custom KKT-based backward in DifferentiableReducedQP.
         qp_eta = float(cfg.qp_eta)
         def solve_lp(M, c, b):
             return differentiable_reduced_qp(M, c, b, eta=qp_eta)
+    elif solver == "qpth":
+        # Real qpth library — autograd-native PDIPM, no Gurobi.
+        qp_eta = float(cfg.qp_eta)
+        def solve_lp(M, c, b):
+            w_star, _ = differentiable_qp_qpth(M, c, b, eta=qp_eta)
+            return w_star
     else:
+        # solver == "lp": pure LP via Gurobi (barrier + crossover) with
+        # basis-restricted backward in DifferentiableReducedLP.
         def solve_lp(M, c, b):
             return differentiable_reduced_lp(M, c, b)
 
@@ -269,21 +279,24 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 else:
                     batch = buffer
 
-                shaped_batch = {kk: v for kk, v in batch.items()}
-                shaped_batch["rewards"] = compute_shaped_rewards(
+                shaped_rewards = compute_shaped_rewards(
                     batch["states"], batch["actions"], batch["rewards"])
-                M_shaped, c_shaped, b_shaped = estimate_lp_matrices(
-                    features, shaped_batch, gamma=cfg.gamma, ridge=cfg.ridge)
+
+                # M and b don't depend on rewards — estimate once, derive
+                # c_shaped (for the LP forward) and c_true (for the loss)
+                # from the same Phi_sa with two cheap reductions.
+                M, b, Phi_sa = estimate_lp_matrices_shared(
+                    features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
+                N_b = Phi_sa.shape[0]
+                c_shaped = -(Phi_sa * shaped_rewards.unsqueeze(1)).sum(dim=0) / N_b
+                c_true = -(Phi_sa * batch["rewards"].unsqueeze(1)).sum(dim=0) / N_b
 
                 _t = time.time()
-                w_star_inner = solve_lp(M_shaped, c_shaped, b_shaped)
+                w_star_inner = solve_lp(M, c_shaped, b)
                 solver_forward_time += time.time() - _t
 
-                M_true, c_true, b_true = estimate_lp_matrices(
-                    features, batch, gamma=cfg.gamma, ridge=cfg.ridge)
-
                 lp_obj = c_true @ w_star_inner
-                violation = b_true - M_true @ w_star_inner
+                violation = b - M @ w_star_inner
                 aug_lag = rho * violation.pow(2).sum()
 
                 loss = (lp_obj + aug_lag) * lp_weight

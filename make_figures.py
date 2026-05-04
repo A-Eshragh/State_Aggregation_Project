@@ -34,20 +34,22 @@ RC = {
 }
 LABELS = {
     "twostage": "Two-stage", "dfl": "DFL-LP", "dfl_qpth": "DFL-QP",
-    "dfl_sketch": "DFL-SA", "neural_dfl": "DFL-LP", "dfl_dr": "DFL-SA",
-    "two_stage_mbrl": "Two-stage",
+    "dfl_sketch": "DFL-Sketch", "neural_dfl": "DFL-LP", "dfl_dr": "DFL-SA",
+    "cp_sketch": "DFL-Sketch", "two_stage_mbrl": "Two-stage",
 }
 COLORS = {
     "twostage": "#ff7f0e", "dfl": "#1f77b4", "dfl_qpth": "#2ca02c",
     "dfl_sketch": "#9467bd", "neural_dfl": "#1f77b4", "dfl_dr": "#9467bd",
-    "two_stage_mbrl": "#ff7f0e",
+    "cp_sketch": "#d62728", "two_stage_mbrl": "#ff7f0e",
 }
 LS = {
     "twostage": "--", "dfl": "-", "dfl_qpth": "-", "dfl_sketch": "-",
-    "neural_dfl": "-", "dfl_dr": "-", "two_stage_mbrl": "--",
+    "neural_dfl": "-", "dfl_dr": "-", "cp_sketch": "-",
+    "two_stage_mbrl": "--",
 }
 INV_COST_ORDER = ("twostage", "dfl", "dfl_qpth", "dfl_sketch")
-CP_COST_ORDER  = ("two_stage_mbrl", "neural_dfl", "dfl_qpth", "dfl_dr")
+CP_COST_ORDER  = ("two_stage_mbrl", "neural_dfl", "dfl_qpth", "dfl_dr",
+                  "cp_sketch")
 
 
 # ── Shared rendering primitives ──────────────────────────────────────────
@@ -112,9 +114,13 @@ def _mse(xs: np.ndarray):
 
 def render_inventory(out: Path, results_root: Path,
                      seeds: Optional[List[int]] = None) -> None:
-    grouped, sketch_by_nagg = inv_mod.collect_runs(
+    grouped, sketch_r01 = inv_mod.collect_runs(
+        exp="b", cost="normal_margin", sketch_K=8, sketch_r=0.1,
+        seeds=seeds, sketch_canonical_nagg=-1, results_root=results_root,
+    )
+    _, sketch_r02 = inv_mod.collect_runs(
         exp="b", cost="normal_margin", sketch_K=8, sketch_r=0.2,
-        seeds=seeds, sketch_canonical_nagg=10, results_root=results_root,
+        seeds=seeds, sketch_canonical_nagg=-1, results_root=results_root,
     )
 
     def curves(ax):
@@ -127,7 +133,8 @@ def render_inventory(out: Path, results_root: Path,
         ax.grid(True, alpha=0.3); ax.legend(loc="lower right")
 
     def quality(ax):
-        # All four methods as bars; DFL-SA expands across M=10/20/30.
+        # Non-sketch methods + new DFL-Sketch (K=8, r=0.1) +
+        # DFL-Sketch sweep over M=10/20/30 (K=8, r=0.2).
         keys, labels, means, ses = [], [], [], []
         def _add(key, label, vals):
             if vals.size == 0: return
@@ -140,9 +147,13 @@ def render_inventory(out: Path, results_root: Path,
              inv_mod._test_regret_pct(grouped.get("dfl", [])))
         _add("dfl_qpth", LABELS["dfl_qpth"],
              inv_mod._test_regret_pct(grouped.get("dfl_qpth", [])))
-        for n_agg in sorted(k for k in sketch_by_nagg if k > 0):
-            _add("dfl_sketch", f"DFL-SA\nM={n_agg}",
-                 inv_mod._test_regret_pct(sketch_by_nagg[n_agg]))
+        if sketch_r01.get(-1):
+            _add("dfl_sketch", "DFL-Sketch",
+                 inv_mod._test_regret_pct(sketch_r01[-1]))
+        for n_agg in (10, 20, 30):
+            if sketch_r02.get(n_agg):
+                _add("dfl_sketch", f"DFL-Sketch\nM={n_agg}",
+                     inv_mod._test_regret_pct(sketch_r02[n_agg]))
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel="Test regret",
                title="Inventory MDP — Decision quality")
@@ -152,23 +163,32 @@ def render_inventory(out: Path, results_root: Path,
         ax.set_axisbelow(True)
 
     def cost(ax):
-        # Use full per-epoch wall-clock for every method so two-stage's
-        # MSE-only training is compared on the same accounting as DFL
-        # methods' MSE + decision-aware solver passes.
-        keys, means, ses = [], [], []
-        for m in INV_COST_ORDER:
-            totals = []
-            for d in grouped.get(m, []):
-                ts = d.get("train_time") or []
-                if ts:
-                    totals.append(float(np.sum(ts)))
+        # Full per-epoch wall-clock so two-stage's MSE-only training is
+        # compared on the same accounting as DFL methods' MSE + solver
+        # passes. DFL-Sketch contributes one bar per (K=8 r=0.1) and
+        # M=10/20/30 (K=8 r=0.2).
+        keys, labels, means, ses = [], [], [], []
+        def _add(key, label, runs):
+            totals = [float(np.sum(d.get("train_time") or []))
+                      for d in runs if d.get("train_time")]
             v = np.array(totals)
             if v.size:
                 mu, s = _mse(v)
-                keys.append(m); means.append(mu); ses.append(s)
-        _bars(ax, keys, means, ses, log=False)
+                keys.append(key); labels.append(label)
+                means.append(mu); ses.append(s)
+        _add("twostage", LABELS["twostage"], grouped.get("twostage", []))
+        _add("dfl",      LABELS["dfl"],      grouped.get("dfl", []))
+        _add("dfl_qpth", LABELS["dfl_qpth"], grouped.get("dfl_qpth", []))
+        if sketch_r01.get(-1):
+            _add("dfl_sketch", "DFL-Sketch", sketch_r01[-1])
+        for n_agg in (10, 20, 30):
+            if sketch_r02.get(n_agg):
+                _add("dfl_sketch", f"DFL-Sketch\nM={n_agg}",
+                     sketch_r02[n_agg])
+        _bars(ax, keys, means, ses, labels=labels, log=False)
         ax.set(ylabel="Total training time (s)",
                title="Inventory MDP — Compute cost")
+        ax.tick_params(axis="x", labelsize=RC["xtick.labelsize"] - 1)
         ax.grid(True, axis="y", alpha=0.3)
 
     _save(curves, out / "inventory_training_curves.pdf")
@@ -207,15 +227,18 @@ def render_cartpole(out: Path) -> None:
     dr_p     = (snf._load_or_none(
         snf._sweep_cache_key("curve_neural_dfl", snf_ns, dr_nf))
         if dr_nf is not None else None)
+    sketch_p = m1._load_or_none(
+        m1._cache_key("curve_sketch", m1_ns) + "_K8_r0.2_mgaussian")
 
     arr = lambda p: cp_mod._curve_from_payload(p, requested)
-    neural_a, qpth_a, mbrl_a, dr_a = (arr(neural_p), arr(qpth_p),
-                                      arr(mbrl_p), arr(dr_p))
+    neural_a, qpth_a, mbrl_a, dr_a, sketch_a = (
+        arr(neural_p), arr(qpth_p), arr(mbrl_p), arr(dr_p), arr(sketch_p))
 
     def curves(ax):
         series = [(k, a) for k, a in (("neural_dfl", neural_a),
                                       ("dfl_qpth", qpth_a),
                                       ("dfl_dr", dr_a),
+                                      ("cp_sketch", sketch_a),
                                       ("two_stage_mbrl", mbrl_a))
                   if a is not None]
         L = min(a.shape[1] for _, a in series) if series else 0
@@ -262,6 +285,8 @@ def render_cartpole(out: Path) -> None:
                     if metric == "best"
                     else np.array([r[-1] for r in runs], dtype=float))
             _add("dfl_dr", f"DFL-SA\nd={d}", 200.0 - vals)
+        _add("cp_sketch", LABELS["cp_sketch"],
+             _final(sketch_a) if sketch_a is not None else np.array([]))
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel=f"Test regret",
                title="CartPole — Decision quality")
@@ -273,7 +298,8 @@ def render_cartpole(out: Path) -> None:
     def cost(ax):
         # Full wall-clock per seed for every method (apples-to-apples).
         payloads = {"neural_dfl": neural_p, "dfl_qpth": qpth_p,
-                    "dfl_dr": dr_p, "two_stage_mbrl": mbrl_p}
+                    "dfl_dr": dr_p, "cp_sketch": sketch_p,
+                    "two_stage_mbrl": mbrl_p}
         keys, means, ses = [], [], []
         for k in CP_COST_ORDER:
             ts = cp_mod._times_from_payload(payloads[k], requested,
