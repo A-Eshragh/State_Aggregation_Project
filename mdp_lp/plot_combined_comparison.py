@@ -1361,10 +1361,13 @@ def plot_three_methods_row(
     output_dir=None,
     cache_dir=None,
     recompute=None,
-    out_name='landscape_three_methods_row.pdf',
+    out_name='LP_loss_landscape.pdf',
 ):
-    """2x3 figure on the original (un-aggregated) LP. Top row: loss
-    landscape; bottom row: autograd dL/dλ. Columns:
+    """Two figures on the original (un-aggregated) LP. The main figure is
+    a 2x3 grid: top row = loss landscape, bottom row = finite-difference
+    dL/dλ. A companion 1x3 figure (`<out_name>_autograd.pdf`) holds the
+    autograd dL/dλ row alone, with the same column titles so it stacks
+    vertically with the main figure. Columns:
         (a) -r_true^T y*(λ)                                          — original DFL loss
         (b) L_aug    = -r_true^T y*       + ρ ||γ_true - H_true y*||²  — aug. Lagrangian
         (c) L_sketch = -r_true^T ȳ_sketch + ρ ||γ_true - H_true ȳ||²   — aug. Lagrangian + sketch
@@ -1515,29 +1518,28 @@ def plot_three_methods_row(
         _wide_fd_at(L_sketch, int(np.argmin(L_sketch))),
     ]
 
-    try:
-        fig, axes = plt.subplots(3, 3, figsize=(14.8, 10.8),
-                                 gridspec_kw={'hspace': 0.34, 'wspace': 0.30})
+    titles = [
+        '(a) Original DFL',
+        '(b) Augmented Lagrangian',
+        '(c) Aug. Lagrangian + Sketch',
+    ]
+    ylabels = [
+        'Loss',
+        'Loss (with penalty)',
+        'Loss (penalty + sketch)',
+    ]
+    autograd_ylabel = r'$dL/d\lambda$  (autograd)'
+    fd_ylabel = r'$dL/d\lambda$'
+    fd_ylim = (-150.0, 150.0)
+    loss_curves = [L_orig, L_aug, L_sketch]
+    grad_curves = [g_orig, g_aug, g_sketch]
+    colors = ['#455A64', '#E65100', '#1565C0']
+    lam_true_color = '#D32F2F'
+    minimiser_color = '#2E7D32'
 
-        titles = [
-            r'(a) $-r_{\mathrm{true}}^{\!\top}\,y^{*}(\lambda)$',
-            r'(b) Augmented Lagrangian',
-            r'(c) Aug. Lagrangian + Sketch',
-        ]
-        ylabels = [
-            r'$-r_{\mathrm{true}}^{\!\top}\,y^{*}(\lambda)$',
-            r'$\mathcal{L}_{\mathrm{aug}}(\lambda)$',
-            r'$\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}(\lambda)$',
-        ]
-        loss_curves = [L_orig, L_aug, L_sketch]
-        grad_curves = [g_orig, g_aug, g_sketch]
-        colors = ['#455A64', '#E65100', '#1565C0']
-        lam_true_color = '#D32F2F'
-        minimiser_color = '#2E7D32'
-
-        # Row 1: loss landscapes.
+    def _draw_loss_row(row_axes):
         for ax, y, ttl, lbl, c, lam_s, sv in zip(
-                axes[0], loss_curves, titles, ylabels, colors, lam_stars,
+                row_axes, loss_curves, titles, ylabels, colors, lam_stars,
                 star_vals):
             ax.plot(lambda_values, y, lw=1.8, color=c, solid_capstyle='round')
             ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
@@ -1552,63 +1554,71 @@ def plot_three_methods_row(
             ax.grid(True, alpha=0.35, ls=':', lw=0.7)
             ax.legend(loc='best')
 
-        # Row 2: autograd dL/dλ (within-basis derivative; misses LP kinks).
-        autograd_ylabels = [
-            r'$d(-r_{\mathrm{true}}^{\!\top} y^{*})/d\lambda$  (autograd)',
-            r'$d\mathcal{L}_{\mathrm{aug}}/d\lambda$  (autograd)',
-            r'$d\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}/d\lambda$  (autograd)',
-        ]
-        for ax, g, c, lam_s, lbl in zip(
-                axes[1], grad_curves, colors, lam_stars, autograd_ylabels):
+    def _draw_autograd_row(row_axes):
+        # Within-basis derivative; misses LP kinks.
+        for ax, g, c, lam_s, ttl in zip(
+                row_axes, grad_curves, colors, lam_stars, titles):
             ax.plot(lambda_values, g, lw=1.8, color=c, solid_capstyle='round')
             ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
                        alpha=0.9,
                        label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
             ax.axhline(0.0, color='black', lw=1.0, alpha=0.80)
-
             g_at_star = float(np.interp(lam_s, lambda_values, g))
             ax.plot(lam_s, g_at_star, marker='o', mfc=minimiser_color,
                     mec='white', ms=9, mew=1.3, ls='', zorder=5,
                     label=rf'$\lambda^{{*}}={lam_s:.2f}$')
-
-            ax.set_ylabel(lbl)
+            ax.set_title(ttl, pad=8)
+            ax.set_ylabel(autograd_ylabel)
+            ax.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
             ax.set_xlim(lambda_values[0], lambda_values[-1])
             ax.grid(True, alpha=0.35, ls=':', lw=0.7)
             ax.legend(loc='best')
 
-        # Row 3: finite-difference dL/dλ. FD captures basis-change drops, so
-        # its zero coincides with argmin(L) on smooth panels.
-        fd_ylabels = [
-            r'$d(-r_{\mathrm{true}}^{\!\top} y^{*})/d\lambda$  (finite diff.)',
-            r'$d\mathcal{L}_{\mathrm{aug}}/d\lambda$  (finite diff.)',
-            r'$d\mathcal{L}_{\mathrm{aug}}^{\mathrm{sketch}}/d\lambda$  (finite diff.)',
-        ]
-        for ax, gfd, c, lam_s, lbl, gfd_dot in zip(
-                axes[2], fd_curves, colors, lam_stars, fd_ylabels,
-                fd_dot_vals):
+    def _draw_fd_row(row_axes, set_xlabel=True):
+        # FD captures basis-change drops, so its zero coincides with argmin(L)
+        # on smooth panels.
+        for ax, gfd, c, lam_s, gfd_dot in zip(
+                row_axes, fd_curves, colors, lam_stars, fd_dot_vals):
             ax.plot(lambda_values, gfd, lw=1.8, color=c, solid_capstyle='round')
             ax.axvline(LAMBDA_TRUE, color=lam_true_color, ls='--', lw=1.3,
                        alpha=0.9,
                        label=rf'$\lambda_{{\mathrm{{true}}}}={LAMBDA_TRUE:g}$')
             ax.axhline(0.0, color='black', lw=1.0, alpha=0.80)
-
             ax.plot(lam_s, gfd_dot, marker='o', mfc=minimiser_color,
                     mec='white', ms=9, mew=1.3, ls='', zorder=5,
                     label=rf'$\lambda^{{*}}={lam_s:.2f}$')
-
-            ax.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
-            ax.set_ylabel(lbl)
+            if set_xlabel:
+                ax.set_xlabel(r'$\lambda_{\mathrm{pred}}$')
+            ax.set_ylabel(fd_ylabel)
             ax.set_xlim(lambda_values[0], lambda_values[-1])
+            ax.set_ylim(*fd_ylim)
             ax.grid(True, alpha=0.35, ls=':', lw=0.7)
             ax.legend(loc='best')
 
+    try:
+        # Main figure: row 1 = loss, row 2 = finite-diff dL/dλ.
+        fig, axes = plt.subplots(2, 3, figsize=(14.8, 7.2),
+                                 gridspec_kw={'hspace': 0.34, 'wspace': 0.30})
+        _draw_loss_row(axes[0])
+        _draw_fd_row(axes[1])
         out_path = os.path.join(output_dir, out_name)
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
+
+        # Companion figure: autograd dL/dλ alone, same column titles so it
+        # aligns vertically with the main figure when stacked in a slide.
+        autograd_name = os.path.splitext(out_name)[0] + '_autograd.pdf'
+        fig_a, axes_a = plt.subplots(1, 3, figsize=(14.8, 3.6),
+                                     gridspec_kw={'wspace': 0.30})
+        _draw_autograd_row(axes_a)
+        autograd_path = os.path.join(output_dir, autograd_name)
+        plt.savefig(autograd_path, bbox_inches='tight')
+        plt.close(fig_a)
     finally:
         plt.rcParams.update(prev_rc)
 
-    print(f"\nSaved 3x3 three-methods landscape+gradient to {out_path}")
+    print(f"\nSaved 2x3 three-methods landscape+FD to {out_path}")
+    print(f"Saved 1x3 autograd companion to {autograd_path}")
     print(f"  λ*  (a) -r^T y*                                                        = {lam_stars[0]:.3f}   loss {star_vals[0]:.4f}")
     print(f"  λ*  (b) aug-lag (ρ={rho:g})                                             = {lam_stars[1]:.3f}   loss {star_vals[1]:.4f}")
     print(f"  λ*  (c) aug-lag + sketch (ρ={rho:g}, K={sketch_K}, k/M={sketch_ratio:g}, σ={cost_sigma:g}) = {lam_stars[2]:.3f}   loss {star_vals[2]:.4f}")
@@ -2121,11 +2131,16 @@ def main():
                              'deterministic and reproducible).')
     # 1x3 three-methods row: r^T y* | aug. Lagrangian | sketch-and-solve.
     parser.add_argument('--three-methods-row', action='store_true',
-                        help='Produce a 2x3 figure: row 1 = loss landscape, '
-                             'row 2 = autograd dL/dλ. Columns: '
-                             '(a) -r_true^T y*, (b) augmented Lagrangian, '
-                             '(c) augmented Lagrangian + sketch. Saved as '
-                             'landscape_three_methods_row.pdf.')
+                        help='Produce two figures on the un-aggregated LP. '
+                             'Main: 2x3 grid (row 1 = loss landscape, '
+                             'row 2 = finite-difference dL/dλ), saved as '
+                             'landscape_three_methods_row.pdf. Companion: '
+                             '1x3 autograd dL/dλ row with matching column '
+                             'titles, saved as '
+                             'landscape_three_methods_row_autograd.pdf. '
+                             'Columns: (a) Original DFL, '
+                             '(b) Augmented Lagrangian, '
+                             '(c) Aug. Lagrangian + Sketch.')
     parser.add_argument('--three-methods-rho', type=float, default=10.0,
                         help='ρ used in the augmented-Lagrangian columns (b) '
                              'and (c) of --three-methods-row.')

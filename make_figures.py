@@ -36,19 +36,22 @@ LABELS = {
     "twostage": "Two-stage", "dfl": "DFL-LP", "dfl_qpth": "DFL-QP",
     "dfl_sketch": "DFL-Sketch", "neural_dfl": "DFL-LP", "dfl_dr": "DFL-SA",
     "cp_sketch": "DFL-Sketch", "two_stage_mbrl": "Two-stage",
+    "dfl_sa_M10": "DFL-SA (M = 10)",
 }
 COLORS = {
     "twostage": "#ff7f0e", "dfl": "#1f77b4", "dfl_qpth": "#2ca02c",
     "dfl_sketch": "#9467bd", "neural_dfl": "#1f77b4", "dfl_dr": "#9467bd",
     "cp_sketch": "#d62728", "two_stage_mbrl": "#ff7f0e",
+    "dfl_sa_M10": "#d62728",
 }
 LS = {
-    "twostage": "--", "dfl": "-", "dfl_qpth": "-", "dfl_sketch": "-",
-    "neural_dfl": "-", "dfl_dr": "-", "cp_sketch": "-",
+    "twostage": "--", "dfl": "-", "dfl_qpth": "-", "dfl_sketch": ":",
+    "neural_dfl": "-", "dfl_dr": "-", "cp_sketch": ":",
     "two_stage_mbrl": "--",
+    "dfl_sa_M10": "-",
 }
 INV_COST_ORDER = ("twostage", "dfl", "dfl_qpth", "dfl_sketch")
-CP_COST_ORDER  = ("two_stage_mbrl", "neural_dfl", "dfl_qpth", "dfl_dr",
+CP_COST_ORDER  = ("two_stage_mbrl", "dfl_qpth", "neural_dfl", "dfl_dr",
                   "cp_sketch")
 
 
@@ -124,10 +127,13 @@ def render_inventory(out: Path, results_root: Path,
     )
 
     def curves(ax):
-        for m in ("twostage", "dfl", "dfl_qpth", "dfl_sketch"):
+        for m in ("twostage", "dfl_qpth", "dfl", "dfl_sketch"):
             arr = inv_mod._per_epoch_train_reward(grouped.get(m, []))
             if arr is not None:
                 _curve(ax, arr, m, LABELS[m])
+        sa10 = inv_mod._per_epoch_train_reward(sketch_r02.get(10, []))
+        if sa10 is not None:
+            _curve(ax, sa10, "dfl_sa_M10", LABELS["dfl_sa_M10"])
         ax.set(xlabel="Training epoch", ylabel="Training reward",
                title="Inventory MDP — Training curves")
         ax.grid(True, alpha=0.3); ax.legend(loc="lower right")
@@ -141,18 +147,18 @@ def render_inventory(out: Path, results_root: Path,
             mu, se = _mse(vals)
             keys.append(key); labels.append(label)
             means.append(mu); ses.append(se)
-        _add("twostage", LABELS["twostage"],
+        _add("twostage", "TS",
              inv_mod._test_regret_pct(grouped.get("twostage", [])))
-        _add("dfl", LABELS["dfl"],
-             inv_mod._test_regret_pct(grouped.get("dfl", [])))
-        _add("dfl_qpth", LABELS["dfl_qpth"],
+        _add("dfl_qpth", "QP",
              inv_mod._test_regret_pct(grouped.get("dfl_qpth", [])))
+        _add("dfl", "LP",
+             inv_mod._test_regret_pct(grouped.get("dfl", [])))
         if sketch_r01.get(-1):
-            _add("dfl_sketch", "DFL-Sketch",
+            _add("dfl_sketch", "Sketch",
                  inv_mod._test_regret_pct(sketch_r01[-1]))
         for n_agg in (10, 20, 30):
             if sketch_r02.get(n_agg):
-                _add("dfl_sketch", f"DFL-Sketch\nM={n_agg}",
+                _add("dfl_sketch", f"SA\nM={n_agg}",
                      inv_mod._test_regret_pct(sketch_r02[n_agg]))
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel="Test regret",
@@ -176,14 +182,14 @@ def render_inventory(out: Path, results_root: Path,
                 mu, s = _mse(v)
                 keys.append(key); labels.append(label)
                 means.append(mu); ses.append(s)
-        _add("twostage", LABELS["twostage"], grouped.get("twostage", []))
-        _add("dfl",      LABELS["dfl"],      grouped.get("dfl", []))
-        _add("dfl_qpth", LABELS["dfl_qpth"], grouped.get("dfl_qpth", []))
+        _add("twostage", "TS", grouped.get("twostage", []))
+        _add("dfl_qpth", "QP", grouped.get("dfl_qpth", []))
+        _add("dfl",      "LP", grouped.get("dfl", []))
         if sketch_r01.get(-1):
-            _add("dfl_sketch", "DFL-Sketch", sketch_r01[-1])
+            _add("dfl_sketch", "Sketch", sketch_r01[-1])
         for n_agg in (10, 20, 30):
             if sketch_r02.get(n_agg):
-                _add("dfl_sketch", f"DFL-Sketch\nM={n_agg}",
+                _add("dfl_sketch", f"SA\nM={n_agg}",
                      sketch_r02[n_agg])
         _bars(ax, keys, means, ses, labels=labels, log=False)
         ax.set(ylabel="Total training time (s)",
@@ -235,18 +241,21 @@ def render_cartpole(out: Path) -> None:
         arr(neural_p), arr(qpth_p), arr(mbrl_p), arr(dr_p), arr(sketch_p))
 
     def curves(ax):
-        series = [(k, a) for k, a in (("neural_dfl", neural_a),
-                                      ("dfl_qpth", qpth_a),
-                                      ("dfl_dr", dr_a),
-                                      ("cp_sketch", sketch_a),
-                                      ("two_stage_mbrl", mbrl_a))
+        dr_label = (f"DFL-SA (d = {dr_nf})"
+                    if dr_nf is not None else LABELS["dfl_dr"])
+        series = [(k, a, lbl) for k, a, lbl in (
+                      ("two_stage_mbrl", mbrl_a, LABELS["two_stage_mbrl"]),
+                      ("dfl_qpth", qpth_a, LABELS["dfl_qpth"]),
+                      ("neural_dfl", neural_a, LABELS["neural_dfl"]),
+                      ("cp_sketch", sketch_a, LABELS["cp_sketch"]),
+                      ("dfl_dr", dr_a, dr_label))
                   if a is not None]
-        L = min(a.shape[1] for _, a in series) if series else 0
-        for k, a in series:
+        L = min(a.shape[1] for _, a, _ in series) if series else 0
+        for k, a, lbl in series:
             d = a[:, :L]
             if args.show_running_max:
                 d = np.maximum.accumulate(d, axis=1)
-            _curve(ax, d, k, LABELS[k])
+            _curve(ax, d, k, lbl)
         ax.set(xlabel="Training iteration",
                ylabel=("Avg. episode reward"
                        if args.show_running_max else "Avg. episode reward"),
@@ -269,12 +278,14 @@ def render_cartpole(out: Path) -> None:
             mu, se = _mse(vals)
             keys.append(key); labels.append(label)
             means.append(mu); ses.append(se)
-        _add("two_stage_mbrl", LABELS["two_stage_mbrl"],
+        _add("two_stage_mbrl", "TS",
              _final(mbrl_a) if mbrl_a is not None else np.array([]))
-        _add("neural_dfl", LABELS["neural_dfl"],
-             _final(neural_a) if neural_a is not None else np.array([]))
-        _add("dfl_qpth", LABELS["dfl_qpth"],
+        _add("dfl_qpth", "QP",
              _final(qpth_a) if qpth_a is not None else np.array([]))
+        _add("neural_dfl", "LP",
+             _final(neural_a) if neural_a is not None else np.array([]))
+        _add("cp_sketch", "Sketch",
+             _final(sketch_a) if sketch_a is not None else np.array([]))
         for d in (16, 32, 64):
             payload = snf._load_or_none(
                 snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
@@ -284,9 +295,7 @@ def render_cartpole(out: Path) -> None:
             vals = (np.array([max(r) for r in runs], dtype=float)
                     if metric == "best"
                     else np.array([r[-1] for r in runs], dtype=float))
-            _add("dfl_dr", f"DFL-SA\nd={d}", 200.0 - vals)
-        _add("cp_sketch", LABELS["cp_sketch"],
-             _final(sketch_a) if sketch_a is not None else np.array([]))
+            _add("dfl_dr", f"SA\nd={d}", 200.0 - vals)
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel=f"Test regret",
                title="CartPole — Decision quality")
@@ -297,19 +306,27 @@ def render_cartpole(out: Path) -> None:
 
     def cost(ax):
         # Full wall-clock per seed for every method (apples-to-apples).
-        payloads = {"neural_dfl": neural_p, "dfl_qpth": qpth_p,
-                    "dfl_dr": dr_p, "cp_sketch": sketch_p,
-                    "two_stage_mbrl": mbrl_p}
-        keys, means, ses = [], [], []
-        for k in CP_COST_ORDER:
-            ts = cp_mod._times_from_payload(payloads[k], requested,
+        # SA expands across d=16/32/64 (matching the decision-quality panel).
+        fixed = (("two_stage_mbrl", mbrl_p, "TS"),
+                 ("dfl_qpth", qpth_p, "QP"),
+                 ("neural_dfl", neural_p, "LP"),
+                 ("cp_sketch", sketch_p, "Sketch"))
+        keys, labels, means, ses = [], [], [], []
+        def _add(key, payload, label):
+            ts = cp_mod._times_from_payload(payload, requested,
                                             key="times_per_seed")
             if ts is None or ts.size == 0:
-                continue
-            keys.append(k)
+                return
+            keys.append(key); labels.append(label)
             means.append(float(ts.mean()))
             ses.append(float(ts.std() / np.sqrt(max(ts.size, 1))))
-        _bars(ax, keys, means, ses, log=False)
+        for k, p, lbl in fixed:
+            _add(k, p, lbl)
+        for d in (16, 32, 64):
+            payload = snf._load_or_none(
+                snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
+            _add("dfl_dr", payload, f"SA\nd={d}")
+        _bars(ax, keys, means, ses, labels=labels, log=False)
         ax.set(ylabel="Total training time (s)",
                title="CartPole — Compute cost")
         ax.grid(True, axis="y", alpha=0.3)
