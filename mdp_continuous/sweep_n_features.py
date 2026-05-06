@@ -200,9 +200,9 @@ def parse_args():
     p.add_argument("--td_weight", type=float, default=0.013)
     p.add_argument("--n_trajectories", type=int, default=100)
 
-    p.add_argument("--pretrain_epochs_ts", type=int, default=100)
+    p.add_argument("--pretrain_epochs_ts", type=int, default=30)
     p.add_argument("--pretrain_epochs_dfl", type=int, default=30)
-    p.add_argument("--n_iterations", type=int, default=16)
+    p.add_argument("--n_iterations", type=int, default=60)
     p.add_argument("--n_eval_episodes", type=int, default=100)
     p.add_argument("--n_ce_steps", type=int, default=0)
     p.add_argument("--n_dfl_steps", type=int, default=5)
