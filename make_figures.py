@@ -40,9 +40,9 @@ LABELS = {
 }
 COLORS = {
     "twostage": "#ff7f0e", "dfl": "#1f77b4", "dfl_qpth": "#2ca02c",
-    "dfl_sketch": "#9467bd", "neural_dfl": "#1f77b4", "dfl_dr": "#9467bd",
+    "dfl_sketch": "#d62728", "neural_dfl": "#1f77b4", "dfl_dr": "#9467bd",
     "cp_sketch": "#d62728", "two_stage_mbrl": "#ff7f0e",
-    "dfl_sa_M10": "#d62728",
+    "dfl_sa_M10": "#9467bd",
 }
 LS = {
     "twostage": "--", "dfl": "-", "dfl_qpth": "-", "dfl_sketch": ":",
@@ -158,7 +158,7 @@ def render_inventory(out: Path, results_root: Path,
                  inv_mod._test_regret_pct(sketch_r01[-1]))
         for n_agg in (10, 20, 30):
             if sketch_r02.get(n_agg):
-                _add("dfl_sketch", f"SA\nM={n_agg}",
+                _add("dfl_sa_M10", f"SA\nM={n_agg}",
                      inv_mod._test_regret_pct(sketch_r02[n_agg]))
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel="Test regret",
@@ -189,7 +189,7 @@ def render_inventory(out: Path, results_root: Path,
             _add("dfl_sketch", "Sketch", sketch_r01[-1])
         for n_agg in (10, 20, 30):
             if sketch_r02.get(n_agg):
-                _add("dfl_sketch", f"SA\nM={n_agg}",
+                _add("dfl_sa_M10", f"SA\nM={n_agg}",
                      sketch_r02[n_agg])
         _bars(ax, keys, means, ses, labels=labels, log=False)
         ax.set(ylabel="Total training time (s)",

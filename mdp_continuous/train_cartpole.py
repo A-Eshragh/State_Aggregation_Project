@@ -40,7 +40,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    dfl_lr: float = None,
                    data: dict = None,
                    world_model=None,
-                   solver: str = "lp"):
+                   solver: str = "lp",
+                   alpha_shape: float = 2.0):
     assert eval_policy_type in ("ce", "lp")
     assert solver in ("lp", "gurobi_qp", "qpth")
     device = torch.device("cpu")
@@ -154,7 +155,6 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
     # dfl_optimizer = torch.optim.Adam(features.parameters(), lr=cfg.lr)
     dfl_optimizer = torch.optim.Adam(list(features.parameters()) + [w_head], lr=dfl_lr)
-    alpha_shape = 2.0
     rho = cfg.rho
     lp_weight = 1
 
@@ -376,7 +376,9 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
                        n_initial_synthetic: int = 0,
                        syn_buffer_max: int = 200_000,
                        eps_greedy: float = 0.1,
-                       target_update_iters: int = 1):
+                       target_update_iters: int = 1,
+                       bc_alpha: float = 0.0,
+                       bc_pretrain_epochs: int = 30):
     import torch.nn as nn
     import torch.nn.functional as F
     from .world_model import train_world_model
@@ -474,10 +476,62 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
         rb_pos = int((rb_pos + n) % syn_buffer_max)
         rb_size = int(min(rb_size + n, syn_buffer_max))
 
-    rb_add(real["states"], real["actions"].long(), real["rewards"],
+    # Optional BC reward shaping: train a BC head on the offline data
+    # (same recipe as run_neural_dfl's pretrain phase) and add
+    # bc_alpha * pi_bc(a|s) to every transition's reward. This lets MBRL
+    # receive the same imitation signal that DFL gets from
+    # compute_shaped_rewards, so the Two-stage vs DFL comparison is not
+    # confounded by an asymmetric BC bonus.
+    bc_features = None
+    bc_w_head = None
+    if bc_alpha > 0.0:
+        bc_features = ActionIndexedFeatures(
+            state_dim=state_dim, n_actions=A,
+            n_features=cfg.n_features,
+            hidden_dims=cfg.neural_hidden,
+        ).to(device)
+        k_bc = bc_features.d_per_action
+        bc_w_head = torch.randn(k_bc, A, device=device, requires_grad=True)
+        bc_opt = torch.optim.Adam(
+            list(bc_features.parameters()) + [bc_w_head], lr=cfg.lr)
+        bc_ce = nn.CrossEntropyLoss()
+        N_bc = real["states"].shape[0]
+        bc_batch = min(4096, N_bc)
+        for _ in range(bc_pretrain_epochs):
+            bc_opt.zero_grad()
+            idx = torch.randperm(N_bc)[:bc_batch]
+            f_s = bc_features._state_features(real["states"][idx])
+            logits = f_s @ bc_w_head
+            loss = bc_ce(logits, real["actions"][idx].long())
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(bc_features.parameters(), max_norm=1.0)
+            bc_opt.step()
+        for p in bc_features.parameters():
+            p.requires_grad_(False)
+        bc_w_head.requires_grad_(False)
+        if verbose:
+            with torch.no_grad():
+                acc = (logits.argmax(1) == real["actions"][idx].long()
+                       ).float().mean().item()
+            print(f"  [BC shaping] pretrained head, acc={acc:.3f}, "
+                  f"alpha={bc_alpha}")
+
+    def _bc_bonus(states, actions):
+        if bc_features is None:
+            return torch.zeros(states.shape[0], device=device)
+        with torch.no_grad():
+            probs = torch.softmax(
+                bc_features._state_features(states) @ bc_w_head, dim=1)
+            return bc_alpha * probs.gather(
+                1, actions.long().unsqueeze(1)).squeeze(1)
+
+    real_shaped_rewards = real["rewards"] + _bc_bonus(
+        real["states"], real["actions"].long())
+    rb_add(real["states"], real["actions"].long(), real_shaped_rewards,
            real["next_states"], real["dones"].bool())
     if verbose:
-        print(f"  Replay seeded with {rb_size} real transitions")
+        print(f"  Replay seeded with {rb_size} real transitions"
+              f"{' (shaped)' if bc_alpha > 0 else ''}")
 
     # ── 4b. One-shot synthetic data via the frozen world model ─────
     # Roll out the behavior policy in the model to expand state-action
@@ -493,7 +547,9 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
                 rollout_length=max(rollout_length, 1),
                 action_policy=lambda s: behavior_policy(s).long())
         if syn["states"].numel() > 0:
-            rb_add(syn["states"], syn["actions"].long(), syn["rewards"],
+            syn_shaped_rewards = syn["rewards"] + _bc_bonus(
+                syn["states"], syn["actions"].long())
+            rb_add(syn["states"], syn["actions"].long(), syn_shaped_rewards,
                    syn["next_states"], syn["dones"].bool())
             if verbose:
                 print(f"  Replay augmented with {syn['states'].shape[0]} "
@@ -534,7 +590,8 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
                     sn_act, r_act = world_model.sample_next(
                         s_act, a_act, deterministic=True)
                     done_act = dynamics.is_terminal(sn_act)
-                    rb_add(s_act, a_act, r_act, sn_act, done_act)
+                    r_shaped = r_act + _bc_bonus(s_act, a_act)
+                    rb_add(s_act, a_act, r_shaped, sn_act, done_act)
                     s_new = s.clone()
                     s_new[alive] = sn_act
                     s = s_new
