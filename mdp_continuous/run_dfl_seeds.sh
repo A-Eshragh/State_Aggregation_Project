@@ -7,37 +7,41 @@ cd "$ROOT"
 # SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20}"
 SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10}"
 WORKERS="${WORKERS:-10}"
-# N_FEATURES_LIST="${N_FEATURES_LIST:-8 16 32 64 128 256 1024}"
-N_FEATURES_LIST="${N_FEATURES_LIST:-16 32 48}"
-SA_K="${SA_K:-4}"
-SA_RATIO="${SA_RATIO:-0.8}"
 
 echo "[reproduce] seeds=$SEEDS"
 echo "[reproduce] workers=$WORKERS"
-echo "[reproduce] n_features_list=$N_FEATURES_LIST"
-echo "[reproduce] sa_K=$SA_K  sa_ratio=$SA_RATIO"
+echo "[reproduce] DFL-SA configs: d=30,60 → K=8 r=0.5 ; d=90 → K=4 r=0.8"
 echo
 
 
-echo "[1/3] run_dfl_vs_qpth: lp, qpth, sketch, two_stage"
+echo "[1/4] run_dfl_vs_qpth: lp, qpth, sketch, two_stage"
 # python -m mdp_continuous.run_dfl_vs_qpth \
 #     --solvers lp qpth sketch two_stage \
 #     --seeds $SEEDS \
 #     --n_workers "$WORKERS"
 
-# 2. Panel-2 sweep: DFL-SA across feature dimensions.
-echo "[2/3] sweep_n_features"
+echo "[2/4] sweep_n_features  d=30,60"
 python -m mdp_continuous.sweep_n_features \
     --seeds $SEEDS \
-    --n_features_list $N_FEATURES_LIST \
+    --n_features_list 30 60 \
     --n_workers "$WORKERS" \
-    --sa_K "$SA_K" \
-    --sa_ratio "$SA_RATIO" \
+    --sa_K 8 \
+    --sa_ratio 0.5 \
     --show_running_max \
     --force
 
-# 3. Re-render PDFs from the (now-updated) caches.
-echo "[3/3] make_figures.py cartpole"
+echo "[3/4] sweep_n_features  d=90"
+python -m mdp_continuous.sweep_n_features \
+    --seeds $SEEDS \
+    --n_features_list 90 \
+    --n_workers "$WORKERS" \
+    --sa_K 4 \
+    --sa_ratio 0.8 \
+    --show_running_max \
+    --force
+
+# 4. Re-render PDFs from the (now-updated) caches.
+echo "[4/4] make_figures.py cartpole"
 python make_figures.py cartpole
 
 echo

@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -227,13 +228,22 @@ def render_cartpole(out: Path) -> None:
     snf_ns = cp_mod._snf_args(args)
     dr_nf = cp_mod.pick_best_dr(args, snf_ns)
 
+    # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config.
+    SA_DIM_CONFIGS = ((30, 8, 0.5), (60, 8, 0.5), (90, 4, 0.8))
+    # Training-curves panel: pin to d=90 with its best (K, r).
+    SA_CURVE_D, SA_CURVE_K, SA_CURVE_R = 90, 4, 0.8
+
+    def _sa_payload(d: int, K: int, r: float):
+        ns = copy.copy(snf_ns)
+        ns.sa_K, ns.sa_ratio = K, r
+        return snf._load_or_none(snf._sweep_cache_key("curve_neural_dfl", ns, d))
+
     neural_p = m1._load_or_none(m1._cache_key("curve_neural", m1_ns))
     qpth_p   = m1._load_or_none(m1._cache_key("curve_qpth", m1_ns))
     mbrl_p   = m1._load_or_none(
         m1._cache_key("curve_two_stage_mbrl", cp_mod._mbrl_args(args)))
-    dr_p     = (snf._load_or_none(
-        snf._sweep_cache_key("curve_neural_dfl", snf_ns, dr_nf))
-        if dr_nf is not None else None)
+    dr_p     = _sa_payload(SA_CURVE_D, SA_CURVE_K, SA_CURVE_R)
+    dr_nf    = SA_CURVE_D
     sketch_p = m1._load_or_none(
         m1._cache_key("curve_sketch", m1_ns) + "_K8_r0.2_mgaussian")
 
@@ -272,7 +282,7 @@ def render_cartpole(out: Path) -> None:
                  if metric == "best" else arr[:, -1])
             return 200.0 - v.astype(float)  # reward → regret
 
-        # All four methods as bars; DFL-SA expands across d=16/32/48.
+        # All four methods as bars; DFL-SA expands across d=30/60/90.
         keys, labels, means, ses = [], [], [], []
         def _add(key, label, vals):
             if vals is None or vals.size == 0: return
@@ -287,15 +297,14 @@ def render_cartpole(out: Path) -> None:
              _final(neural_a) if neural_a is not None else np.array([]))
         _add("cp_sketch", "Sketch",
              _final(sketch_a) if sketch_a is not None else np.array([]))
-        for d in (16, 32, 48):
-            payload = snf._load_or_none(
-                snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
+        for d, K, r in SA_DIM_CONFIGS:
+            payload = _sa_payload(d, K, r)
             runs = cp_mod._filtered_runs(payload, requested) if payload else None
             if not runs:
                 continue
-            vals = (np.array([max(r) for r in runs], dtype=float)
+            vals = (np.array([max(rr) for rr in runs], dtype=float)
                     if metric == "best"
-                    else np.array([r[-1] for r in runs], dtype=float))
+                    else np.array([rr[-1] for rr in runs], dtype=float))
             _add("dfl_dr", f"SA\nd={d}", 200.0 - vals)
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel=f"Test regret",
@@ -307,7 +316,7 @@ def render_cartpole(out: Path) -> None:
 
     def cost(ax):
         # Full wall-clock per seed for every method (apples-to-apples).
-        # SA expands across d=16/32/48 (matching the decision-quality panel).
+        # SA expands across d=30/60/90 (matching the decision-quality panel).
         fixed = (("two_stage_mbrl", mbrl_p, "TS"),
                  ("dfl_qpth", qpth_p, "QP"),
                  ("neural_dfl", neural_p, "LP"),
@@ -323,10 +332,8 @@ def render_cartpole(out: Path) -> None:
             ses.append(float(ts.std() / np.sqrt(max(ts.size, 1))))
         for k, p, lbl in fixed:
             _add(k, p, lbl)
-        for d in (16, 32, 48):
-            payload = snf._load_or_none(
-                snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
-            _add("dfl_dr", payload, f"SA\nd={d}")
+        for d, K, r in SA_DIM_CONFIGS:
+            _add("dfl_dr", _sa_payload(d, K, r), f"SA\nd={d}")
         _bars(ax, keys, means, ses, labels=labels, log=False)
         ax.set(ylabel="Total training time (s)",
                title="CartPole — Compute cost")

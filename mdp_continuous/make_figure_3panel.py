@@ -425,7 +425,7 @@ def parse_args():
     p.add_argument("--tau", type=float, default=0.5)
     p.add_argument("--sa_K", type=int, default=4,
                    help="number of sketches for DFL-SA (n_sketches in differentiable_sketched_lp)")
-    p.add_argument("--sa_ratio", type=float, default=0.8,
+    p.add_argument("--sa_ratio", type=float, default=0.7,
                    help="row-sketch ratio for DFL-SA (k = round(ratio * m))")
     p.add_argument("--eval_policy", type=str, default="lp",
                    choices=["ce", "lp"])
