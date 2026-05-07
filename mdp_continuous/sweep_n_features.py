@@ -39,6 +39,14 @@ def _save(name: str, data):
 def _sweep_cache_key(prefix: str, args, n_features: int) -> str:
     dfl_lr_tag = "auto" if args.dfl_lr is None else f"{args.dfl_lr}"
     qpth_tag = f"_qpeta{args.qp_eta}" if "qpth" in prefix else ""
+    # Only tag SA sketch params when they differ from the historical defaults
+    # (K=8, ratio=0.2) so pre-existing caches under those defaults stay
+    # reachable from this key.
+    sa_K = int(getattr(args, "sa_K", 8))
+    sa_r = float(getattr(args, "sa_ratio", 0.2))
+    sa_tag = ""
+    if "neural_dfl" in prefix and (sa_K != 8 or abs(sa_r - 0.2) > 1e-9):
+        sa_tag = f"_saK{sa_K}_sar{sa_r}"
     return (
         f"{prefix}_nfeat{n_features}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
@@ -48,7 +56,7 @@ def _sweep_cache_key(prefix: str, args, n_features: int) -> str:
         f"_nce{args.n_ce_steps}_ndfl{args.n_dfl_steps}"
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
-        f"{qpth_tag}"
+        f"{qpth_tag}{sa_tag}"
     )
 
 
@@ -215,6 +223,10 @@ def parse_args():
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=10.0)
     p.add_argument("--tau", type=float, default=0.5)
+    p.add_argument("--sa_K", type=int, default=8,
+                   help="number of sketches for DFL-SA (n_sketches in differentiable_sketched_lp)")
+    p.add_argument("--sa_ratio", type=float, default=0.2,
+                   help="row-sketch ratio for DFL-SA (k = round(ratio * m))")
     p.add_argument("--eval_policy", type=str, default="lp",
                    choices=["ce", "lp"])
 

@@ -136,6 +136,7 @@ def render_inventory(out: Path, results_root: Path,
             _curve(ax, sa10, "dfl_sa_M10", LABELS["dfl_sa_M10"])
         ax.set(xlabel="Training epoch", ylabel="Training reward",
                title="Inventory MDP — Training curves")
+        ax.set_ylim(bottom=100)
         ax.grid(True, alpha=0.3); ax.legend(loc="lower right")
 
     def quality(ax):
@@ -163,7 +164,7 @@ def render_inventory(out: Path, results_root: Path,
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel="Test regret",
                title="Inventory MDP — Decision quality")
-        ax.set_ylim(10, 20)
+        ax.set_ylim(10, 18)
         ax.tick_params(axis="x", labelsize=RC["xtick.labelsize"] - 1)
         ax.grid(True, axis="y", alpha=0.3, ls=":")
         ax.set_axisbelow(True)
@@ -260,7 +261,7 @@ def render_cartpole(out: Path) -> None:
                ylabel=("Avg. episode reward"
                        if args.show_running_max else "Avg. episode reward"),
                title="CartPole — Training curves")
-        ax.grid(True, alpha=0.3); ax.set_ylim(0, 210)
+        ax.grid(True, alpha=0.3); ax.set_ylim(100, 205)
         ax.legend(loc="lower right")
 
     def quality(ax):
@@ -271,7 +272,7 @@ def render_cartpole(out: Path) -> None:
                  if metric == "best" else arr[:, -1])
             return 200.0 - v.astype(float)  # reward → regret
 
-        # All four methods as bars; DFL-SA expands across d=16/32/64.
+        # All four methods as bars; DFL-SA expands across d=16/32/48.
         keys, labels, means, ses = [], [], [], []
         def _add(key, label, vals):
             if vals is None or vals.size == 0: return
@@ -286,7 +287,7 @@ def render_cartpole(out: Path) -> None:
              _final(neural_a) if neural_a is not None else np.array([]))
         _add("cp_sketch", "Sketch",
              _final(sketch_a) if sketch_a is not None else np.array([]))
-        for d in (16, 32, 64):
+        for d in (16, 32, 48):
             payload = snf._load_or_none(
                 snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
             runs = cp_mod._filtered_runs(payload, requested) if payload else None
@@ -299,14 +300,14 @@ def render_cartpole(out: Path) -> None:
         _bars(ax, keys, means, ses, labels=labels)
         ax.set(ylabel=f"Test regret",
                title="CartPole — Decision quality")
-        ax.set_ylim(0, 120)
+        ax.set_ylim(0, 65)
         ax.tick_params(axis="x", labelsize=RC["xtick.labelsize"] - 2)
         ax.grid(True, axis="y", alpha=0.3, ls=":")
         ax.set_axisbelow(True)
 
     def cost(ax):
         # Full wall-clock per seed for every method (apples-to-apples).
-        # SA expands across d=16/32/64 (matching the decision-quality panel).
+        # SA expands across d=16/32/48 (matching the decision-quality panel).
         fixed = (("two_stage_mbrl", mbrl_p, "TS"),
                  ("dfl_qpth", qpth_p, "QP"),
                  ("neural_dfl", neural_p, "LP"),
@@ -322,7 +323,7 @@ def render_cartpole(out: Path) -> None:
             ses.append(float(ts.std() / np.sqrt(max(ts.size, 1))))
         for k, p, lbl in fixed:
             _add(k, p, lbl)
-        for d in (16, 32, 64):
+        for d in (16, 32, 48):
             payload = snf._load_or_none(
                 snf._sweep_cache_key("curve_neural_dfl", snf_ns, d))
             _add("dfl_dr", payload, f"SA\nd={d}")

@@ -39,11 +39,6 @@ def solve_reduced_lp_gurobi(M: torch.Tensor, c: torch.Tensor, b: torch.Tensor):
     model.Params.FeasibilityTol = 1e-6
     model.Params.OptimalityTol = 1e-6
     model.Params.Method = 2
-    # Pin Gurobi to 1 thread per call. Under N-parallel ProcessPoolExecutor
-    # workers (e.g. 8), default `Threads=0` (auto) lets each Gurobi grab
-    # many cores → oversubscription on the shared LLC/DRAM bus, which was
-    # erasing barrier's solo speedup in production. Solo penalty ~5-9%;
-    # parallel benefit is much larger.
     model.Params.Threads = 8
 
     w = model.addMVar(shape=d, lb=0.0, vtype=GRB.CONTINUOUS)

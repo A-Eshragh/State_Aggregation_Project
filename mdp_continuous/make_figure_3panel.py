@@ -78,7 +78,7 @@ _M1_FIELDS = (
     "pretrain_epochs_ts pretrain_epochs_dfl n_iterations n_eval_episodes "
     "n_ce_steps n_dfl_steps dfl_lr n_features bins_per_dim gamma lr qp_eta "
     "ridge rho tau eval_policy use_world_model world_epochs world_lr "
-    "include_qpth force"
+    "include_qpth force sa_K sa_ratio"
 ).split()
 
 
@@ -423,6 +423,10 @@ def parse_args():
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=10.0)
     p.add_argument("--tau", type=float, default=0.5)
+    p.add_argument("--sa_K", type=int, default=4,
+                   help="number of sketches for DFL-SA (n_sketches in differentiable_sketched_lp)")
+    p.add_argument("--sa_ratio", type=float, default=0.8,
+                   help="row-sketch ratio for DFL-SA (k = round(ratio * m))")
     p.add_argument("--eval_policy", type=str, default="lp",
                    choices=["ce", "lp"])
 

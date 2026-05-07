@@ -106,7 +106,11 @@ def _run_one_seed(args_dict: dict) -> dict:
     if algo == "neural_dfl":
         runner = run_neural_dfl
         pretrain = args_dict["pretrain_epochs_dfl"]
-        runner_kwargs = {"solver": "lp"}
+        runner_kwargs = {
+            "solver": "lp",
+            "sa_K": args_dict.get("sa_K", 8),
+            "sa_ratio": args_dict.get("sa_ratio", 0.2),
+        }
     elif algo == "dfl_qpth":
         # Historical name — actually runs Gurobi-QP, not the qpth library.
         # Kept as-is so existing caches/figures stay valid; the panel-3
@@ -199,6 +203,8 @@ def _job(args, algo: str, seed: int) -> dict:
         "use_world_model": bool(args.use_world_model),
         "world_epochs": args.world_epochs,
         "world_lr": args.world_lr,
+        "sa_K": int(getattr(args, "sa_K", 8)),
+        "sa_ratio": float(getattr(args, "sa_ratio", 0.2)),
         "torch_threads": 1,
     }
 

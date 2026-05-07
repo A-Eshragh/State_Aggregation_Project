@@ -23,6 +23,7 @@ from .reduced_solver import (
     solve_reduced_qp_gurobi, differentiable_reduced_lp, differentiable_reduced_qp,
     differentiable_unconstrained_qp, differentiable_qp_qpth,
 )
+from .sketched_solver import differentiable_sketched_lp
 from .policy import (
     occupancy_to_policy_fn,
     evaluate_policy,
@@ -41,7 +42,9 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    data: dict = None,
                    world_model=None,
                    solver: str = "lp",
-                   alpha_shape: float = 2.0):
+                   alpha_shape: float = 2.0,
+                   sa_K: int = 4,
+                   sa_ratio: float = 0.2):
     assert eval_policy_type in ("ce", "lp")
     assert solver in ("lp", "gurobi_qp", "qpth")
     device = torch.device("cpu")
@@ -171,10 +174,14 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             w_star, _ = differentiable_qp_qpth(M, c, b, eta=qp_eta)
             return w_star
     else:
-        # solver == "lp": pure LP via Gurobi (barrier + crossover) with
-        # basis-restricted backward in DifferentiableReducedLP.
+        # solver == "lp": sketch-and-solve LP — K independent row-sketched
+        # reduced LPs, ensemble-averaged. Smooths over basis-selection
+        # degeneracy that the dense single-LP path was sensitive to.
+        _K, _r = int(sa_K), float(sa_ratio)
         def solve_lp(M, c, b):
-            return differentiable_reduced_lp(M, c, b)
+            return differentiable_sketched_lp(
+                M, c, b,
+                n_sketches=_K, sketch_ratio=_r, sketch_mode="gaussian")
 
     def solve_eval(M, c, b):
         return differentiable_reduced_lp(M, c, b)

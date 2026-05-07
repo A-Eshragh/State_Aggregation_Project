@@ -8,11 +8,14 @@ cd "$ROOT"
 SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10}"
 WORKERS="${WORKERS:-10}"
 # N_FEATURES_LIST="${N_FEATURES_LIST:-8 16 32 64 128 256 1024}"
-N_FEATURES_LIST="${N_FEATURES_LIST:-64}"
+N_FEATURES_LIST="${N_FEATURES_LIST:-16 32 48}"
+SA_K="${SA_K:-4}"
+SA_RATIO="${SA_RATIO:-0.8}"
 
 echo "[reproduce] seeds=$SEEDS"
 echo "[reproduce] workers=$WORKERS"
 echo "[reproduce] n_features_list=$N_FEATURES_LIST"
+echo "[reproduce] sa_K=$SA_K  sa_ratio=$SA_RATIO"
 echo
 
 
@@ -28,6 +31,9 @@ python -m mdp_continuous.sweep_n_features \
     --seeds $SEEDS \
     --n_features_list $N_FEATURES_LIST \
     --n_workers "$WORKERS" \
+    --sa_K "$SA_K" \
+    --sa_ratio "$SA_RATIO" \
+    --show_running_max \
     --force
 
 # 3. Re-render PDFs from the (now-updated) caches.
