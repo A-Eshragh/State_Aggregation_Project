@@ -26,15 +26,18 @@ Gurobi academic licenses are free. See [Gurobi Academic Program](https://www.gur
 
 ## Running Experiments
 
-### Elasticity-Based Inventory Experiments
+### Quick Smoke Test
 
-**Run all experiments (parallel execution):**
+Runs in under 30 seconds. Verifies imports and training loop.
+
 ```bash
-python -m mdp_lp.run_all_elasticity
+python -m mdp_lp.run_elasticity_experiments \
+    --experiment_type a --cost_case high_margin --algo twostage \
+    --n_epochs 2 --n_samples 10 --pretrain_epochs 1
 ```
-Uses 100 epochs, 200 samples, and elasticity defaults β₀=4.0, β₁=-0.3 (β₂=0 for exp a/b, ±0.09 for exp c).
 
-**Run single experiment:**
+### Single Run (paper settings)
+
 ```bash
 python -m mdp_lp.run_elasticity_experiments \
     --experiment_type a \
@@ -45,7 +48,15 @@ python -m mdp_lp.run_elasticity_experiments \
 ```
 (Omit `--beta_0`/`--beta_1` to use defaults β₀=4.0, β₁=-0.3; for experiment c, β₂ is set automatically to ±0.09.)
 
-**Generate comparison plots and reports:**
+### Batch Run (all 16 experiments in parallel)
+
+```bash
+python -m mdp_lp.run_all_elasticity
+```
+Uses 100 epochs, 200 samples, and elasticity defaults β₀=4.0, β₁=-0.3 (β₂=0 for exp a/b, ±0.09 for exp c).
+
+### Generate Comparison Plots and Reports
+
 ```bash
 python -m mdp_lp.generate_results boxplot [base_dir] [epochs]
 python -m mdp_lp.generate_results report --epochs 100

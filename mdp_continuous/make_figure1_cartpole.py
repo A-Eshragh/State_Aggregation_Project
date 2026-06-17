@@ -27,7 +27,7 @@ CACHE_DIR = HERE / "results" / "dfl_vs_qpth"
 
 
 def _cache_path(name: str) -> Path:
-    CACHE_DIR.mkdir(exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / f"{name}.json"
 
 
