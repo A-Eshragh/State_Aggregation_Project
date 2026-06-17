@@ -151,7 +151,7 @@ def prepare_cliff_data(cfg: CliffDataConfig):
         "regime_weights": cfg.regime_weights,
         "test_regime_weights": cfg.test_regime_weights,
     }
-    print(f"[Data Prep] train={n_train} test={n_test} mean_oracle_value={meta['mean_oracle_value']:.3f}")
+    print(f"[Data]    n_train={n_train}  n_test={n_test}  oracle_mean={meta['mean_oracle_value']:.3f}")
     return train_loader, test_loader, meta
 
 

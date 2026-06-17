@@ -57,10 +57,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         dfl_lr = cfg.lr
 
     if verbose:
-        print("=" * 60)
-        tag = "Neural DFL (CE+LP)" if use_dfl_phase else "Two-Stage (CE only)"
-        print(f"Running Continuous State DFL — {tag}")
-        print("=" * 60)
+        algo_tag = "neural_dfl" if use_dfl_phase else "twostage"
+        print(f"=== Experiment: CartPole | algo={algo_tag} | n_iter={cfg.n_iterations} ===")
 
     # Discrete Actions
     features = ActionIndexedFeatures(
@@ -95,7 +93,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
     if verbose:
         src = "externally supplied" if data_provided else "expert"
-        print(f"  Loaded {buffer['states'].shape[0]} {src} transitions")
+        print(f"[Data]    n_transitions={buffer['states'].shape[0]} ({src})")
 
     w_head = torch.randn(k, A, device=device, requires_grad=True)
     feat_optimizer = torch.optim.Adam(
@@ -120,17 +118,11 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
         feat_optimizer.step()
 
-        if verbose and (epoch + 1) % 50 == 0:
+        if verbose and ((epoch + 1) % max(1, pretrain_epochs // 10) == 0 or epoch == 0):
             with torch.no_grad():
                 acc = (logits.argmax(1) == expert_actions).float().mean()
-            print(f"  [Pretrain] Epoch {epoch+1}/{pretrain_epochs}, "
-                  f"loss={loss.item():.4f}, acc={acc.item():.3f}")
-
-    if verbose:
-        phase_desc = ("Phase 2: DFL iterations (LP + constraint penalty)..."
-                      if use_dfl_phase else
-                      "Phase 2: CE-only (two-stage) iterations...")
-        print(phase_desc)
+            print(f"[Pretrain] epoch {epoch+1}/{pretrain_epochs}  "
+                  f"loss={loss.item():.4f}  acc={acc.item():.3f}")
 
     if not data_provided:
         warmup = collect_trajectories(dynamics, behavior_policy,
@@ -219,8 +211,9 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         expert_acts = heuristic_policy(test_s)
         ws_results = evaluate_policy(
             dynamics, eval_policy, 50, cfg.max_steps, cfg.gamma, device)
-        print(f"  Warm-start: acts={acts.tolist()} (expert={expert_acts.tolist()}), "
-              f"reward={ws_results['avg_reward']:.1f}")
+        _wn = len(str(cfg.n_iterations))
+        print(f"[Train] iter {0:>{_wn}}/{cfg.n_iterations}  "
+              f"reward={ws_results['avg_reward']:6.1f}  best={ws_results['avg_reward']:6.1f}")
 
     def snapshot():
         return (
@@ -330,13 +323,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
         if verbose:
             w_nnz = int((w_star > 1e-8).sum())
-            print(
-                f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
-                f"length={results['avg_length']:.1f} | "
-                f"lp_obj={lp_obj_log:.4f} | aug_lag={aug_lag_log:.4f} | "
-                f"ce={ce_log:.4f} | nnz={w_nnz}/{features.n_features} | "
-                f"time={elapsed:.1f}s"
-            )
+            print(f"[Train] iter {iteration+1:>{_wn}}/{cfg.n_iterations}  "
+                  f"reward={results['avg_reward']:6.1f}  best={best_reward:6.1f}")
 
     # Final eval
     if eval_policy_type == "lp":
@@ -353,7 +341,7 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             w_head.copy_(best_head)
         current_policy = occupancy_to_policy_fn(features, w_star)
     if verbose:
-        print(f"  Best reward over run: {best_reward:.2f}")
+        print(f"[Eval]    best={best_reward:.1f}  final={final_results['avg_reward']:.1f}")
 
     return {"history": history, "features": features, "w_star": w_star,
             "w_head": w_head, "best_reward": best_reward,
@@ -400,14 +388,10 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
         behavior_policy = heuristic_policy
 
     if verbose:
-        print("=" * 60)
-        print("Two-Stage MBRL — DQN on a frozen learned world model")
-        print("=" * 60)
+        print(f"=== Experiment: CartPole | algo=two_stage_mbrl | n_iter={cfg.n_iterations} ===")
 
     # ── 1. Offline buffer ───────────────────────────────────────────
     if data is None:
-        if verbose:
-            print(f"  Collecting {cfg.n_trajectories} offline trajectories...")
         data = collect_trajectories(dynamics, behavior_policy,
                                     cfg.n_trajectories, cfg.max_steps, device)
     real = {k_: v.clone() for k_, v in data.items()}
@@ -415,8 +399,7 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
     state_scales = torch.tensor([2.4, 3.0, 0.2095, 3.0], device=device)
 
     if verbose:
-        print(f"  Real buffer: {real['states'].shape[0]} transitions, "
-              f"{real['init_states'].shape[0]} initial states")
+        print(f"[Data]    n_transitions={real['states'].shape[0]}")
 
     # ── 2. World model (fit then freeze) ────────────────────────────
     if world_model is None:
@@ -635,11 +618,13 @@ def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,
         history.append({"iteration": iteration, **results})
 
         if verbose:
-            elapsed = time.time() - t0
-            print(f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
-                  f"length={results['avg_length']:.1f} | "
-                  f"q_loss={loss_log:.4f} | "
-                  f"syn={rb_size:>6d} | time={elapsed:.1f}s")
+            _wn2 = len(str(cfg.n_iterations))
+            print(f"[Train] iter {iteration+1:>{_wn2}}/{cfg.n_iterations}  "
+                  f"reward={results['avg_reward']:6.1f}  best={best_reward:6.1f}")
+
+    if verbose:
+        final_reward = history[-1]["avg_reward"] if history else float("nan")
+        print(f"[Eval]    best={best_reward:.1f}  final={final_reward:.1f}")
 
     return {"history": history,
             "q_net": q_net,

@@ -243,7 +243,8 @@ def pretrain_lambda_pred(pred_model, train_loader, pretrain_epochs=60):
             torch.nn.utils.clip_grad_norm_(pred_model.parameters(), max_norm=10.0)
             optimizer.step()
             optimizer.zero_grad()
-        print(f"[Warm Start] Epoch {epoch+1}/{pretrain_epochs}, loss: {loss.item()}")
+        if (epoch + 1) % max(1, pretrain_epochs // 10) == 0 or epoch == 0:
+            print(f"[Pretrain] epoch {epoch+1}/{pretrain_epochs}  loss={loss.item():.4f}")
     return pred_model
 
 
@@ -389,7 +390,6 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     _pa_action_qty = torch.arange(_pa_n_actions, dtype=torch.float32)
     _pa_inv_level = torch.arange(_pa_n_states, dtype=torch.float32) - args.b_max
     
-    print(f"[Training] Starting: {args.n_epochs} epochs, algo={args.algo}")
     start_time = time.time()
 
     train_obj_true_all = []
@@ -397,6 +397,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         _, obj_true, _, _, _, _ = batch
         train_obj_true_all.append(obj_true)
     train_optimal_reward = torch.cat(train_obj_true_all).mean().item()
+    n_train = len(train_loader.dataset)
+    n_test = len(test_loader.dataset)
+    print(f"=== Experiment: inventory | algo={args.algo} | exp={args.experiment_type} | n_epochs={args.n_epochs} ===")
+    print(f"[Data]    n_train={n_train}  n_test={n_test}  oracle_mean={train_optimal_reward:.3f}")
 
     qp_solver = QPFunction(eps=1e-10, maxIter=20, solver=QPSolvers.PDIPM_BATCHED)
     checkpoint_every = int(getattr(args, "checkpoint_every", 1))
@@ -510,6 +514,9 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             # v_star_init = (r_true * y_star).sum(dim=1).mean().item()
             initial_rewards.extend(v_star_init.flatten().tolist())
     initial_reward = float(np.mean(initial_rewards))
+    _w = len(str(args.n_epochs))
+    print(f"[Train] epoch {0:>{_w}}/{args.n_epochs}  loss=N/A      "
+          f"regret={train_optimal_reward - initial_reward:.3f}  oracle={train_optimal_reward:.3f}")
 
     pred_model.train()
     # Respect --agg_warmup_epochs so the aggregator can be frozen for the first
@@ -709,10 +716,6 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 dfl_loss_final.backward()
                 backward_time += time.time() - _t
 
-                lambda_true_sorted = np.sort(lambda_true.detach().cpu().reshape(-1).numpy())
-                lambda_pred_sorted = np.sort(lambda_pred.detach().cpu().reshape(-1).numpy())
-                print(f"lambda_true(sorted): {lambda_true_sorted}")
-                print(f"lambda_pred(sorted): {lambda_pred_sorted}")
                 torch.nn.utils.clip_grad_norm_(params, max_norm=getattr(args, "grad_clip", 10.0))
 
                 epoch_dfl_loss.append(dfl_loss_final.item())
@@ -826,14 +829,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             train_inv_bias_per_epoch.append(0.0)
             train_frac_over_order_per_epoch.append(0.0)
         
-        if (epoch + 1) % 1 == 0:
-            msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
-            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_vstar and epoch_aug_lag and epoch_mse:
-                msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
-                msg += f'  zero_grad={train_zero_grad_frac_list[-1]:.1%}  |dV/dλ|={train_dv_dlambda_mean_list[-1]:.4f}'
-            if getattr(args, 'policy_analysis', False):
-                msg += f', order_bias={train_order_bias_per_epoch[-1]:+.4f}, frac_over_order={train_frac_over_order_per_epoch[-1]:.1%}'
-            print(msg)
+        _epoch_regret = train_optimal_reward - train_reward_list[-1]
+        print(f"[Train] epoch {epoch+1:>{_w}}/{args.n_epochs}  "
+              f"loss={train_loss / len(train_loader):.4f}  "
+              f"regret={_epoch_regret:.3f}  oracle={train_optimal_reward:.3f}")
         
         should_checkpoint = ((epoch + 1) % checkpoint_every == 0) or (epoch == 0) or ((epoch + 1) == args.n_epochs)
         if should_checkpoint and hasattr(args, 'save_dir') and args.save_dir:
@@ -891,7 +890,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
     train_reward_list = [initial_reward] + train_reward_list
     
-    print(f"[Training] Complete. Time: {time.time() - start_time:.2f}s")
+    print(f"[Train] done  elapsed={time.time() - start_time:.1f}s")
     
     if hasattr(args, 'save_dir') and args.save_dir:
         try:
@@ -932,7 +931,6 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             traceback.print_exc()
             raise
     
-    print(f"[Evaluation] Starting evaluation...")
     pred_model.eval()
     test_obj_values = []       # v(y_pred) on true MDP — reward from predicted lambda
     test_oracle_values = []    # v(y_oracle) on true MDP — reward from true lambda (upper bound)
@@ -1017,11 +1015,10 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     test_mean_oracle_reward = test_oracle_values.mean().item()
     test_mean_regret = test_regret.mean().item()
 
-    print(f"[Evaluation] Oracle reward (true λ):     {test_mean_oracle_reward:.4f}")
-    print(f"[Evaluation] Predicted reward (pred λ):   {test_mean_pred_reward:.4f}")
-    print(f"[Evaluation] Mean regret:                 {test_mean_regret:.4f}")
-    print(f"[Evaluation] Lambda MSE:                  {test_mse:.6f}")
-    print(f"[Evaluation] Algo: {args.algo}")
+    print(f"[Eval]    oracle={test_mean_oracle_reward:.3f}  "
+          f"pred={test_mean_pred_reward:.3f}  "
+          f"regret={test_mean_regret:.3f}  "
+          f"lambda_mse={test_mse:.6f}")
 
     if hasattr(args, 'save_dir') and args.save_dir:
         try:

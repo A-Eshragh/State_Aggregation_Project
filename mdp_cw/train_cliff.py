@@ -433,8 +433,8 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
 
     # --- Stage 1: pretrain the feature backbone -----------------------------------
     pretrain_epochs = int(getattr(args, "pretrain_epochs", 60))
+    print(f"=== Experiment: cliff | algo={args.algo} | n_epochs={args.n_epochs} ===")
     if pretrain_epochs > 0:
-        print(f"[Train] Pretraining FeatureNet for {pretrain_epochs} epochs...")
         pretrain_feature_net(
             feature_net, train_loader,
             epochs=pretrain_epochs,
@@ -571,8 +571,9 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
         return float(np.mean(rewards)) if rewards else 0.0
 
     initial_reward = _epoch_reward()
-    print(f"[Train] initial reward={initial_reward:.3f}  "
-          f"oracle mean={train_optimal_reward:.3f}")
+    _w = len(str(int(args.n_epochs)))
+    print(f"[Train] epoch {0:>{_w}}/{args.n_epochs}  loss=N/A      "
+          f"regret={train_optimal_reward - initial_reward:.3f}  oracle={train_optimal_reward:.3f}")
 
     # Optional static hinge weights. These are kept separate from the actual
     # objective so the default behavior (alpha=0, margin=0, mining off) is
@@ -866,19 +867,17 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
         sa_time_sec_per_epoch.append(epoch_sa_time)
         backward_time_sec_per_epoch.append(epoch_backward_time)
 
+        _epoch_regret = train_optimal_reward - train_reward_list[-1]
         msg = (
-            f"[Train] epoch {epoch+1}/{args.n_epochs} "
-            f"loss={total_loss/max(1,batch_denom):.4f} "
-            f"slip_CE={train_pred_loss_list[-1]:.4f} "
-            f"reward={train_reward_list[-1]:.3f} "
-            f"(oracle={train_optimal_reward:.3f})"
+            f"[Train] epoch {epoch+1:>{_w}}/{args.n_epochs}  "
+            f"loss={total_loss/max(1,batch_denom):.4f}  "
+            f"regret={_epoch_regret:.3f}  oracle={train_optimal_reward:.3f}"
         )
         if hinge_weight_alpha > 0.0 or margin_lambda > 0.0 or hard_mine_every > 0:
             msg += (
-                f" wCE={weighted_pred_loss_list[-1]:.4f}"
-                f" wDFL={weighted_dfl_loss_list[-1]:.4f}"
-                f" margin={margin_loss_list[-1]:.4f}"
-                f" wMean={sample_weight_mean_list[-1]:.3f}"
+                f"  wCE={weighted_pred_loss_list[-1]:.4f}"
+                f"  wDFL={weighted_dfl_loss_list[-1]:.4f}"
+                f"  margin={margin_loss_list[-1]:.4f}"
             )
         print(msg)
 
@@ -904,10 +903,7 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
             torch.save(head.state_dict(), save_dir / "head_state.pt")
             torch.save(feature_net.state_dict(), save_dir / "feature_net_state.pt")
 
-    print(f"[Train] done ({time.time()-start_time:.1f}s)")
-
-    # --- Evaluation ---------------------------------------------------------------
-    print("[Eval] evaluating on test set...")
+    print(f"[Train] done  elapsed={time.time()-start_time:.1f}s")
     head.eval()
     if agg is not None:
         agg.eval()
@@ -1001,10 +997,10 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
         "algo": args.algo,
     }
 
-    print(f"[Eval] oracle mean = {result['test_mean_oracle_reward']:.3f}")
-    print(f"[Eval] pred   mean = {result['test_mean_pred_reward']:.3f}")
-    print(f"[Eval] regret mean = {result['test_mean_regret']:.3f}")
-    print(f"[Eval] slip CE     = {result['test_slip_ce']:.4f}")
+    print(f"[Eval]    oracle={result['test_mean_oracle_reward']:.3f}  "
+          f"pred={result['test_mean_pred_reward']:.3f}  "
+          f"regret={result['test_mean_regret']:.3f}  "
+          f"slip_ce={result['test_slip_ce']:.4f}")
 
     if save_dir is not None:
         # Save a final copy.
