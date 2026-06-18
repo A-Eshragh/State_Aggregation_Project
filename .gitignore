@@ -5,3 +5,10 @@ venv/
 .DS_Store
 *.log
 *.tmp
+*.zip
+.vscode*
+
+.claude/
+**/*result*/
+**/results*.json
+**/*cache*/

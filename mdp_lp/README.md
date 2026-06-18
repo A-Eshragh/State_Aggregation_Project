@@ -1,0 +1,172 @@
+# mdp_lp: MDP Linear Programming Solver
+
+PyTorch implementation for solving discounted Markov Decision Processes via Linear Programming, with support for differentiable optimization and decision-focused learning.
+
+## Overview
+
+This library implements:
+1. MDP to LP formulation: Converts transition probabilities and rewards into linear programming constraints
+2. LP solvers: Dense (Gurobi), differentiable (basis-restricted sensitivity analysis)
+3. Training methods: Direct Feedback Learning (DFL) and Two-Stage training for learning MDP parameters
+
+## Installation
+
+**Prerequisites:**
+- Python 3.7+
+- PyTorch
+- Gurobi Optimizer (academic license available)
+- scipy
+
+**Install:**
+```bash
+pip install torch scipy gurobipy
+```
+
+Gurobi academic licenses are free. See [Gurobi Academic Program](https://www.gurobi.com/academia/academic-program-and-licenses/).
+
+## Running Experiments
+
+### Quick Smoke Test
+
+Runs in under 30 seconds. Verifies imports and training loop.
+
+```bash
+python -m mdp_lp.run_elasticity_experiments \
+    --experiment_type a --cost_case high_margin --algo twostage \
+    --n_epochs 2 --n_samples 10 --pretrain_epochs 1
+```
+
+### Single Run (paper settings)
+
+```bash
+python -m mdp_lp.run_elasticity_experiments \
+    --experiment_type a \
+    --cost_case high_margin \
+    --algo dfl \
+    --n_epochs 100 \
+    --n_samples 200
+```
+(Omit `--beta_0`/`--beta_1` to use defaults β₀=4.0, β₁=-0.3; for experiment c, β₂ is set automatically to ±0.09.)
+
+### Batch Run (all 16 experiments in parallel)
+
+```bash
+python -m mdp_lp.run_all_elasticity
+```
+Uses 100 epochs, 200 samples, and elasticity defaults β₀=4.0, β₁=-0.3 (β₂=0 for exp a/b, ±0.09 for exp c).
+
+### Generate Comparison Plots and Reports
+
+```bash
+python -m mdp_lp.generate_results boxplot [base_dir] [epochs]
+python -m mdp_lp.generate_results report --epochs 100
+python -m mdp_lp.generate_results small_test --tag <tag> [--root mdp_lp/small_test]
+python -m mdp_lp.generate_results fourway --epochs 100
+```
+(See `generate_results.py` docstring for all subcommands.)
+
+### Experiment Configuration
+
+**16 total experiments:**
+- Experiment (a): β₂=0, p constant → 4 experiments (2 cost cases × 2 algorithms)
+- Experiment (b): β₂=0, p lognormal → 4 experiments (2 cost cases × 2 algorithms)
+- Experiment (c): β₂≠0, p and p_related lognormal → 8 experiments (2 cost cases × 2 algorithms × 2 β₂ values)
+
+**Elasticity model:** `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε` with defaults **β₀=4.0**, **β₁=-0.3**, **β₂=0** (exp a/b) or **β₂=±0.09** (exp c), **σ_ε=0.1**.
+
+**Output files per experiment:**
+- `results.json`: Complete metrics and data
+- `train_reward_per_epoch.png`: Training cost over epochs
+- `lambda_histograms.png`: Predicted vs true lambda distributions
+- `test_obj_boxplot.png`: Test set optimal values (single method)
+- `comparison_boxplot.png`: DFL vs Two-stage comparison (parent directory)
+
+## Results Interpretation
+
+### Plot Descriptions
+
+**train_reward_per_epoch.png**: Training cost over epochs (negative values represent costs). Decreasing cost indicates improving performance.
+
+**lambda_histograms.png**: Predicted vs true lambda distributions. Overlapping histograms indicate accurate predictions.
+
+**test_obj_boxplot.png**: Distribution of optimal values on test set. Higher values (less negative) indicate better performance.
+
+**comparison_boxplot.png**: Side-by-side comparison of DFL vs Two-stage on test set. Primary metric for method comparison.
+
+### Key Metrics
+
+- **Lambda prediction error**: `|λ_pred - λ_true|`, should decrease over epochs
+- **obj_loss**: `|obj_hat - obj_true|`, measures prediction quality
+- **Test optimal values**: Compare mean/std between DFL and Two-stage
+
+## Performance
+
+**Bottlenecks:**
+- LP solving (Gurobi): ~70% of time, CPU-only
+- Neural network training: ~20% of time
+- Data preparation: ~10% of time
+
+**Recommended:** Use parallel execution via `run_all_elasticity.py` which automatically distributes experiments across CPU cores.
+
+**Expected runtime:**
+- Per experiment (200 samples, 100 epochs): 1–2 hours
+- All 16 experiments in parallel (e.g. 10 workers): 2–3 hours total
+
+**GPU:** Not used. Sparse tensors require CPU, and LP solving is CPU-only.
+
+## Parameters
+
+**Elasticity model (defaults used in `run_elasticity_experiments` and `run_all_elasticity`):**
+- **β₀ = 4.0**, **β₁ = -0.3** (price elasticity of demand in log-linear model)
+- **β₂ = 0.0** (exp a, b) or **±0.09** (exp c: substitute vs complement)
+- **σ_ε = 0.1** (additive noise in log(λ))
+- Price: `p_constant = 10.0` (exp a), or lognormal(μ=ln(10), σ=0.5) for p (exp b, c)
+- Related price: lognormal(μ=ln(8), σ=0.5) for p_related (exp c only)
+
+**MDP structure (script defaults):**
+- **b_max = 50**, **s_max = 50** → inventory level from -50 to +50 → **101 states**
+- **q_max = 20** → order quantities 0..20 → **21 actions**
+- **d_max = 30** → demand support for Poisson
+- Discount factor **β = 0.95** (MDP discount, distinct from elasticity β₀/β₁/β₂)
+
+**Cost parameters:**
+- **High margin:** `foc=1.0, voc=0.5, hc=0.1, bc=0.2` (holding cost ≪ revenue)
+- **Low margin:** `foc=1.0, voc=0.5, hc=20.0, bc=0.2` (holding cost ≫ revenue)
+
+**Training:**
+- Epochs: 100; Samples: 200 (in `run_all_elasticity`; override with `--n_samples` for single runs)
+- Train/test split: 80/20
+- Learning rate: 0.001, Hidden dimension: 32
+
+## Notes
+
+**Negative values in results:** Represent costs, not rewards. More negative indicates higher costs. High margin experiments show ~-300 to -400, low margin ~-37,000.
+
+**Training cost trends:** Cost may decrease as the model learns the true cost structure. Monitor lambda prediction error and obj_loss to confirm learning.
+
+**Elasticity model:** Ground truth λ is generated from `ln(λ) = β₀ + β₁ ln(p) + β₂ ln(p_related) + ε` (defaults β₀=4.0, β₁=-0.3, β₂=0 or ±0.09, σ_ε=0.1). The neural network does not see this form and learns a black-box mapping from prices to λ.
+
+## Code Structure
+
+**Core modules:**
+- `mdp.py`: MDP to LP formulation
+- `solvers/`: LP solvers (dense, differentiable)
+- `inventory_elasticity.py`: Inventory MDP creation from lambda
+- `elasticity_model.py`: Ground truth model and neural network predictor
+- `train_elasticity.py`: Training and evaluation logic
+
+**Experiment scripts:**
+- `run_all_elasticity.py`: Run all 16 experiments in parallel
+- `run_elasticity_experiments.py`: Run single experiment
+- `generate_results.py`: Generate comparison plots and reports (boxplot, report, small_test, fourway)
+
+## Results Location
+
+Results are stored in `mdp_lp/results_elasticity/` with structure:
+```
+exp_X/cost_case/algorithm/epochs_100/           # exp a, b
+exp_c/cost_case/algorithm/beta2_0.09/epochs_100/ # or beta2_-0.09 for exp c
+```
+Each run produces `results.json`, plots, and (for DFL) optional `n_agg_*` / `qp_reg_*` subdirs when those options are used.
+
+Final organized results can be copied to `mdp_lp/final_results/` (see `final_results/README.md` if present).
