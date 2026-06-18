@@ -1,0 +1,31 @@
+{
+    "mdp_type": "inventory",
+    "beta": 0.95,
+    "n_agg": 30,
+    "algo": "dfl",
+    "mode": "train",
+    "n_feats": 2,
+    "n_epochs": 100,
+    "n_samples": 100,
+    "reg_coef": 0.5,
+    "loss_weight": 0.5,
+    "hyperparam": {
+        "lr": 0.0005,
+        "hidden_dim": 64
+    },
+    "train_log": false,
+    "b_max": 5000,
+    "s_max": 5000,
+    "q_max": 10,
+    "d_max": 8,
+    "foc": 2,
+    "voc": 0.4,
+    "hc": 0.2,
+    "bc": 0.5,
+    "n_params": 9,
+    "eval_time": 0.16500715911388397,
+    "pred_loss": 8.930830955505371,
+    "eval_loss": 0.0005944735264006718,
+    "obj_loss": [],
+    "train_time": []
+}

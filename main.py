@@ -51,9 +51,7 @@ def main(args):
     
     print("\n[2/3] Starting training/evaluation...")
     tune_result = train_eval(args, train_loader, test_loader)
-    print("[2/3] ✓ Training/evaluation complete!")
-
-    print("\n[3/3] Saving results...")
+    # Save results to a file
     result_file.write_text(json.dumps(tune_result, indent=4))
     print(f"[3/3] ✓ Results saved to: {result_file}")
     print("=" * 70)
