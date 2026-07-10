@@ -24,7 +24,6 @@ bash mdp_continuous/run_dfl_seeds.sh  # runs the experiments + renders the figur
 `run_dfl_seeds.sh` runs CartPole over seeds 1–10 in one shot: the baselines
 (Two-stage / DFL-LP / DFL-QP / DFL-Sketch) via `run_dfl_vs_qpth`, and the
 DFL-SA feature-dimension sweeps (d = 30, 60, 90) via `sweep_n_features`, then
-renders the figures with `make_figures.py cartpole`. Note the baseline step is
-commented out by default — uncomment step [1/4] to regenerate those curves.
+renders the figures with `make_figures.py cartpole`. 
 
 Figures are written to `figures/`.
