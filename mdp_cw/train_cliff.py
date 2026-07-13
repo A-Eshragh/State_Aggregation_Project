@@ -688,14 +688,11 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                     H_pred = mdp_pred.build_H(P_solve)
                     r_flat_pred = r_solve.reshape(B, -1)
                     if ssa_obj == "cw_sketch":
-                        _sketch_qp = bool(getattr(args, "sketch_use_qpth", False))
                         y_agg = sketched_lp(
                             H_pred, r_flat_pred, gamma_solve,
                             n_sketches=int(getattr(args, "n_sketches", 4)),
                             sketch_ratio=float(getattr(args, "sketch_ratio", 0.1)),
                             beta=beta,
-                            qp_solver=qp_solver if _sketch_qp else None,
-                            qp_reg=float(getattr(args, "qp_reg", 0.1)),
                         )
                     elif ssa_obj in ("cw_qpth", "cw_reduced_qpth"):
                         y_agg = solve_occupancy_qp_qpth(
@@ -744,14 +741,11 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                             qp_solver=qp_solver,
                         )
                     else:  # dfl_sketch
-                        _sketch_qp = getattr(args, "sketch_use_qpth", False)
                         y_star = sketched_lp(
                             H_pred, r_flat_pred, gamma,
                             n_sketches=int(getattr(args, "n_sketches", 4)),
                             sketch_ratio=float(getattr(args, "sketch_ratio", 0.1)),
                             beta=beta,
-                            qp_solver=qp_solver if _sketch_qp else None,
-                            qp_reg=float(getattr(args, "qp_reg", 0.1)),
                         )
                 epoch_solver_time += (time.time() - t0)
 
@@ -1082,14 +1076,11 @@ def _solve_with_algo(args, P_pred: torch.Tensor, r_pred: torch.Tensor,
                 qp_solver=qp_solver,
             )
         elif ssa_obj == "cw_sketch":
-            _sketch_qp = bool(getattr(args, "sketch_use_qpth", False))
             y_agg = sketched_lp(
                 H, r_flat, gamma_solve,
                 n_sketches=int(getattr(args, "n_sketches", 4)),
                 sketch_ratio=float(getattr(args, "sketch_ratio", 0.1)),
                 beta=beta,
-                qp_solver=qp_solver if _sketch_qp else None,
-                qp_reg=float(getattr(args, "qp_reg", 0.1)),
             )
         elif ssa_obj == "cw_local":
             y_agg = DifferentiableLPSolver.apply(H, r_flat, gamma_solve)

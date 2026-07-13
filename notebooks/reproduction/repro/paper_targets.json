@@ -1,0 +1,104 @@
+{
+  "inventory": {
+    "source": "Paper Inventory decision-quality figure; no numeric result table is present in the paper source.",
+    "metric": "test regret (% of oracle reward)",
+    "targets": {
+      "TS": {
+        "mean": 13.241,
+        "se": null
+      },
+      "QP": {
+        "mean": 12.636,
+        "se": null
+      },
+      "LP": {
+        "mean": 12.893,
+        "se": null
+      },
+      "Sketch": {
+        "mean": 12.871,
+        "se": null
+      },
+      "SA M=10": {
+        "mean": 14.888,
+        "se": null
+      },
+      "SA M=20": {
+        "mean": 13.883,
+        "se": null
+      },
+      "SA M=30": {
+        "mean": 12.742,
+        "se": null
+      }
+    }
+  },
+  "cliff": {
+    "source": "Paper Appendix Table 3.",
+    "metric": "test regret",
+    "targets": {
+      "TS": {
+        "mean": 14.75,
+        "se": 0.29
+      },
+      "QP": {
+        "mean": 9.53,
+        "se": 0.84
+      },
+      "LP": {
+        "mean": 14.14,
+        "se": 0.18
+      },
+      "Sketch": {
+        "mean": 11.34,
+        "se": 1.44
+      },
+      "SA M=6": {
+        "mean": 7.21,
+        "se": 0.15
+      },
+      "SA M=12": {
+        "mean": 7.76,
+        "se": 0.15
+      },
+      "SA M=24": {
+        "mean": 7.87,
+        "se": 0.64
+      }
+    }
+  },
+  "cliff_decision_figure": {
+    "source": "Overleaf final paper figure neurips_2026/figures/cw_decision_quality.pdf. Values are extracted from the vector PDF: bar rectangles for TS/QP/LP/Sketch/SA M=24 and printed annotations for the clipped SA M=12/M=18 bars.",
+    "metric": "test regret",
+    "targets": {
+      "TS": {
+        "mean": 0.7379,
+        "se": 0.0123
+      },
+      "QP": {
+        "mean": 0.6740,
+        "se": 0.0175
+      },
+      "LP": {
+        "mean": 0.6897,
+        "se": 0.0180
+      },
+      "Sketch": {
+        "mean": 0.6754,
+        "se": 0.0178
+      },
+      "SA M=12": {
+        "mean": 8.0178107677,
+        "se": null
+      },
+      "SA M=18": {
+        "mean": 8.2250442909,
+        "se": null
+      },
+      "SA M=24": {
+        "mean": 0.7796463677,
+        "se": 0.0120
+      }
+    }
+  }
+}
