@@ -70,10 +70,10 @@ def build_tables(results_root: Path, targets_path: Path) -> tuple[pd.DataFrame, 
         inventory_row("SA M=30", "sa30_r02"),
     ])
     cliff_df = pd.DataFrame([
-        cliff_row("TS", "checkpoint", "ts"),
-        cliff_row("QP", "checkpoint", "qpth"),
-        cliff_row("LP", "checkpoint", "dfl"),
-        cliff_row("Sketch", "checkpoint", "sketch"),
+        cliff_row("TS", "baseline", "ts"),
+        cliff_row("QP", "baseline", "qpth"),
+        cliff_row("LP", "baseline", "dfl"),
+        cliff_row("Sketch", "baseline", "sketch"),
         cliff_row("SA M=6", "sa", "M6_tau0p5_lw500p0"),
         cliff_row("SA M=12", "sa", "M12_tau0p5_lw500p0"),
         cliff_row("SA M=24", "sa", "M24_tau2p0_lw500p0"),
@@ -240,10 +240,10 @@ def plot_training_curves(results_root: Path, ax_inventory, ax_cliff) -> None:
         ("DFL-SA (M=10)", "sa10_r02", "#9467bd", "-"),
     ]
     cliff_specs = [
-        ("Two-stage", "checkpoint", "ts", "#ff7f0e", "--"),
-        ("DFL-QP", "checkpoint", "qpth", "#2ca02c", "-"),
-        ("DFL-LP", "checkpoint", "dfl", "#1f77b4", "-"),
-        ("DFL-Sketch", "checkpoint", "sketch", "#d62728", ":"),
+        ("Two-stage", "baseline", "ts", "#ff7f0e", "--"),
+        ("DFL-QP", "baseline", "qpth", "#2ca02c", "-"),
+        ("DFL-LP", "baseline", "dfl", "#1f77b4", "-"),
+        ("DFL-Sketch", "baseline", "sketch", "#d62728", ":"),
         ("DFL-SA (M=24)", "sa", "M24_tau2p0_lw500p0", "#9467bd", "-"),
     ]
 

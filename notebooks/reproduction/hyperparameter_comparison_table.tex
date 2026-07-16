@@ -1,0 +1,123 @@
+\documentclass[10pt]{article}
+
+\usepackage[landscape,margin=0.55in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{tabularx}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+
+\definecolor{headergray}{gray}{0.92}
+\definecolor{notegray}{gray}{0.25}
+
+\newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.18}
+
+\begin{document}
+
+{\Large \textbf{Hyperparameter Comparison for Reproduction Audit}}\\[3pt]
+{\small Inventory uses the paper decision-quality target. Cliff uses Appendix Table 3, not the separate Cliff Figure 2 decision-quality panel. All listed Cliff methods are trained from scratch by the reproduction runner.}\\[8pt]
+
+\scriptsize
+\begin{tabularx}{\textwidth}{>{\bfseries\RaggedRight\arraybackslash}p{0.16\textwidth}YYYY}
+\toprule
+\rowcolor{headergray}
+Item & paper-inventory & repro-inventory & paper-cliff & repro-cliff \\
+\midrule
+State space size
+& 36, $s_{\max}=30$, $b_{\max}=5$
+& same
+& 48, $4 \times 12$ grid
+& same \\
+
+Augmented Lagrangian $\rho$ for DFL-LP
+& 10
+& $10^4$
+& 0.1
+& 0.1 \\
+
+Augmented Lagrangian $\rho$ for DFL-Sketch
+& 0.1
+& 10
+& 1.0
+& 0.1 \\
+
+Augmented Lagrangian $\rho$ for DFL-QP
+& $10^4$
+& $10^4$
+& 0.1
+& 0.1 \\
+
+QP regularization $\eta$ / \texttt{qp\_reg}
+& $10^{-3}$
+& \textbf{50}
+& 0.1
+& 0.1 \\
+
+Sketch ensemble size $K$
+& 8
+& 8
+& 8
+& \textbf{4} \\
+
+Sketch row-keep ratio $\alpha$
+& 0.1
+& 0.1 for Sketch; 0.2 for SA configs
+& 0.2
+& \textbf{0.1} \\
+
+LP basis ridge
+& $10^{-6}$
+& not explicitly changed in repro runner
+& none
+& 0.0 for SA \\
+
+Aggregation sizes
+& $M \in \{10,20,30\}$
+& same
+& Table 2 lists $M \in \{10,20,30\}$; Appendix Table 3 target uses $M \in \{6,12,24\}$
+& $M \in \{6,12,24\}$ \\
+
+Softmax temperature $\tau$
+& 0.5
+& default / not separately overridden in the inventory runner
+& 0.5
+& $M=6$: 0.5; $M=12$: 0.5; $M=24$: 2.0 \\
+
+SA loss weight
+& not clearly listed
+& 1
+& not clearly listed
+& \textbf{500} \\
+
+Train samples
+& 10
+& 10
+& 100
+& 100 \\
+
+Test samples
+& 50
+& 50
+& 100
+& 100 \\
+\bottomrule
+\end{tabularx}
+
+\vspace{8pt}
+\small
+\textbf{Parameters that need confirmation.}
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt,topsep=2pt]
+    \item Inventory \texttt{qp\_reg}: Table 2 gives $10^{-3}$, while the local reproduction recipe uses 50.
+    \item Inventory Sketch $\rho$: Table 2 gives 0.1, while the local reproduction recipe uses 10.
+    \item Cliff Sketch settings: Table 2 gives $K=8$ and row-keep ratio 0.2, while the from-scratch Table 3 recipe uses $K=4$ and row-keep ratio 0.1.
+    \item Cliff SA loss weight: the local Appendix Table 3 reproduction uses 500, but this value is not clearly listed in Table 2.
+    \item Cliff SA temperature: Table 2 gives $\tau=0.5$, while the local Table 3 recipe uses $\tau=2.0$ for $M=24$.
+    \item Cliff aggregation sizes: Table 2 lists $\{10,20,30\}$, while Appendix Table 3 uses $\{6,12,24\}$.
+\end{itemize}
+
+\end{document}
