@@ -1,0 +1,302 @@
+[
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 0,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.22610136826945787,
+    "Markov_entropy": 0.12979990248668344,
+    "Delta_C_vs_ordinary": 0.17346255481243134
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 1,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.5301946925669098,
+    "Markov_entropy": 0.07487567298692228,
+    "Delta_C_vs_ordinary": 0.04342680796980858
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 2,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.4712174735920199,
+    "Markov_entropy": 0.07417357105683693,
+    "Delta_C_vs_ordinary": 0.03971582651138306
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 3,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.2662407587029421,
+    "Markov_entropy": 0.19390385596606885,
+    "Delta_C_vs_ordinary": 0.1467299610376358
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 4,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.3417257830225609,
+    "Markov_entropy": 0.35453373410506356,
+    "Delta_C_vs_ordinary": 0.031196588650345802
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 5,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.24062769096056694,
+    "Markov_entropy": 0.15942369626286323,
+    "Delta_C_vs_ordinary": 0.1413172036409378
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 6,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.48355588103764874,
+    "Markov_entropy": 0.07844694088161906,
+    "Delta_C_vs_ordinary": 0.029244298115372658
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 7,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.5055078233203697,
+    "Markov_entropy": 0.24039122876810193,
+    "Delta_C_vs_ordinary": 0.18309567868709564
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 8,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.45652812237854457,
+    "Markov_entropy": 0.27895889755557396,
+    "Delta_C_vs_ordinary": 0.12143893539905548
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 9,
+    "implementation": "additive / detach",
+    "ordinary-Markov representation similarity": 0.1635039614183317,
+    "Markov_entropy": 0.07761704395117458,
+    "Delta_C_vs_ordinary": 0.04326731711626053
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 0,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.3589088031538165,
+    "Markov_entropy": 0.11107305064765427,
+    "Delta_C_vs_ordinary": 0.057472631335258484
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 1,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.38384917073707564,
+    "Markov_entropy": 0.07922441493687517,
+    "Delta_C_vs_ordinary": 0.04348966106772423
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 2,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.48527622189857184,
+    "Markov_entropy": 0.12128939470761656,
+    "Delta_C_vs_ordinary": 0.05246446654200554
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 3,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.25160385044180383,
+    "Markov_entropy": 0.20927211775201998,
+    "Delta_C_vs_ordinary": 0.13499315083026886
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 4,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.32803135784169585,
+    "Markov_entropy": 0.25710610241087106,
+    "Delta_C_vs_ordinary": 0.04323650896549225
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 5,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.22399368389314367,
+    "Markov_entropy": 0.24681675490975763,
+    "Delta_C_vs_ordinary": 0.11161918938159943
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 6,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.46173750190180407,
+    "Markov_entropy": 0.08217679067226148,
+    "Delta_C_vs_ordinary": 0.0327458493411541
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 7,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.3104537365239629,
+    "Markov_entropy": 0.16972357391369422,
+    "Delta_C_vs_ordinary": 0.0652109682559967
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 8,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.48118377051584904,
+    "Markov_entropy": 0.28133760800475327,
+    "Delta_C_vs_ordinary": 0.12498974055051804
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 9,
+    "implementation": "additive / e2e",
+    "ordinary-Markov representation similarity": 0.2787023245044343,
+    "Markov_entropy": 0.09463324418457984,
+    "Delta_C_vs_ordinary": 0.04884984344244003
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 0,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.2374697901424565,
+    "Markov_entropy": 0.12829117669622978,
+    "Delta_C_vs_ordinary": 0.059716176241636276
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 1,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.5797841079204699,
+    "Markov_entropy": 0.07461019448000569,
+    "Delta_C_vs_ordinary": 0.04340808838605881
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 2,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.47216639921894243,
+    "Markov_entropy": 0.07372690321409137,
+    "Delta_C_vs_ordinary": 0.040125977247953415
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 3,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.3974295378051155,
+    "Markov_entropy": 0.2940383837778587,
+    "Delta_C_vs_ordinary": 0.14502403140068054
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 4,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.34208528961482115,
+    "Markov_entropy": 0.34906748301467017,
+    "Delta_C_vs_ordinary": 0.030539637431502342
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 5,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.18083946133165785,
+    "Markov_entropy": 0.2148852872183131,
+    "Delta_C_vs_ordinary": 0.11313452571630478
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 6,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.3780011381479737,
+    "Markov_entropy": 0.07820657042531032,
+    "Delta_C_vs_ordinary": 0.02927602082490921
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 7,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.33290200845311907,
+    "Markov_entropy": 0.27719767604529855,
+    "Delta_C_vs_ordinary": 0.25361934304237366
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 8,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.3115596858415166,
+    "Markov_entropy": 0.2687029874774816,
+    "Delta_C_vs_ordinary": 0.1557021588087082
+  },
+  {
+    "task": "cliff",
+    "scale": "medium",
+    "M": 12,
+    "seed": 9,
+    "implementation": "additive / scaled",
+    "ordinary-Markov representation similarity": 0.14205271378597906,
+    "Markov_entropy": 0.08009984457051177,
+    "Delta_C_vs_ordinary": 0.043069008737802505
+  }
+]

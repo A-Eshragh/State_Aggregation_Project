@@ -1,0 +1,1176 @@
+{
+  "schema": "markov_baseline_context_v1",
+  "description": "Minimal fixed baseline fields used by the Markov notebook for context and paired ordinary-SA controls.",
+  "records": [
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 0,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.919149398803711,
+        "test_mean_pred_reward": -21.030963897705078,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 1,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.91542911529541,
+        "test_mean_pred_reward": -21.027244567871094,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 2,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.917194843292236,
+        "test_mean_pred_reward": -21.029010772705078,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 3,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.920926570892334,
+        "test_mean_pred_reward": -21.03274154663086,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 4,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.9163031578063965,
+        "test_mean_pred_reward": -21.028120040893555,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 5,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 6.905210018157959,
+        "test_mean_pred_reward": -20.017024993896484,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 6,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.915317535400391,
+        "test_mean_pred_reward": -21.027132034301758,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 7,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.9172234535217285,
+        "test_mean_pred_reward": -21.029041290283203,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 8,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.91569709777832,
+        "test_mean_pred_reward": -21.027511596679688,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "basic",
+      "method": "sa_m12",
+      "seed_index": 9,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 7.916682243347168,
+        "test_mean_pred_reward": -21.02849769592285,
+        "test_mean_oracle_reward": -13.111815452575684
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 0,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 1,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 2,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 3,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 10.097835540771484,
+        "test_mean_pred_reward": -30.06414222717285,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 4,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 0.23750534653663635,
+        "test_mean_pred_reward": -20.203811645507812,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 5,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0580135583877563,
+        "test_mean_pred_reward": -21.024324417114258,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 6,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 7,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.236238956451416,
+        "test_mean_pred_reward": -21.20254898071289,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 8,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "cliff",
+      "scale": "medium",
+      "method": "sa_m12",
+      "seed_index": 9,
+      "n_agg": 12,
+      "result": {
+        "test_mean_regret": 1.0531082153320312,
+        "test_mean_pred_reward": -21.019418716430664,
+        "test_mean_oracle_reward": -19.96630859375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 0,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 72.21748352050781,
+        "test_mean_pred_reward": 391.56781005859375,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 1,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 69.44384002685547,
+        "test_mean_pred_reward": 403.8531799316406,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 2,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 43.59719467163086,
+        "test_mean_pred_reward": 429.7541198730469,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 3,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 59.843448638916016,
+        "test_mean_pred_reward": 377.17578125,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 4,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 87.68226623535156,
+        "test_mean_pred_reward": 355.00860595703125,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 5,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 65.70503234863281,
+        "test_mean_pred_reward": 367.99700927734375,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 6,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 69.05037689208984,
+        "test_mean_pred_reward": 386.9633483886719,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 7,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 28.720035552978516,
+        "test_mean_pred_reward": 413.4706115722656,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 8,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 47.47144317626953,
+        "test_mean_pred_reward": 405.05596923828125,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "ts",
+      "seed_index": 9,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 60.606651306152344,
+        "test_mean_pred_reward": 396.5423583984375,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 0,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 60.27140426635742,
+        "test_mean_pred_reward": 403.5138244628906,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 1,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 71.95206451416016,
+        "test_mean_pred_reward": 401.3449401855469,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 2,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 40.20541763305664,
+        "test_mean_pred_reward": 433.1459045410156,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 3,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 68.20014953613281,
+        "test_mean_pred_reward": 368.81903076171875,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 4,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 78.14688873291016,
+        "test_mean_pred_reward": 364.5439453125,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 5,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 65.78353881835938,
+        "test_mean_pred_reward": 367.9184875488281,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 6,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 65.72637176513672,
+        "test_mean_pred_reward": 390.2873840332031,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 7,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 21.73455047607422,
+        "test_mean_pred_reward": 420.45611572265625,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 8,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 50.02599334716797,
+        "test_mean_pred_reward": 402.5013732910156,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "lp",
+      "seed_index": 9,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 69.23416900634766,
+        "test_mean_pred_reward": 387.91485595703125,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 0,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 60.65610122680664,
+        "test_mean_pred_reward": 403.1291809082031,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 1,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 71.23562622070312,
+        "test_mean_pred_reward": 402.0613708496094,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 2,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 44.449520111083984,
+        "test_mean_pred_reward": 428.9017639160156,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 3,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 53.37807846069336,
+        "test_mean_pred_reward": 383.64111328125,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 4,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 72.19709777832031,
+        "test_mean_pred_reward": 370.4937438964844,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 5,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 67.935546875,
+        "test_mean_pred_reward": 365.7665100097656,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 6,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 72.73896789550781,
+        "test_mean_pred_reward": 383.2748107910156,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 7,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 28.617755889892578,
+        "test_mean_pred_reward": 413.5729064941406,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 8,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 49.15843963623047,
+        "test_mean_pred_reward": 403.3689270019531,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "qp",
+      "seed_index": 9,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 64.34903717041016,
+        "test_mean_pred_reward": 392.79998779296875,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 0,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 59.64966583251953,
+        "test_mean_pred_reward": 404.1356201171875,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 1,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 82.6730728149414,
+        "test_mean_pred_reward": 390.62396240234375,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 2,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 42.28702926635742,
+        "test_mean_pred_reward": 431.06427001953125,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 3,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 57.67543411254883,
+        "test_mean_pred_reward": 379.34375,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 4,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 80.1695556640625,
+        "test_mean_pred_reward": 362.52130126953125,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 5,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 65.14346313476562,
+        "test_mean_pred_reward": 368.55859375,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 6,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 55.51142501831055,
+        "test_mean_pred_reward": 400.5023193359375,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 7,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 27.77817726135254,
+        "test_mean_pred_reward": 414.4124755859375,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 8,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 44.10934829711914,
+        "test_mean_pred_reward": 408.41802978515625,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sketch",
+      "seed_index": 9,
+      "n_agg": -1,
+      "result": {
+        "test_mean_regret": 72.90326690673828,
+        "test_mean_pred_reward": 384.2457580566406,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 0,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 54.05254364013672,
+        "test_mean_pred_reward": 409.7327575683594,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 1,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 75.62104797363281,
+        "test_mean_pred_reward": 397.6759338378906,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 2,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 40.02809143066406,
+        "test_mean_pred_reward": 433.32318115234375,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 3,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 68.40208435058594,
+        "test_mean_pred_reward": 368.61712646484375,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 4,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 87.45601654052734,
+        "test_mean_pred_reward": 355.2348327636719,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 5,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 71.84732818603516,
+        "test_mean_pred_reward": 361.8547058105469,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 6,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 46.606056213378906,
+        "test_mean_pred_reward": 409.4076843261719,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 7,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 30.06378173828125,
+        "test_mean_pred_reward": 412.12689208984375,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 8,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 54.80097579956055,
+        "test_mean_pred_reward": 397.7264099121094,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m10",
+      "seed_index": 9,
+      "n_agg": 10,
+      "result": {
+        "test_mean_regret": 148.44219970703125,
+        "test_mean_pred_reward": 308.7067565917969,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 0,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 68.78329467773438,
+        "test_mean_pred_reward": 395.00201416015625,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 1,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 95.53129577636719,
+        "test_mean_pred_reward": 377.7657165527344,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 2,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 45.203285217285156,
+        "test_mean_pred_reward": 428.1479797363281,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 3,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 68.40208435058594,
+        "test_mean_pred_reward": 368.61712646484375,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 4,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 76.53153228759766,
+        "test_mean_pred_reward": 366.1593322753906,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 5,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 71.4574203491211,
+        "test_mean_pred_reward": 362.24462890625,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 6,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 45.49989318847656,
+        "test_mean_pred_reward": 410.5137939453125,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 7,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 25.519018173217773,
+        "test_mean_pred_reward": 416.67169189453125,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 8,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 51.7947998046875,
+        "test_mean_pred_reward": 400.7325439453125,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m20",
+      "seed_index": 9,
+      "n_agg": 20,
+      "result": {
+        "test_mean_regret": 80.18233489990234,
+        "test_mean_pred_reward": 376.9666748046875,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 0,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 45.07695770263672,
+        "test_mean_pred_reward": 418.70831298828125,
+        "test_mean_oracle_reward": 463.7852478027344
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 1,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 66.05767059326172,
+        "test_mean_pred_reward": 407.2393493652344,
+        "test_mean_oracle_reward": 473.2969970703125
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 2,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 38.5677490234375,
+        "test_mean_pred_reward": 434.7835388183594,
+        "test_mean_oracle_reward": 473.3512878417969
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 3,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 54.78784942626953,
+        "test_mean_pred_reward": 382.2313537597656,
+        "test_mean_oracle_reward": 437.0191955566406
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 4,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 93.57621765136719,
+        "test_mean_pred_reward": 349.1146545410156,
+        "test_mean_oracle_reward": 442.69085693359375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 5,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 67.37376403808594,
+        "test_mean_pred_reward": 366.3282775878906,
+        "test_mean_oracle_reward": 433.7020568847656
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 6,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 50.622188568115234,
+        "test_mean_pred_reward": 405.39154052734375,
+        "test_mean_oracle_reward": 456.01373291015625
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 7,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 25.02252960205078,
+        "test_mean_pred_reward": 417.16815185546875,
+        "test_mean_oracle_reward": 442.1907043457031
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 8,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 58.792991638183594,
+        "test_mean_pred_reward": 393.734375,
+        "test_mean_oracle_reward": 452.52734375
+      }
+    },
+    {
+      "status": "ok",
+      "task": "inventory",
+      "scale": "basic",
+      "method": "sa_m30",
+      "seed_index": 9,
+      "n_agg": 30,
+      "result": {
+        "test_mean_regret": 84.4891128540039,
+        "test_mean_pred_reward": 372.6598815917969,
+        "test_mean_oracle_reward": 457.1490173339844
+      }
+    }
+  ]
+}

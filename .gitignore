@@ -11,6 +11,12 @@ env/
 .vscode*
 
 .claude/
+.cache/
+
+# Local reproduction work remains available on disk but is not part of the
+# Markov experiment package committed under notebooks/markov_aggregation/.
+notebooks/reproduction/
+notebooks/aggregation/
 **/*result*/
 **/results*.json
 **/*cache*/
