@@ -2,7 +2,7 @@
 # run_dflwin_10seeds.sh at |S|=100 with a PER-ARM balanced --loss_weight,
 # plus the two arms that were never run at this size (DFL-QP, DFL-Sketch).
 #
-#   bash mdp_lp/run_dfl_seeds_S_100.sh                    # LW_SCALE=1, seeds 1-8
+#   bash mdp_lp/run_dfl_seeds_S_100.sh                    # LW_SCALE=1, seeds 1-10
 #   LW_SCALE=0.3 bash mdp_lp/run_dfl_seeds_S_100.sh       # sweep the balance
 #   SEEDS="1 2 3" LW_SCALE=3 bash mdp_lp/run_dfl_seeds_S_100.sh
 #   ARMS="qpal_r1 sketchal_g02" bash mdp_lp/run_dfl_seeds_S_100.sh
@@ -71,7 +71,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 PY="${PY:-/net/csefiles/siemens/warriors-ls-recovery/users/zzhao628/#113442817/anaconda3/envs/rl/bin/python}"
 RESULTS_ROOT="${RESULTS_ROOT:-mdp_lp/results_dflwin_lwbal}"
 LOG_DIR="${LOG_DIR:-mdp_lp/logs/dflwin_lwbal}"
-SEEDS="${SEEDS:-1 2 3 4 5 6 7 8}"
+SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10}"
 COSTS="${COSTS:-high_margin}"
 SIZE="${SIZE:-100}"                  # |S| = B_MAX + s_max + 1
 B_MAX="${B_MAX:-20}"                 # matches the existing |S|=100 runs

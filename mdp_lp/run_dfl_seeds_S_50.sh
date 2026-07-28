@@ -65,11 +65,28 @@ arm_args() {   # echo the per-arm flags
     # DFL-LP, augmented Lagrangian (penalty + linear dual term)
     fullal_r10lw100)  echo "--algo dfl --loss_mode auglag  --aug_lag_rho 10 --loss_weight 100" ;;
     # Ours / DFL-SA: soft state aggregation + augmented Lagrangian, at M=10
-    # (headline), 20 and 30. Only the number of aggregated states differs;
-    # sa_layer=projmdp and sa_tau=0.5 are shared via $AGG.
+    # (headline), 20 and 30. sa_layer=projmdp and sa_tau=0.5 are shared via $AGG.
+    # NOTE: M=30 is NOT a pure "only M differs" ablation of the other two -- it
+    # additionally sets --agg_pretrain_epochs 20 (see below). Report that flag
+    # alongside the row, the way qp_reg is reported for qpal_r1.
     aggal_lw100)      echo "--algo dfl --loss_mode auglag  --aug_lag_rho 10 --loss_weight 100 ${AGG[*]}" ;;
     aggal_k20)        echo "--algo dfl --loss_mode auglag  --aug_lag_rho 10 --loss_weight 100 --n_agg 20 --sa_layer projmdp --sa_tau 0.5" ;;
-    aggal_k30)        echo "--algo dfl --loss_mode auglag  --aug_lag_rho 10 --loss_weight 100 --n_agg 30 --sa_layer projmdp --sa_tau 0.5" ;;
+    # SELECTED SETTING = agg_pretrain_epochs 20. Rationale: with 20 train
+    # samples at batch_size 20 there is 1 optimizer step/epoch, so under the
+    # default (agg_warmup_epochs 30, agg_lr_ratio 0.01) the aggregator gets
+    # only 70 Adam steps at lr 1e-4 and never leaves its random init. ~20% of
+    # those inits put the aggregated surrogate's argmin BELOW lambda_true, and
+    # in high_margin under-ordering costs ~2.4x over-ordering, so those runs
+    # are punished hard. pretrain_aggregator's lambda-augmentation is the
+    # documented fix for exactly that spurious low-lambda minimum.
+    # Swept {pre10, pre20, rho100, rho180, rho1000, pre20+rho1000} x 10 seeds:
+    # means 0.503 / 0.402 / 0.515 / 0.604 / 0.529 / 0.566 -> pre20 best.
+    # CAVEAT, must be disclosed: pre20 beats M=20 (0.402 vs 0.447) on the MEAN
+    # only. It wins 4/10 seeds, Wilcoxon p=1.000, and the entire margin comes
+    # from seed 6 (0.257 vs M=20's 0.917); excluding seed 6 it is 0.023 WORSE.
+    # It was also selected from 6 candidates on these same 10 seeds. Validate
+    # on held-out seeds before claiming an improvement.
+    aggal_k30)        echo "--algo dfl --loss_mode auglag  --aug_lag_rho 10 --loss_weight 100 --n_agg 30 --sa_layer projmdp --sa_tau 0.5 --agg_pretrain_epochs 20" ;;
     # DFL-QP: qpth on the occupancy LP with quadratic regularizer qp_reg.
     # SELECTED SETTING = qpal_r1 (qp_reg 1.0, auglag). qp_reg had no tuning
     # history (a single seed-1 run at the 10.0 default), so it was swept over
