@@ -110,6 +110,10 @@ def _run_one_seed(args_dict: dict) -> dict:
             "solver": "lp",
             "sa_K": args_dict.get("sa_K", 8),
             "sa_ratio": args_dict.get("sa_ratio", 0.2),
+            # Defaults reproduce the paper's Eq.(5) penalty loss exactly.
+            "loss_mode": args_dict.get("loss_mode", "penalty"),
+            "dual_weight": args_dict.get("dual_weight", 1.0),
+            "dual_feasible_only": args_dict.get("dual_feasible_only", False),
         }
     elif algo == "dfl_qpth":
         # Historical name — actually runs Gurobi-QP, not the qpth library.
@@ -205,6 +209,12 @@ def _job(args, algo: str, seed: int) -> dict:
         "world_lr": args.world_lr,
         "sa_K": int(getattr(args, "sa_K", 8)),
         "sa_ratio": float(getattr(args, "sa_ratio", 0.2)),
+        # DFL loss variant (see train_cartpole.run_neural_dfl). The defaults
+        # are the paper's Eq.(5) penalty loss, so untouched callers are
+        # byte-identical.
+        "loss_mode": str(getattr(args, "loss_mode", "penalty")),
+        "dual_weight": float(getattr(args, "dual_weight", 1.0)),
+        "dual_feasible_only": bool(getattr(args, "dual_feasible_only", False)),
         "torch_threads": 1,
     }
 
@@ -214,6 +224,18 @@ def _cache_key(prefix: str, args) -> str:
     wm_tag = (f"_wm{args.world_epochs}-{args.world_lr}"
               if args.use_world_model else "")
     qpth_tag = f"_qpeta{args.qp_eta}" if "qpth" in prefix else ""
+    # DFL loss variant, mirroring run_dfl_vs_qpth._canonical_cache_key so the
+    # figure code can locate auglag runs. Empty for the paper's Eq.(5) penalty
+    # loss, so every pre-existing cache stays reachable under its original name.
+    lm = str(getattr(args, "loss_mode", "penalty"))
+    lm_tag = "" if lm == "penalty" else f"_lm{lm}"
+    if lm in ("lagrangian", "auglag"):
+        if float(getattr(args, "dual_weight", 1.0)) != 1.0:
+            lm_tag += f"_dw{float(args.dual_weight)}"
+        if bool(getattr(args, "dual_feasible_only", False)):
+            lm_tag += "_dfo"
+    if float(getattr(args, "rho", 10.0)) != 10.0:
+        lm_tag += f"_rho{float(args.rho)}"
     return (
         f"{prefix}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
@@ -225,6 +247,7 @@ def _cache_key(prefix: str, args) -> str:
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
         f"{qpth_tag}"
+        f"{lm_tag}"
         f"{wm_tag}"
     )
 

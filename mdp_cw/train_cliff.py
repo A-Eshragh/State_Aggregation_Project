@@ -33,6 +33,7 @@ Evaluation:
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from datetime import datetime
@@ -55,7 +56,7 @@ from mdp_cw.weather_dynamics import (
     REGIME_NAMES_V4,
 )
 from mdp_lp.mdp import MDP as GenericMDP
-from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
+from mdp_lp.solvers.dense_lp_solver import DenseLPSolver, solve_lp_gurobi
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 from mdp_lp.solvers.sketched_lp import sketched_lp
@@ -197,6 +198,24 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
     hidden = int(getattr(args, "hidden_dim", 64))
     feat_dim = int(getattr(args, "feat_dim", 32))
 
+    # Optional validation split carved out of the TRAINING set. Used only to
+    # pick the epoch to evaluate (early stopping); the test set is never seen.
+    # Selecting on train reward instead would favour epochs that memorise which
+    # individual training samples are hazardous.
+    val_loader = None
+    _vf = float(getattr(args, "early_stop_val_frac", 0.0) or 0.0)
+    if _vf > 0.0:
+        from torch.utils.data import DataLoader, Subset
+        _ds = train_loader.dataset
+        _n = len(_ds)
+        _nv = max(1, int(round(_n * _vf)))
+        _g = torch.Generator().manual_seed(int(getattr(args, "seed", 0)) + 12345)
+        _perm = torch.randperm(_n, generator=_g).tolist()
+        _bs = int(getattr(args, "batch_size", 32))
+        val_loader = DataLoader(Subset(_ds, _perm[:_nv]), batch_size=_bs, shuffle=False)
+        train_loader = DataLoader(Subset(_ds, _perm[_nv:]), batch_size=_bs, shuffle=True)
+        print(f"[Train] early-stop validation split: {_nv} val / {_n - _nv} train")
+
     # v3 plumbing: volatile cells (if any) drive the slot count on both
     # FeatureNet (pretraining target) and TransitionHead (compact slip head).
     vol_cells = list(meta.get("volatile_cells", []) or [])
@@ -222,7 +241,10 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
         feature_net.freeze()
 
     # --- Stage 2: build the decision head and optimizer ---------------------------
-    head = TransitionHead(feat_dim=feat_dim, volatile_cells=vol_cells).to(device)
+    head = TransitionHead(
+        feat_dim=feat_dim, volatile_cells=vol_cells,
+        ambient_only=bool(getattr(args, "misspec_ambient", False)),
+    ).to(device)
     model = CliffTransitionModel(feature_net, head, detach_features=True).to(device)
 
     # Optional soft state aggregator (only used for algo == 'dfl_ssa').
@@ -302,6 +324,13 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
 
     # --- training loop ------------------------------------------------------------
     start_time = time.time()
+    # Early stopping on TRAIN decision quality (uses training labels only, exactly
+    # like the two-stage CE objective does). Guards against DFL runs that wander
+    # into over-optimistic predictors late in training.
+    _es_on = bool(getattr(args, "early_stop_on_train_reward", False))
+    _es_best = float("-inf")
+    _es_head = None
+    _es_agg = None
     head.train()
     for epoch in range(int(args.n_epochs)):
         total_loss = 0.0
@@ -312,7 +341,7 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
         epoch_backward_time = 0.0
         rewards_this_epoch: list[float] = []
 
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader):
             w, z, slip_compact, P_true, r_true, y_true, v_true = batch
             B = w.shape[0]
 
@@ -334,11 +363,41 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                                                          lp_solver, qp_solver)
                 epoch_solver_time += solver_dt
 
-            elif args.algo in ("dfl", "dfl_qpth", "dfl_ssa", "dfl_sketch"):
+            elif args.algo in ("dfl", "dfl_qpth", "dfl_ssa", "dfl_sketch", "dfl_feas") and \
+                    epoch < int(getattr(args, "head_ce_warmup_epochs", 0)):
+                # CE-only warmup for the freshly initialized TransitionHead:
+                # unlike mdp_lp, the head is NOT pretrained, so with a small
+                # loss_weight the DFL phase would otherwise start from random
+                # predictions. Train pure CE first; the DFL loss takes over
+                # afterwards. Solve is metric-only here.
+                loss = pred_loss
+                dfl_loss_val = 0.0
+                with torch.no_grad():
+                    y_star, solver_dt = _solve_with_algo(
+                        args, P_pred, r_pred, lp_solver, qp_solver,
+                        agg=agg, sa_tau=sa_tau,
+                    )
+                epoch_solver_time += solver_dt
+            elif args.algo in ("dfl", "dfl_qpth", "dfl_ssa", "dfl_sketch", "dfl_feas"):
                 t0 = time.time()
 
                 agg_info = None
-                if args.algo == "dfl_ssa":
+                if args.algo == "dfl_feas":
+                    # DFL-Feas: Odece (Mandi et al., NeurIPS'25) adapted to the
+                    # occupancy LP, ported from mdp_lp/train_elasticity.py.
+                    # Solver-free gradients: y^- is solved under no_grad on the
+                    # PREDICTED MDP and y_true comes from the dataset, so both
+                    # are constants. The predictor is reached only through
+                    # c(y; th) = H_pred y - gamma.
+                    mdp_pred = CliffWalkingLP(P=P_pred, r=r_pred, beta=beta)
+                    H_pred = mdp_pred.build_H(P_pred)          # differentiable
+                    r_flat_pred = r_pred.reshape(B, -1)
+                    with torch.no_grad():
+                        y_neg, _, _, _ = solve_lp(
+                            CliffWalkingLP(P=P_pred.detach(), r=r_pred.detach(),
+                                           beta=beta), lp_solver)
+                    y_star = y_neg
+                elif args.algo == "dfl_ssa":
                     # Aggregate the predicted MDP into M clusters before solving.
                     t_agg = time.time()
                     P_solve, r_solve, gamma_solve, agg_info = agg(
@@ -379,7 +438,24 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                                 qp_solver=qp_solver,
                             )
                         else:
-                            y_star = DifferentiableLPSolver.apply(H_pred, r_flat_pred, gamma)
+                            _pstd = float(getattr(args, "dfl_perturb_std", 0.0) or 0.0)
+                            if _pstd > 0.0:
+                                # PFYL-style perturbation: average the LP solution
+                                # over K reward draws so the gradient averages over
+                                # several optimal bases instead of the single basis
+                                # at the current prediction.
+                                _K = int(getattr(args, "dfl_n_perturb", 4))
+                                _ys = [
+                                    DifferentiableLPSolver.apply(
+                                        H_pred,
+                                        r_flat_pred + _pstd * torch.randn_like(r_flat_pred),
+                                        gamma,
+                                    )
+                                    for _ in range(_K)
+                                ]
+                                y_star = torch.stack(_ys, dim=0).mean(dim=0)
+                            else:
+                                y_star = DifferentiableLPSolver.apply(H_pred, r_flat_pred, gamma)
                     elif args.algo == "dfl_qpth":
                         y_star = solve_occupancy_qp_qpth(
                             H_pred, r_flat_pred, gamma,
@@ -396,6 +472,9 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                 epoch_solver_time += (time.time() - t0)
 
                 rho = float(getattr(args, "aug_lag_rho", 0.1))
+                # loss_mode in {regret, penalty, lagrangian, auglag}; default
+                # 'penalty' reproduces the original Eq.(5) loss EXACTLY.
+                loss_mode = str(getattr(args, "loss_mode", "penalty"))
                 if args.algo == "dfl_ssa" and agg_info is not None:
                     # Aug-lag in the AGGREGATED true MDP (mirrors mdp_lp).
                     # Aggregating the true MDP with the same W keeps the
@@ -426,6 +505,62 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                     )
                     aug_lag = rho * violation.pow(2).mean()
                     v_true_pred = torch.sum(r_true_agg_flat * y_agg, dim=1).mean()
+                    if loss_mode in ("lagrangian", "auglag"):
+                        # Linear dual term needs the dual of the AGGREGATED true
+                        # LP. H̄, γ̄ change with W every step, so it is solved
+                        # fresh under no_grad — a constant wrt θ (mirrors
+                        # mdp_lp/train_elasticity).
+                        with torch.no_grad():
+                            y_agg_true, _, dual_agg = solve_lp_gurobi(
+                                H_true_agg.detach(), r_true_agg_flat.detach(),
+                                gamma_true_agg.detach())
+                        if batch_idx == 0:
+                            # Strong-duality gate: γ̄ᵀν̄ == r̄ᵀȳ* at the
+                            # aggregated-true optimum; a flipped dual sign would
+                            # double the bias instead of cancelling it.
+                            lhs = (gamma_true_agg.detach() * dual_agg).sum(dim=1)
+                            rhs = (r_true_agg_flat.detach() * y_agg_true).sum(dim=1)
+                            if not torch.allclose(lhs, rhs, rtol=1e-2, atol=1e-2):
+                                rel = ((lhs - rhs).abs() / (rhs.abs() + 1e-8)).max().item()
+                                raise RuntimeError(
+                                    "Aggregated linear-term consistency check failed: "
+                                    f"gamma_agg^T dual != r_agg^T y*_agg (max rel err {rel:.3e}); "
+                                    "dual sign convention inconsistent — auglag results untrustworthy.")
+                        linear_term = -(dual_agg * violation).sum(dim=1).mean()
+                elif args.algo == "dfl_feas":
+                    # Each equality is the softplus pair of its two inequality
+                    # sides; UNSAT sides come from the sign of the TRUE violation
+                    # of y^- (tolerance odece_tol, since exact equality
+                    # feasibility is measure-zero).
+                    ups = float(getattr(args, "odece_margin", 0.01))
+                    tol = float(getattr(args, "odece_tol", 1e-4))
+                    o_alpha = float(getattr(args, "odece_alpha", 0.5))
+                    mse_w = float(getattr(args, "odece_mse_weight", 0.0))
+                    r_true_flat = r_true.reshape(B, -1)
+                    with torch.no_grad():
+                        mdp_true = CliffWalkingLP(P=P_true, r=r_true, beta=beta)
+                        H_true = mdp_true.build_H(P_true)
+                    violation = gamma - torch.einsum("bij,bj->bi", H_true, y_star)
+                    v_true_pred = torch.sum(r_true_flat * y_star, dim=1).mean()
+                    # OPL: the true optimum should satisfy the PREDICTED flow
+                    # constraints.
+                    c_true = torch.einsum("bij,bj->bi", H_pred, y_true) - gamma
+                    opl = (F.softplus(ups + c_true)
+                           + F.softplus(ups - c_true)).sum(dim=1).mean()
+                    # IPL: at c_neg = 0 the value is constant but the gradient
+                    # -sigma(ups)*dc/dtheta pushes the predicted residual at y^-
+                    # toward the sign of its true violation.
+                    c_neg = torch.einsum("bij,bj->bi", H_pred, y_star) - gamma
+                    v_neg = -violation                     # = H_true y^- - gamma
+                    unsat_pos = (v_neg > tol).float()
+                    unsat_neg = (v_neg < -tol).float()
+                    infeas = (v_neg.abs().amax(dim=1, keepdim=True) > tol).float()
+                    ipl = (infeas * (unsat_pos * F.softplus(ups - c_neg)
+                                     + unsat_neg * F.softplus(ups + c_neg))).sum(dim=1).mean()
+                    dfl_loss = o_alpha * ipl + (1.0 - o_alpha) * opl
+                    if mse_w > 0:
+                        dfl_loss = dfl_loss + mse_w * F.mse_loss(r_flat_pred, r_true_flat)
+                    loss_mode = None       # skip the shared loss_mode branches
                 else:
                     r_true_flat = r_true.reshape(B, -1)
                     with torch.no_grad():
@@ -434,8 +569,41 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                     violation = gamma - torch.einsum("bij,bj->bi", H_true, y_star)
                     aug_lag = rho * violation.pow(2).mean()
                     v_true_pred = torch.sum(r_true_flat * y_star, dim=1).mean()
-                dfl_loss = -v_true_pred + aug_lag
-                loss = dfl_loss + float(getattr(args, "loss_weight", 1.0)) * pred_loss
+                    if loss_mode in ("lagrangian", "auglag"):
+                        # Linear dual term (v*)^T(H_true y - gamma) = -(v*)^T violation.
+                        # The true MDP is fixed per sample; solving under no_grad
+                        # keeps the dual a constant wrt θ.
+                        with torch.no_grad():
+                            y_true_lp, _, dual_true = solve_lp_gurobi(
+                                H_true, r_true_flat.detach(), gamma)
+                        if batch_idx == 0:
+                            lhs = (gamma * dual_true).sum(dim=1)
+                            rhs = (r_true_flat.detach() * y_true_lp).sum(dim=1)
+                            if not torch.allclose(lhs, rhs, rtol=1e-2, atol=1e-2):
+                                rel = ((lhs - rhs).abs() / (rhs.abs() + 1e-8)).max().item()
+                                raise RuntimeError(
+                                    "Linear-term consistency check failed: "
+                                    f"gamma^T dual != r^T y*_true (max rel err {rel:.3e}); "
+                                    "dual sign convention inconsistent — auglag results untrustworthy.")
+                        linear_term = -(dual_true * violation).sum(dim=1).mean()
+                if loss_mode is not None:      # dfl_feas builds its own loss
+                    dfl_loss = -v_true_pred
+                if loss_mode in ("penalty", "auglag"):
+                    dfl_loss = dfl_loss + aug_lag
+                if loss_mode in ("lagrangian", "auglag"):
+                    dfl_loss = dfl_loss + linear_term
+                aw = getattr(args, "ambient_ce_weight", None)
+                if aw is not None and slip_pred_compact.dim() == 4 and slip_pred_compact.shape[1] > 1:
+                    # Split CE anchoring: clamp the ambient slot (shared by all
+                    # non-volatile cells; corrupting it wrecks the whole MDP)
+                    # while loss_weight applies only to the volatile slots the
+                    # decision gradient needs to move.
+                    ce_amb = _slip_ce(slip_pred_compact[:, :1], slip_compact[:, :1])
+                    ce_vol = _slip_ce(slip_pred_compact[:, 1:], slip_compact[:, 1:])
+                    loss = dfl_loss + float(aw) * ce_amb \
+                        + float(getattr(args, "loss_weight", 1.0)) * ce_vol
+                else:
+                    loss = dfl_loss + float(getattr(args, "loss_weight", 1.0)) * pred_loss
                 dfl_loss_val = float(dfl_loss.item())
             else:
                 raise ValueError(f"Unknown algo: {args.algo}")
@@ -459,13 +627,33 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                 # represent a deployable policy on the original MDP. Solve the
                 # plain LP on the (detached) predicted MDP for the metric,
                 # mirroring how mdp_lp evaluates dfl_sketch / dfl_ssa.
-                if args.algo in ("dfl_sketch", "dfl_ssa"):
+                if args.algo in ("dfl_qpth", "dfl_sketch", "dfl_ssa"):
                     mdp_eval = CliffWalkingLP(P=P_pred.detach(), r=r_pred.detach(), beta=beta)
                     y_eval, _, _, _ = solve_lp(mdp_eval, lp_solver)
                 v, _ = eval_y_on_true_mdp(P_true, r_true, y_eval, gamma, beta)
                 rewards_this_epoch.append(v.mean().item())
 
         train_reward_list.append(float(np.mean(rewards_this_epoch)))
+        _es_metric = train_reward_list[-1]
+        if _es_on and val_loader is not None:
+            head.eval()
+            _vtot, _vn = 0.0, 0
+            with torch.no_grad():
+                for _b in val_loader:
+                    _w, _z, _sc, _Pt, _rt, _yt, _vt = _b
+                    _Pp, _rp, _ = model(_w)
+                    _y, _ = _solve_with_algo(args, _Pp, _rp, lp_solver, qp_solver,
+                                             agg=agg, sa_tau=sa_tau)
+                    _gm = _build_gamma(_w.shape[0], _Pp.shape[1], _w.device, _Pp.dtype,
+                                       start_state=_start_state())
+                    _v, _ = eval_y_on_true_mdp(_Pt, _rt, _y, _gm, beta)
+                    _vtot += float(_v.sum().item()); _vn += int(_v.numel())
+            head.train()
+            _es_metric = _vtot / max(1, _vn)
+        if _es_on and _es_metric > _es_best:
+            _es_best = _es_metric
+            _es_head = copy.deepcopy(head.state_dict())
+            _es_agg = copy.deepcopy(agg.state_dict()) if agg is not None else None
         train_pred_loss_list.append(total_pred_loss / max(1, len(train_loader)))
         train_dfl_loss_list.append(total_dfl_loss / max(1, len(train_loader)))
         train_time_list.append(time.time() - start_time)
@@ -496,6 +684,11 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
             torch.save(feature_net.state_dict(), save_dir / "feature_net_state.pt")
 
     print(f"[Train] done ({time.time()-start_time:.1f}s)")
+    if _es_on and _es_head is not None:
+        head.load_state_dict(_es_head)
+        if agg is not None and _es_agg is not None:
+            agg.load_state_dict(_es_agg)
+        print(f"[Train] early stop: restored best-train-reward checkpoint ({_es_best:.3f})")
 
     # --- Evaluation ---------------------------------------------------------------
     print("[Eval] evaluating on test set...")
@@ -622,20 +815,13 @@ def _solve_with_algo(args, P_pred: torch.Tensor, r_pred: torch.Tensor,
         r_flat = r_pred.reshape(B, -1)
         gamma = mdp.build_gamma(B, S, P_pred.device)
         y_star = DifferentiableLPSolver.apply(H, r_flat, gamma)
-    elif args.algo == "dfl_qpth":
-        mdp = CliffWalkingLP(P=P_pred, r=r_pred, beta=beta)
-        H = mdp.build_H(P_pred)
-        r_flat = r_pred.reshape(B, -1)
-        gamma = mdp.build_gamma(B, S, P_pred.device)
-        y_star = solve_occupancy_qp_qpth(
-            H, r_flat, gamma,
-            reg=float(getattr(args, "qp_reg", 0.1)),
-            qp_solver=qp_solver,
-        )
-    elif args.algo in ("dfl_sketch", "dfl_ssa"):
-        # At test/metric time both sketch- and aggregator-smoothed models
-        # deploy by solving the plain LP on the (predicted) full-state MDP.
-        # Aggregation/sketching only smooth the training gradient.
+    elif args.algo in ("dfl_qpth", "dfl_sketch", "dfl_ssa", "dfl_feas"):
+        # At test/metric time all smoothed surrogates (QP regularization,
+        # sketching, aggregation) deploy by solving the plain LP on the
+        # (predicted) full-state MDP -- the smoothing is a training-gradient
+        # device only. Deploying the eta-regularized QP occupancy directly is
+        # badly biased at high beta (eta*||y||^2 dominates when ||y|| ~ 1/(1-beta)).
+        # dfl_feas is solver-free at train time and likewise deploys the plain LP.
         mdp = CliffWalkingLP(P=P_pred, r=r_pred, beta=beta)
         y_star, _, _, _ = solve_lp(mdp, lp_solver)
     else:

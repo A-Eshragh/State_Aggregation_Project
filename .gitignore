@@ -12,3 +12,4 @@ venv/
 **/*result*/
 **/results*.json
 **/*cache*/
+**/*logs*/

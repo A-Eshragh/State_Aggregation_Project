@@ -34,7 +34,8 @@ from mdp_cw.train_cliff import train_eval_cliff
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--algo", type=str, default="dfl",
-                   choices=["twostage", "dfl", "dfl_qpth", "dfl_ssa", "dfl_sketch"])
+                   choices=["twostage", "dfl", "dfl_qpth", "dfl_ssa", "dfl_sketch",
+                            "dfl_feas"])
 
     # Data
     p.add_argument("--n_samples", type=int, default=200)
@@ -45,7 +46,7 @@ def parse_args():
     p.add_argument("--train_frac", type=float, default=0.5)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--regime_set", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6"],
+    p.add_argument("--regime_set", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7"],
                    help="v1 = 4 regimes (original, state-independent); "
                         "v2 = 8 policy-diverse regimes (state-independent); "
                         "v3 = 4 regimes, 3 volatile cells (state-dependent); "
@@ -108,12 +109,44 @@ def parse_args():
         help="Reference mass on {ice_west, ice_mid, ice_east} under k=7 (default 3/10).",
     )
     p.add_argument("--aug_lag_rho", type=float, default=0.1)
+    p.add_argument("--ambient_ce_weight", type=float, default=None,
+                   help="DFL algos, state-dependent regimes only: separate CE "
+                        "weight for the ambient slip slot (strong anchor); "
+                        "--loss_weight then applies only to volatile slots.")
+    p.add_argument("--stratify_regimes", action="store_true",
+                   help="Sample regimes with exact (largest-remainder) counts "
+                        "instead of i.i.d. draws, removing sampling variance in "
+                        "the hazard rate. Population distribution unchanged.")
+    p.add_argument("--early_stop_val_frac", type=float, default=0.0,
+                   help="Fraction of the TRAINING set held out to select the "
+                        "early-stopping epoch (0 = select on train reward).")
+    p.add_argument("--early_stop_on_train_reward", action="store_true",
+                   help="Evaluate the epoch with the best TRAIN decision quality "
+                        "instead of the last epoch (uses training labels only).")
+    p.add_argument("--head_ce_warmup_epochs", type=int, default=0,
+                   help="DFL algos: train the TransitionHead with pure CE for "
+                        "this many epochs before enabling the DFL loss (the "
+                        "head is freshly initialized, unlike mdp_lp's).")
+    p.add_argument("--misspec_ambient", action="store_true",
+                   help="Deliberate model misspecification: the transition head "
+                        "predicts one ambient slip broadcast to all volatile "
+                        "slots, so it cannot localize state-dependent hazards.")
+    p.add_argument("--loss_mode", type=str, default="penalty",
+                   choices=["regret", "penalty", "lagrangian", "auglag"],
+                   help="DFL loss variant (mirrors mdp_lp train_elasticity): "
+                        "'regret' = -r^T y ; 'penalty' = Eq.(5) penalty-only, "
+                        "DEFAULT (unchanged) ; 'lagrangian' = -r^T y + "
+                        "v*^T(H_true y - gamma) ; 'auglag' = penalty + linear "
+                        "dual term (proposed unbiased loss).")
     p.add_argument(
         "--dfl_perturb_std",
         type=float,
         default=0.0,
         help="PFYL noise std added to r_pred before LP solve in dfl mode (0 = disabled).",
     )
+    p.add_argument("--dfl_n_perturb", type=int, default=4,
+                   help="Number of perturbed LP solves averaged when "
+                        "--dfl_perturb_std > 0 (PFYL smoothing).")
     p.add_argument(
         "--qpth_warmup_epochs",
         type=int,
@@ -139,6 +172,19 @@ def parse_args():
     p.add_argument("--sketch_mode", type=str, default="gaussian",
                    choices=["gaussian", "rademacher", "subsample"],
                    help="Sketch matrix distribution.")
+
+    # DFL-Feas: Odece (Mandi et al., NeurIPS'25) adapted to the occupancy LP
+    # (only used by --algo dfl_feas). Defaults match mdp_lp's.
+    p.add_argument("--odece_alpha", type=float, default=0.5,
+                   help="DFL-Feas: infeasibility-aversion weight alpha on IPL vs OPL.")
+    p.add_argument("--odece_margin", type=float, default=0.01,
+                   help="DFL-Feas: softplus margin Upsilon.")
+    p.add_argument("--odece_tol", type=float, default=1e-4,
+                   help="DFL-Feas: violation tolerance tau for the UNSAT/Feas "
+                        "indicators (equality constraints are never exactly satisfied).")
+    p.add_argument("--odece_mse_weight", type=float, default=0.0,
+                   help="DFL-Feas: weight mu on ||r_pred - r_true||^2 "
+                        "(known-objective completion).")
 
     # IO
     p.add_argument("--save_dir", type=str, default=None)
@@ -189,6 +235,7 @@ def main():
         cliff_penalty=args.cliff_penalty,
         regime_weights=regime_weights,
         test_regime_weights=test_regime_weights,
+        stratify=bool(args.stratify_regimes),
     )
     train_loader, test_loader, meta = prepare_cliff_data(cfg)
 

@@ -48,6 +48,7 @@ SOLVER_TO_PREFIX = {
     "gurobi_qp":      "curve_qpth",       # historical "DFL-QP" slot in panel
     "qpth":           "curve_qpth",       # real qpth library — same slot
     "sketch":         "curve_sketch",     # sketch-and-solve LP (this repo)
+    "feas":           "curve_feas",       # DFL-Feas / Odece [34] baseline
     "two_stage":      "curve_two_stage_mbrl",   # ← reuses MBRL filename so
                                                 #   make_figures.py picks it
                                                 #   up unchanged
@@ -64,6 +65,25 @@ def _canonical_cache_key(solver: str, args) -> str:
     if solver == "sketch":
         sketch_tag = (
             f"_K{args.n_sketches}_r{args.sketch_ratio}_m{args.sketch_mode}")
+    # Tags for the rebuttal arms. Both are empty for the paper's original
+    # configuration, so previously cached JSONs keep their exact filenames.
+    lm_tag = "" if args.loss_mode == "penalty" else f"_lm{args.loss_mode}"
+    if args.loss_mode in ("lagrangian", "auglag"):
+        # Only the linear-term arms read these, so the tags stay empty for
+        # every previously-run configuration.
+        if args.dual_weight != 1.0:
+            lm_tag += f"_dw{args.dual_weight}"
+        if args.dual_feasible_only:
+            lm_tag += "_dfo"
+    # rho was never in the key; include it only when swept off its default so
+    # existing filenames are unchanged.
+    if args.rho != 10.0:
+        lm_tag += f"_rho{args.rho}"
+    feas_tag = ""
+    if solver == "feas":
+        lm_tag = ""   # loss_mode does not apply to the Odece loss
+        feas_tag = (f"_a{args.odece_alpha}_mu{args.odece_mse_weight}"
+                    f"_neg{args.odece_neg_solver}")
     return (
         f"{prefix}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
@@ -75,7 +95,12 @@ def _canonical_cache_key(solver: str, args) -> str:
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
         f"{qpth_tag}"
+        # lm_tag precedes sketch_tag so that this name equals
+        # make_figure1_cartpole._cache_key(...) + "_K{K}_r{r}_m{mode}", which is
+        # how make_figures.py reconstructs the sketch filename.
+        f"{lm_tag}"
         f"{sketch_tag}"
+        f"{feas_tag}"
     )
 
 
@@ -198,11 +223,16 @@ def _run_one(args_dict: dict) -> dict:
                 n_ce_steps=args_dict["n_ce_steps"],
                 n_dfl_steps=args_dict["n_dfl_steps"],
                 dfl_lr=args_dict["dfl_lr"],
+                # default 'penalty' keeps this arm byte-identical to before
+                loss_mode=args_dict["loss_mode"],
                 solver="lp",  # patched binding handles the sketching
             )
         finally:
             tc.differentiable_reduced_lp = original_lp
     else:
+        # 'feas' = DFL-Feas / Odece [34]: same features, pretrain and evaluation
+        # as DFL-LP, only the Phase-B loss differs (solver-free). It rides the
+        # 'lp' layer so that its y^- ('arm' mode) matches DFL-LP's solution.
         out = run_neural_dfl(
             cfg, verbose=False,
             bins_per_dim=args_dict["bins_per_dim"],
@@ -213,7 +243,16 @@ def _run_one(args_dict: dict) -> dict:
             n_ce_steps=args_dict["n_ce_steps"],
             n_dfl_steps=args_dict["n_dfl_steps"],
             dfl_lr=args_dict["dfl_lr"],
-            solver=solver,
+            solver="lp" if solver == "feas" else solver,
+            algo="dfl_feas" if solver == "feas" else "dfl",
+            loss_mode=args_dict["loss_mode"],
+            odece_alpha=args_dict["odece_alpha"],
+            odece_margin=args_dict["odece_margin"],
+            odece_tol=args_dict["odece_tol"],
+            odece_mse_weight=args_dict["odece_mse_weight"],
+            odece_neg_solver=args_dict["odece_neg_solver"],
+            dual_weight=args_dict["dual_weight"],
+            dual_feasible_only=args_dict["dual_feasible_only"],
         )
     elapsed = time.time() - t0
     rewards = [float(h["avg_reward"]) for h in out["history"]]
@@ -225,6 +264,10 @@ def _run_one(args_dict: dict) -> dict:
         "solver_total": float(out["solver_total_time"]),
         "forward": float(out["solver_forward_time"]),
         "backward": float(out["backward_time"]),
+        "feas_grad_hits": int(out.get("feas_grad_hits", 0)),
+        "feas_grad_steps": int(out.get("feas_grad_steps", 0)),
+        "dual_fallbacks": int(out.get("dual_fallbacks", 0)),
+        "dual_solves": int(out.get("dual_solves", 0)),
     }
 
 
@@ -232,9 +275,37 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--solvers", type=str, nargs="+", default=["lp", "qpth"],
-                   choices=["lp", "gurobi_qp", "qpth", "sketch",
+                   choices=["lp", "gurobi_qp", "qpth", "sketch", "feas",
                             "two_stage", "two_stage_mbrl"])
     p.add_argument("--n_workers", type=int, default=4)
+
+    # --- rebuttal arms -------------------------------------------------------
+    p.add_argument("--loss_mode", type=str, default="penalty",
+                   choices=["regret", "penalty", "lagrangian", "auglag"],
+                   help="DFL loss variant for the LP/QP arms (mirrors "
+                        "mdp_lp/train_elasticity). 'penalty' = Eq.(5), the "
+                        "paper's default, byte-identical to previous runs.")
+    p.add_argument("--dual_weight", type=float, default=1.0,
+                   help="Scalar on the aug-Lagrangian linear term. 1.0 = exact "
+                        "AL; 0.0 recovers --loss_mode penalty exactly.")
+    p.add_argument("--dual_feasible_only", action="store_true",
+                   help="Apply the linear term only on steps where the true LP "
+                        "was genuinely feasible (multiplier is a real LP dual, "
+                        "not a slack-model artefact).")
+    p.add_argument("--odece_alpha", type=float, default=0.5,
+                   help="DFL-Feas: weight on IPL vs OPL (alpha*IPL + (1-a)*OPL).")
+    p.add_argument("--odece_margin", type=float, default=0.01,
+                   help="DFL-Feas: softplus margin upsilon.")
+    p.add_argument("--odece_tol", type=float, default=1e-4,
+                   help="DFL-Feas: violation tolerance for UNSAT side selection.")
+    p.add_argument("--odece_mse_weight", type=float, default=0.0,
+                   help="DFL-Feas: weight of the objective-completion term "
+                        "||c_shaped - c_true||^2 (0 = faithful [34]).")
+    p.add_argument("--odece_neg_solver", type=str, default="plain",
+                   choices=["plain", "arm"],
+                   help="DFL-Feas: how y^- is obtained. 'plain' solves the "
+                        "predicted problem exactly, as [34] specifies; 'arm' "
+                        "reuses this arm's sketched layer.")
 
     # Panel-3 anchor defaults — match make_figure1_cartpole / make_figure_3panel.
     p.add_argument("--n_iterations", type=int, default=60)
@@ -320,6 +391,14 @@ def main():
                 "n_sketches": args.n_sketches,
                 "sketch_ratio": args.sketch_ratio,
                 "sketch_mode": args.sketch_mode,
+                "loss_mode": args.loss_mode,
+                "odece_alpha": args.odece_alpha,
+                "odece_margin": args.odece_margin,
+                "odece_tol": args.odece_tol,
+                "odece_mse_weight": args.odece_mse_weight,
+                "odece_neg_solver": args.odece_neg_solver,
+                "dual_weight": args.dual_weight,
+                "dual_feasible_only": args.dual_feasible_only,
                 "torch_threads": 1,
             })
 
@@ -367,6 +446,19 @@ def main():
               f"{st.pstdev(bests):>8.2f} "
               f"{st.mean(finals):>9.2f}")
 
+        if solver == "feas":
+            hits = sum(r.get("feas_grad_hits", 0) for r in rs)
+            steps = sum(r.get("feas_grad_steps", 0) for r in rs)
+            frac = hits / steps if steps else float("nan")
+            print(f"           DFL-Feas gradient audit: {hits}/{steps} "
+                  f"DFL steps produced a non-zero feature gradient "
+                  f"({frac:.1%})")
+        dsolv = sum(r.get("dual_solves", 0) for r in rs)
+        if dsolv:
+            dfb = sum(r.get("dual_fallbacks", 0) for r in rs)
+            print(f"           true-LP dual solves: {dsolv}, of which "
+                  f"{dfb} ({dfb / dsolv:.1%}) hit Gurobi's slack fallback")
+
         if not args.no_save:
             # Save under the canonical name make_figure1_cartpole would have
             # used → make_figures.py picks these up without renaming.
@@ -378,6 +470,11 @@ def main():
                 "solver_times_per_seed": [r["solver_total"] for r in rs],
                 "forward_times_per_seed": [r["forward"] for r in rs],
                 "backward_times_per_seed": [r["backward"] for r in rs],
+                "loss_mode": args.loss_mode,
+                "feas_grad_hits": [r.get("feas_grad_hits", 0) for r in rs],
+                "feas_grad_steps": [r.get("feas_grad_steps", 0) for r in rs],
+                "dual_fallbacks": [r.get("dual_fallbacks", 0) for r in rs],
+                "dual_solves": [r.get("dual_solves", 0) for r in rs],
             }
             cache_name = _canonical_cache_key(solver, args)
             out_path = results_dir / f"{cache_name}.json"

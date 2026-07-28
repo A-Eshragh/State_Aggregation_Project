@@ -67,7 +67,7 @@ def main():
     parser.add_argument('--n_samples', type=int, default=50, help='Number of samples')
     parser.add_argument('--train_frac', type=float, default=0.25, help='Fraction for train (rest = test). 0.25 = 1:3 train/test split.')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available (MPS for Mac, CUDA otherwise)')
-    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet'], required=True, help='Algorithm')
+    parser.add_argument('--algo', type=str, choices=['dfl', 'twostage', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet', 'dfl_feas'], required=True, help='Algorithm')
     parser.add_argument('--loss_weight', type=float, default=0.0, help='Weight for prediction loss in DFL (balanced so v* and pred loss have similar gradient scale; no adaptation)')
     parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension')
@@ -82,7 +82,16 @@ def main():
     parser.add_argument('--n_agg', type=int, default=-1,
                         help='Number of aggregated states/clusters (M). -1 disables aggregation.')
     parser.add_argument('--sa_tau', type=float, default=0.5, help='Soft aggregation temperature τ')
+    parser.add_argument('--sa_tau_final', type=float, default=None,
+                        help='If set, anneal τ geometrically from --sa_tau to this value over the DFL epochs')
     parser.add_argument('--sa_r_embed', type=int, default=8, help='Soft aggregation destination embedding dim')
+    parser.add_argument('--sa_layer', type=str, default='projmdp',
+                        choices=['projmdp', 'projlp', 'hard'],
+                        help='DFL-SA LP layer: projmdp = aggregated-MDP LP (default, '
+                             'original behavior); projlp = exact Galerkin projected LP '
+                             '(no diagonal projection; infeasible instances skipped); '
+                             'hard = straight-through hard memberships. '
+                             'projlp/hard require --algo dfl with --n_agg != -1.')
     parser.add_argument('--agg_fixed_W', action='store_true', default=False,
                         help='If set, use a fixed random W for SoftAggDense (no learning).')
     parser.add_argument('--agg_fixed_W_seed', type=int, default=1,
@@ -140,6 +149,23 @@ def main():
     # DFL stability: gradient clipping and augmented Lagrangian
     parser.add_argument('--grad_clip', type=float, default=10.0, help='Max gradient norm for clipping (prevents explosion)')
     parser.add_argument('--aug_lag_rho', type=float, default=10000.0, help='Augmented Lagrangian penalty coefficifent ρ (default 10; 100 can dominate and cause λ collapse)')
+    parser.add_argument('--loss_mode', type=str, default='penalty',
+                        choices=['regret', 'penalty', 'lagrangian', 'auglag'],
+                        help="DFL loss variant (ablation), DFL-LP path only. "
+                             "'regret' = -r^T y ; "
+                             "'penalty' = Eq.(5) penalty-only, DEFAULT (unchanged) ; "
+                             "'lagrangian' = -r^T y + v*^T(H_true y - gamma) ; "
+                             "'auglag' = penalty + linear dual term (proposed unbiased loss).")
+    # DFL-Feas: Odece (Mandi et al., NeurIPS'25) adapted to the occupancy LP (only used for dfl_feas)
+    parser.add_argument('--odece_alpha', type=float, default=0.5,
+                        help='DFL-Feas: infeasibility-aversion weight alpha on IPL vs OPL')
+    parser.add_argument('--odece_margin', type=float, default=0.01,
+                        help='DFL-Feas: softplus margin Upsilon')
+    parser.add_argument('--odece_tol', type=float, default=1e-4,
+                        help='DFL-Feas: violation tolerance tau for the UNSAT/Feas indicators '
+                             '(equality constraints are never exactly satisfied)')
+    parser.add_argument('--odece_mse_weight', type=float, default=0.0,
+                        help='DFL-Feas: weight mu on ||r_pred - r_true||^2 (known-objective completion)')
     parser.add_argument('--policy_analysis', action='store_true', help='If set, run policy analysis (1 extra LP per batch for order/inv bias vs oracle). Default: off (1 solve per batch).')
     # Soft-aggregation anti-shortcut knobs (see train_elasticity.py)
     parser.add_argument('--agg_lr_ratio', type=float, default=0.01,

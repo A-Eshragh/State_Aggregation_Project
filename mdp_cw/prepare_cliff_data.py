@@ -53,6 +53,7 @@ class CliffDataConfig:
     ambiguous_gap: float = 0.15              # offset between pinned-center ambiguous pairs (0 = identical centers)
     cliff_penalty: float = -100.0             # gym default = -100; use smaller magnitude for soft-cliff variant
     test_regime_weights: Optional[list[float]] = None
+    stratify: bool = False
 
 
 def _solve_oracle(P: torch.Tensor, r: torch.Tensor, beta: float):
@@ -93,10 +94,13 @@ def prepare_cliff_data(cfg: CliffDataConfig):
 
     print(f"[Data Prep] Sampling {cfg.n_samples} regimes / weather features...")
     if cfg.test_regime_weights is None:
-        z = sample_regimes(cfg.n_samples, seed=cfg.seed, weights=cfg.regime_weights)  # (B,)
+        z = sample_regimes(cfg.n_samples, seed=cfg.seed, weights=cfg.regime_weights,
+                           stratified=cfg.stratify)  # (B,)
     else:
-        z_train = sample_regimes(n_train, seed=cfg.seed, weights=cfg.regime_weights)
-        z_test = sample_regimes(n_test, seed=cfg.seed + 100003, weights=cfg.test_regime_weights)
+        z_train = sample_regimes(n_train, seed=cfg.seed, weights=cfg.regime_weights,
+                                 stratified=cfg.stratify)
+        z_test = sample_regimes(n_test, seed=cfg.seed + 100003,
+                                weights=cfg.test_regime_weights, stratified=cfg.stratify)
         z = torch.cat([z_train, z_test], dim=0)
 
     feat_cfg = FeatureGenConfig(

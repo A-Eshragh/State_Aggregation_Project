@@ -22,6 +22,7 @@ from .lp_matrices import estimate_lp_matrices, estimate_lp_matrices_shared
 from .reduced_solver import (
     solve_reduced_qp_gurobi, differentiable_reduced_lp, differentiable_reduced_qp,
     differentiable_unconstrained_qp, differentiable_qp_qpth,
+    solve_reduced_lp_gurobi,
 )
 from .sketched_solver import differentiable_sketched_lp
 from .policy import (
@@ -44,9 +45,48 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                    solver: str = "lp",
                    alpha_shape: float = 2.0,
                    sa_K: int = 4,
-                   sa_ratio: float = 0.2):
+                   sa_ratio: float = 0.2,
+                   algo: str = "dfl",
+                   loss_mode: str = "penalty",
+                   odece_margin: float = 0.01,
+                   odece_tol: float = 1e-4,
+                   odece_alpha: float = 0.5,
+                   odece_mse_weight: float = 0.0,
+                   odece_neg_solver: str = "plain",
+                   dual_weight: float = 1.0,
+                   dual_feasible_only: bool = False):
+    """
+    algo:
+        'dfl'       — differentiate through the reduced LP/QP layer (default).
+        'dfl_feas'  — DFL-Feas / Odece (Mandi et al., NeurIPS'25) adapted to the
+                      reduced occupancy LP: solver-free, both LP solves are
+                      detached and the gradient reaches the features only
+                      through the constraint residual M(θ)w − b(θ) and the
+                      objective-completion MSE. See the loss block below for
+                      the (measured) caveat about this setting.
+    loss_mode (algo='dfl' only), mirroring mdp_lp/train_elasticity:
+        'regret'      — c_true^T w*                       (no constraint term)
+        'penalty'     — c_true^T w* + ρ‖b − Mw*‖²         DEFAULT, unchanged
+        'lagrangian'  — c_true^T w* + ν^T(b − Mw*)
+        'auglag'      — penalty + linear dual term        (proposed unbiased loss)
+
+    Two hyperparameters damp the linear term, which on CartPole is otherwise
+    both huge and signal-cancelling (measured: |linear| ~ 2-20 vs |c^T w*| ~ 5
+    and rho*||viol||^2 ~ 0.003, with ~72% of true-LP solves falling back to
+    Gurobi's slack-penalised model whose multipliers are bounded only by the
+    1e3 slack penalty):
+        dual_weight        — scalar on the linear term. 1.0 = exact augmented
+                             Lagrangian (default, unchanged); 0.0 recovers
+                             'penalty' exactly.
+        dual_feasible_only — apply the linear term only on steps where the true
+                             LP was genuinely feasible, so the multiplier is a
+                             real LP dual rather than a slack-model artefact.
+    """
     assert eval_policy_type in ("ce", "lp")
     assert solver in ("lp", "gurobi_qp", "qpth")
+    assert algo in ("dfl", "dfl_feas")
+    assert loss_mode in ("regret", "penalty", "lagrangian", "auglag")
+    assert odece_neg_solver in ("plain", "arm")
     device = torch.device("cpu")
     dynamics = CartPoleDynamics(cfg)
     A = 2
@@ -234,6 +274,15 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
     solver_forward_time = 0.0
     backward_time = 0.0
+    # One-shot strong-duality gate for the 'lagrangian'/'auglag' linear term
+    # (list so the inner loop can flip it).
+    _dual_gate_done = [False]
+    # (# true-LP solves that hit Gurobi's slack fallback, # true-LP solves)
+    _dual_stats = [0, 0]
+    # DFL-Feas gradient audit: fraction of DFL steps whose Odece loss produced a
+    # non-negligible feature gradient. Records, rather than assumes, whether the
+    # baseline actually trains in this setting.
+    _feas_grad_hits = [0, 0]
 
     history = []
     for iteration in range(cfg.n_iterations):
@@ -269,6 +318,8 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
         # Phase B: DFL
         lp_obj_log = 0.0
         aug_lag_log = 0.0
+        lin_log = 0.0
+        feas_diag = None
         if use_dfl_phase:
             for _ in range(n_dfl_steps):
                 dfl_optimizer.zero_grad()
@@ -298,20 +349,172 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
                 c_shaped = -(Phi_sa * shaped_rewards.unsqueeze(1)).sum(dim=0) / N_b
                 c_true = -(Phi_sa * batch["rewards"].unsqueeze(1)).sum(dim=0) / N_b
 
-                _t = time.time()
-                w_star_inner = solve_lp(M, c_shaped, b)
-                solver_forward_time += time.time() - _t
+                if algo == "dfl_feas":
+                    # ---- DFL-Feas / Odece, adapted to the reduced occupancy LP ----
+                    # Solver-free: BOTH solves are detached, so no gradient ever
+                    # flows through the LP layer. The features are reached only via
+                    #   c(w; θ) = M(θ) w − b(θ)
+                    # and the objective-completion MSE ‖c_shaped − c_true‖²
+                    # (the analogue of mdp_lp's μ‖r_pred − r_true‖²: c_shaped is the
+                    # predicted objective the layer optimises, c_true the real one).
+                    #
+                    # y^- (negative example) = the solution of the PREDICTED
+                    # problem (M, c_shaped, b). odece_neg_solver='plain' solves it
+                    # exactly, which is what [34] specifies; 'arm' instead reuses
+                    # this arm's (sketched) layer, a charitable variant that gives
+                    # y^- a non-zero residual for IPL to act on.
+                    # y_true (positive example) = the plain reduced LP under the
+                    # true objective.
+                    _t = time.time()
+                    with torch.no_grad():
+                        if odece_neg_solver == "arm":
+                            w_neg = solve_lp(M, c_shaped, b)
+                        else:
+                            w_neg, _, _ = solve_reduced_lp_gurobi(M, c_shaped, b)
+                        w_pos, _, _ = solve_reduced_lp_gurobi(M, c_true, b)
+                    solver_forward_time += time.time() - _t
 
-                lp_obj = c_true @ w_star_inner
-                violation = b - M @ w_star_inner
-                aug_lag = rho * violation.pow(2).sum()
+                    ups, tol = float(odece_margin), float(odece_tol)
+                    # Adaptation caveat, worth stating plainly: in mdp_lp the two
+                    # Odece losses are driven by the gap between a PREDICTED and a
+                    # TRUE constraint system (H_pred vs H_true). Here there is only
+                    # one, sample-estimated system (M, b), shared by both problems.
+                    # What keeps the losses alive is that the flow polytope
+                    # {w : Mw = b, w >= 0} is typically EMPTY once the features are
+                    # pretrained, so solve_reduced_lp_gurobi falls back to its
+                    # slack-penalised model and returns points with a genuinely
+                    # non-zero residual. Measured on the paper's config (nfeat=1024,
+                    # seed 1): the fallback fires on ~87-100% of solves and 100% of
+                    # DFL steps produce a non-zero feature gradient. So both terms
+                    # act on real residuals — but they push the residual toward
+                    # zero, i.e. they carry feasibility signal only, with no
+                    # decision-value term anywhere in the loss.
+                    #
+                    # OPL: the true optimum should satisfy the flow constraints.
+                    c_pos = M @ w_pos - b
+                    opl = (torch.nn.functional.softplus(ups + c_pos)
+                           + torch.nn.functional.softplus(ups - c_pos)).sum()
+                    # IPL: sign-selected single-sided softplus. The UNSAT side is
+                    # picked from the residual of y^- on the true constraint
+                    # system, which here is c_neg.detach(). Its one-sided
+                    # derivative is non-zero even at c = 0 (it is sigma(ups)), so
+                    # IPL keeps pushing y^-'s residual toward zero — a solver-free
+                    # surrogate for the rho||.||^2 penalty.
+                    c_neg = M @ w_neg - b
+                    v_neg = c_neg.detach()
+                    unsat_pos = (v_neg > tol).float()
+                    unsat_neg = (v_neg < -tol).float()
+                    infeas = (v_neg.abs().max() > tol).float()
+                    ipl = (infeas * (unsat_pos * torch.nn.functional.softplus(ups - c_neg)
+                                     + unsat_neg * torch.nn.functional.softplus(ups + c_neg))).sum()
+                    loss = float(odece_alpha) * ipl + (1.0 - float(odece_alpha)) * opl
+                    if odece_mse_weight > 0:
+                        loss = loss + float(odece_mse_weight) * \
+                            torch.nn.functional.mse_loss(c_shaped, c_true)
+                    loss = loss * lp_weight
 
-                loss = (lp_obj + aug_lag) * lp_weight
+                    with torch.no_grad():
+                        lp_obj = c_true @ w_neg
+                        aug_lag = rho * (b - M @ w_neg).pow(2).sum()
+                    feas_diag = (float(opl.item()), float(ipl.item()),
+                                 float(c_pos.detach().norm().item()),
+                                 float(c_neg.detach().norm().item()))
+                else:
+                    _t = time.time()
+                    w_star_inner = solve_lp(M, c_shaped, b)
+                    solver_forward_time += time.time() - _t
+
+                    lp_obj = c_true @ w_star_inner
+                    violation = b - M @ w_star_inner
+                    aug_lag = rho * violation.pow(2).sum()
+
+                    # loss_mode ablation. 'penalty' reproduces the original
+                    # Eq.(5) loss EXACTLY, so runs that do not set --loss_mode
+                    # are byte-for-byte unchanged.
+                    loss = lp_obj
+                    if loss_mode in ("penalty", "auglag"):
+                        loss = loss + aug_lag
+                    if loss_mode in ("lagrangian", "auglag"):
+                        # Linear dual term ν^T(b − M w*) = ν^T·violation, where ν
+                        # is the dual of the TRUE reduced LP (M, c_true, b),
+                        # re-solved fresh under no_grad each step (M, b move with
+                        # θ, so it is a constant wrt θ only within the step).
+                        # Sign note: this is +ν·violation, not mdp_lp's
+                        # −v*·violation, because the reduced LP is stated as a
+                        # MINIMISATION (c = −reward) whereas the occupancy LP in
+                        # mdp_lp is a maximisation; the two Lagrangians agree
+                        # after ν ↦ −v*.
+                        with torch.no_grad():
+                            w_true_lp, _, nu_true = solve_reduced_lp_gurobi(
+                                M.detach(), c_true.detach(), b.detach())
+                        # Track how often the exact LP was infeasible and Gurobi
+                        # fell back to its slack-penalised model: that model's
+                        # multipliers are only bounded by the slack penalty, so
+                        # the linear term can get large. Recorded, not clipped.
+                        _res = float((b.detach() - M.detach() @ w_true_lp)
+                                     .norm().item())
+                        _dual_stats[1] += 1
+                        _fell_back = _res > 1e-6 * max(
+                            float(b.detach().norm()), 1e-12)
+                        if _fell_back:
+                            _dual_stats[0] += 1
+
+                        if not _dual_gate_done[0]:
+                            # KKT gate on the multiplier's sign/convention. We
+                            # check DUAL FEASIBILITY + COMPLEMENTARITY, not
+                            # strong duality: when the exact reduced LP is
+                            # infeasible, solve_reduced_lp_gurobi falls back to a
+                            # slack-penalised model whose optimal value absorbs
+                            # the slack penalty, so b^T nu != c^T w* there even
+                            # though nu is still a valid KKT multiplier. Dual
+                            # feasibility is the sign-discriminative property:
+                            # it is what makes (nu * violation) the standard
+                            # augmented-Lagrangian term nu_std^T(Mw - b) with
+                            # nu_std = -nu, i.e. bias-cancelling rather than
+                            # bias-doubling. Flipping the sign breaks it at once.
+                            red = c_true.detach() - M.detach().T @ nu_true
+                            scale = max(float(c_true.detach().abs().max()), 1e-12)
+                            dual_feas = float(red.min().item())
+                            comp = float((red * w_true_lp).abs().sum().item())
+                            obj = abs(float((c_true.detach() * w_true_lp).sum().item()))
+                            if dual_feas < -1e-4 * scale - 1e-9:
+                                raise RuntimeError(
+                                    "Linear-term dual-feasibility check failed: "
+                                    f"min(c_true - M^T nu) = {dual_feas:.3e} "
+                                    f"(scale {scale:.3e}); the dual's sign "
+                                    "convention is inconsistent with (M, b) — "
+                                    "auglag results untrustworthy.")
+                            if comp > 1e-3 * max(obj, 1e-12) + 1e-6:
+                                raise RuntimeError(
+                                    "Linear-term complementarity check failed: "
+                                    f"|(c_true - M^T nu) . w*| = {comp:.3e} vs "
+                                    f"|c^T w*| = {obj:.3e}; nu is not a valid KKT "
+                                    "multiplier — auglag results untrustworthy.")
+                            _dual_gate_done[0] = True
+                        # dual_weight damps the term; dual_feasible_only drops it
+                        # on steps whose multiplier came from Gurobi's slack
+                        # model rather than a genuine LP dual. Both default to
+                        # the exact augmented Lagrangian (1.0 / False).
+                        _dw = float(dual_weight)
+                        if dual_feasible_only and _fell_back:
+                            _dw = 0.0
+                        linear = _dw * (nu_true * violation).sum()
+                        lin_log = float(linear.item())
+                        loss = loss + linear
+                    loss = loss * lp_weight
+                    feas_diag = None
                 _t = time.time()
                 loss.backward()
                 backward_time += time.time() - _t
-                torch.nn.utils.clip_grad_norm_(features.parameters(), max_norm=1.0)
+                gnorm = torch.nn.utils.clip_grad_norm_(
+                    features.parameters(), max_norm=1.0)
                 dfl_optimizer.step()
+
+                if algo == "dfl_feas":
+                    _feas_grad_hits[1] += 1
+                    if float(gnorm) > 1e-8:
+                        _feas_grad_hits[0] += 1
+                    grad_norm_log = float(gnorm)
 
                 lp_obj_log = lp_obj.item()
                 aug_lag_log = aug_lag.item()
@@ -330,12 +533,19 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
 
         if verbose:
             w_nnz = int((w_star > 1e-8).sum())
+            extra = ""
+            if loss_mode in ("lagrangian", "auglag"):
+                extra = f" | linear={lin_log:+.4f}"
+            if feas_diag is not None:
+                extra = (f" | opl={feas_diag[0]:.4f} ipl={feas_diag[1]:.4f}"
+                         f" |res_pos|={feas_diag[2]:.2e} |res_neg|={feas_diag[3]:.2e}"
+                         f" gnorm={grad_norm_log:.2e}")
             print(
                 f"  Iter {iteration:3d} | reward={results['avg_reward']:.2f} | "
                 f"length={results['avg_length']:.1f} | "
                 f"lp_obj={lp_obj_log:.4f} | aug_lag={aug_lag_log:.4f} | "
                 f"ce={ce_log:.4f} | nnz={w_nnz}/{features.n_features} | "
-                f"time={elapsed:.1f}s"
+                f"time={elapsed:.1f}s{extra}"
             )
 
     # Final eval
@@ -359,7 +569,15 @@ def run_neural_dfl(cfg: CartPoleConfig, verbose: bool = True,
             "w_head": w_head, "best_reward": best_reward,
             "solver_forward_time": float(solver_forward_time),
             "backward_time": float(backward_time),
-            "solver_total_time": float(solver_forward_time + backward_time)}
+            "solver_total_time": float(solver_forward_time + backward_time),
+            # DFL-Feas only: (# steps with non-zero feature gradient, # steps)
+            "feas_grad_hits": int(_feas_grad_hits[0]),
+            "feas_grad_steps": int(_feas_grad_hits[1]),
+            # auglag/lagrangian only: how often the true-LP dual solve hit
+            # Gurobi's slack-penalised fallback (multiplier then bounded only
+            # by the slack penalty).
+            "dual_fallbacks": int(_dual_stats[0]),
+            "dual_solves": int(_dual_stats[1])}
 
 
 def run_two_stage_mbrl(cfg: CartPoleConfig, verbose: bool = True,

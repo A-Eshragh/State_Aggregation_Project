@@ -226,6 +226,21 @@ def render_cartpole(out: Path) -> None:
     requested = set(int(s) for s in args.seeds)
     m1_ns = cp_mod._m1_args(args)
     snf_ns = cp_mod._snf_args(args)
+
+    # Which DFL loss variant to render. Defaults reproduce the paper's Eq.(5)
+    # penalty curves exactly; set CARTPOLE_LOSS_MODE=auglag (plus the damping
+    # env vars, if used) to render the aug-Lagrangian runs instead. The cache
+    # keys carry a matching tag, so both sets coexist on disk.
+    import os
+    _lm = os.environ.get("CARTPOLE_LOSS_MODE", "penalty")
+    _dw = float(os.environ.get("CARTPOLE_DUAL_WEIGHT", "1.0"))
+    _dfo = os.environ.get("CARTPOLE_DUAL_FEASIBLE_ONLY", "0") not in ("0", "", "false")
+    for _ns in (m1_ns, snf_ns):
+        _ns.loss_mode, _ns.dual_weight, _ns.dual_feasible_only = _lm, _dw, _dfo
+    if _lm != "penalty":
+        print(f"[cartpole] rendering DFL arms with loss_mode={_lm} "
+              f"dual_weight={_dw} dual_feasible_only={_dfo}")
+
     dr_nf = cp_mod.pick_best_dr(args, snf_ns)
 
     # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config.

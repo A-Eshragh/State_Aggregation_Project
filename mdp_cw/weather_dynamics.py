@@ -293,6 +293,33 @@ REGIMES_V6: list[dict] = [
 REGIME_NAMES_V6: list[str] = ["clear", "gate_mild", "gate", "gate_severe"]
 
 
+# v7 — v6 geometry with a NEAR-ABSORBING severe gate. Designed for the
+# in-distribution mean-planning trap: under a clear-heavy prior the
+# posterior-mean slip at the gate looks retryable (independent per attempt),
+# but the regime persists within an episode, so on gate_deadly samples the
+# deployed gate policy enters a discounted reset loop it almost never exits.
+# Planning on the posterior-mean kernel is therefore systematically optimistic
+# at the gate, while an always-detour policy is Bayes-optimal — a gap DFL can
+# exploit with NO train/test distribution shift (use beta ~0.99 so the reset
+# loop is not discounted away; the analytic gap peaks near a 5:1 clear prior).
+VOLATILE_CELLS_V7: list[int] = list(VOLATILE_CELLS_V6)
+
+_GATE_DEADLY = [
+    _row(0.03, 0.01, 0.01, 0.95, 0.00),  # UP: back-slip into the cliff row
+    _row(0.03, 0.01, 0.95, 0.01, 0.00),  # RIGHT: right-slip into the cliff row
+    _row(0.90, 0.02, 0.04, 0.02, 0.02),  # DOWN: cliff-seeking anyway
+    _row(0.80, 0.05, 0.05, 0.05, 0.05),  # LEFT: mostly safe retreat
+]
+
+REGIMES_V7: list[dict] = [
+    _regime_v3(_AMBIENT_BENIGN, {}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 9): _STRIP_OVERRIDE_MILD}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 9): _STRIP_OVERRIDE}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 9): _GATE_DEADLY}),
+]
+REGIME_NAMES_V7: list[str] = ["clear", "gate_mild", "gate", "gate_deadly"]
+
+
 # ---------------------------------------------------------------------------
 # Active regime set (mutable; switch via set_regime_set before data gen).
 # ---------------------------------------------------------------------------
@@ -330,13 +357,17 @@ def set_regime_set(name: str) -> None:
         REGIMES, REGIME_NAMES = REGIMES_V6, REGIME_NAMES_V6
         VOLATILE_CELLS = list(VOLATILE_CELLS_V6)
         _ACTIVE_MODE = "v6"
+    elif name == "v7":
+        REGIMES, REGIME_NAMES = REGIMES_V7, REGIME_NAMES_V7
+        VOLATILE_CELLS = list(VOLATILE_CELLS_V7)
+        _ACTIVE_MODE = "v7"
     else:
-        raise ValueError(f"unknown regime_set '{name}' (use 'v1', 'v2', 'v3', 'v4', 'v5', or 'v6')")
+        raise ValueError(f"unknown regime_set '{name}' (use 'v1'..'v7')")
 
 
 def is_state_dependent() -> bool:
     """True if the active regime set encodes per-cell slip overrides."""
-    return _ACTIVE_MODE in ("v3", "v4", "v5", "v6")
+    return _ACTIVE_MODE in ("v3", "v4", "v5", "v6", "v7")
 
 
 def n_regimes() -> int:
@@ -510,8 +541,14 @@ def ground_truth_mdp_tensors(regime_ids: torch.Tensor):
     return slip_compact, P, r
 
 
-def sample_regimes(n_samples: int, seed: Optional[int] = None, weights=None) -> torch.Tensor:
-    """Draw regime ids. Optional `weights` is a (Z,) non-negative vector."""
+def sample_regimes(n_samples: int, seed: Optional[int] = None, weights=None,
+                   stratified: bool = False) -> torch.Tensor:
+    """Draw regime ids. Optional `weights` is a (Z,) non-negative vector.
+
+    With ``stratified=True`` the regime counts match the weights exactly (largest
+    remainder rounding) and are then shuffled, removing the binomial draw noise.
+    The population distribution is unchanged; only the sampling variance is.
+    """
     Z = n_regimes()
     if weights is None:
         probs = torch.full((Z,), 1.0 / Z)
@@ -520,6 +557,18 @@ def sample_regimes(n_samples: int, seed: Optional[int] = None, weights=None) -> 
         if w.numel() != Z:
             raise ValueError(f"weights must have length {Z}, got {w.numel()}")
         probs = w / w.sum()
+
+    if stratified:
+        exact = probs * float(n_samples)
+        counts = torch.floor(exact).to(torch.long)
+        rem = int(n_samples - int(counts.sum().item()))
+        if rem > 0:
+            order = torch.argsort(exact - counts.float(), descending=True)
+            for i in range(rem):
+                counts[order[i % Z]] += 1
+        ids = torch.repeat_interleave(torch.arange(Z, dtype=torch.long), counts)
+        g = torch.Generator().manual_seed(seed if seed is not None else 0)
+        return ids[torch.randperm(int(n_samples), generator=g)]
 
     if seed is not None:
         g = torch.Generator().manual_seed(seed)

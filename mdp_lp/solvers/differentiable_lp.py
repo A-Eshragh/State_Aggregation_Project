@@ -66,9 +66,18 @@ class DifferentiableLPSolver(autograd.Function):
         grad_y_B = torch.gather(grad_y, 1, basis)                # (batch, S)
 
         # Solve H_B^T x = grad_y_B for each batch element in one call.
-        x = torch.linalg.solve(
-            H_B.transpose(1, 2), grad_y_B.unsqueeze(-1)
-        ).squeeze(-1)                                            # (batch, S)
+        # Degenerate optima can hand back a singular basis (e.g. duplicated
+        # wall-bounce action columns); fall back to a least-squares solve for
+        # those batches instead of crashing. Non-singular batches are exact.
+        try:
+            x = torch.linalg.solve(
+                H_B.transpose(1, 2), grad_y_B.unsqueeze(-1)
+            ).squeeze(-1)                                        # (batch, S)
+        except torch.linalg.LinAlgError:
+            x = torch.linalg.lstsq(
+                H_B.transpose(1, 2), grad_y_B.unsqueeze(-1),
+                driver="gelsd",
+            ).solution.squeeze(-1)                               # (batch, S)
         grad_gamma = x
 
         grad_H_B = -x.unsqueeze(2) * y_B.unsqueeze(1)            # (batch, S, S)

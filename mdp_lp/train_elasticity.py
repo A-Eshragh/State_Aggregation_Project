@@ -14,10 +14,14 @@ from mdp_lp.utils import (
     solve_lp,
     compute_zero_grad_stats,
 )
-from mdp_lp.solvers.dense_lp_solver import DenseLPSolver
+from mdp_lp.solvers.dense_lp_solver import DenseLPSolver, solve_lp_gurobi
 from mdp_lp.solvers.differentiable_lp import DifferentiableLPSolver
 from mdp_lp.solvers.differentiable_qp import DifferentiableQPSolver
-from mdp_lp.soft_state_aggregation import SoftAggDense
+from mdp_lp.soft_state_aggregation import (
+    SoftAggDense,
+    aggregate_with_W,
+    galerkin_lp_coefficients,
+)
 from mdp_lp.solvers.qpth_qp_solver import solve_occupancy_qp_qpth
 from mdp_lp.solvers.sketched_lp import sketched_lp
 from mdp_lp.solvers.perturbed_lp import perturbed_lp
@@ -59,6 +63,27 @@ def _perturbed_lp_from_args(H, r, gamma, args, batch_idx=0, epoch=0):
         perturb_mode=str(getattr(args, "perturb_mode", "gaussian")),
         perturb_seed=seed_for_call,
     )
+
+
+def _assert_strong_duality(gamma, dual_true, obj_true, rtol=1e-2, atol=1e-2):
+    """Sign / consistency gate for the linear dual term.
+
+    The term (v*)^T(H_true y - gamma) only corrects the bias if dual_true is the
+    true LP dual in the SAME convention as (H_true, gamma). We verify strong
+    duality  gamma^T v* == r^T y*_true (== obj_true)  on a batch; a flipped dual
+    sign or a gamma mismatch then fails loudly instead of silently corrupting the
+    ablation (it would otherwise double the bias rather than cancel it).
+    """
+    lhs = (gamma * dual_true).sum(dim=1)          # gamma^T v*
+    rhs = obj_true.reshape(-1)                     # r^T y*_true
+    if not torch.allclose(lhs, rhs, rtol=rtol, atol=atol):
+        rel = ((lhs - rhs).abs() / (rhs.abs() + 1e-8)).max().item()
+        raise RuntimeError(
+            "Linear-term sign/consistency check failed: gamma^T v* != r^T y*_true "
+            f"(max rel err {rel:.3e}). dual_true's sign convention or gamma is "
+            "inconsistent with the loss's (H_true, gamma); linear-term results are "
+            "NOT trustworthy until resolved (most likely: flip the term's sign)."
+        )
 
 
 def prepare_elasticity_data(args):
@@ -328,6 +353,64 @@ def pretrain_aggregator(pred_model, agg, train_loader, args, device, pretrain_ep
         p_.requires_grad = True
     return agg
 
+def _sa_layer_of(args):
+    """DFL-SA LP-layer variant: 'projmdp' (aggregated-MDP LP, default and
+    byte-identical to the original code path), 'projlp' (exact Galerkin
+    projected LP, no diagonal projection), or 'hard' (straight-through hard
+    memberships on the aggregated-MDP LP)."""
+    return str(getattr(args, "sa_layer", "projmdp"))
+
+
+def _agg_forward(agg, P, r, gamma, args):
+    """Membership + aggregation switchable via --sa_layer.
+
+    Returns (P_agg, r_agg, gamma_agg, info) like agg.forward; for 'projlp' the
+    aggregated-MDP outputs are None and only info['W'] is meaningful (the
+    caller builds Galerkin coefficients instead of an aggregated MDP).
+    """
+    layer = _sa_layer_of(args)
+    # _sa_tau_now is set per-epoch by the training loop when --sa_tau_final
+    # annealing is active; otherwise fall back to the fixed --sa_tau.
+    tau = getattr(args, "_sa_tau_now", None)
+    if tau is None:
+        tau = getattr(args, "sa_tau", 0.5)
+    if layer == "projmdp":
+        return agg(P, r, gamma, tau=tau)
+    t0 = time.time()
+    W_soft = agg.compute_W(P, r, tau)
+    if layer == "hard":
+        idx = W_soft.argmax(dim=2, keepdim=True)
+        W_hard = torch.zeros_like(W_soft).scatter_(2, idx, 1.0)
+        # straight-through: hard forward, soft backward
+        W = W_hard + W_soft - W_soft.detach()
+        P_agg, r_agg, gamma_agg = aggregate_with_W(P, r, gamma, W)
+        return P_agg, r_agg, gamma_agg, {"W": W, "runtime_sec": time.time() - t0}
+    if layer == "projlp":
+        return None, None, None, {"W": W_soft, "runtime_sec": time.time() - t0}
+    raise ValueError(f"Unknown sa_layer: {layer}")
+
+
+def _solve_galerkin_masked(P, r, gamma, W, beta):
+    """Exact-Galerkin (projected LP) solves with per-instance infeasibility
+    masking: the projected LP has no feasibility guarantee, so infeasible
+    instances get a zero row and are excluded from the loss by the caller.
+
+    Returns (y (B, M*A) with zero rows at failures, feas (B,) bool mask,
+    A_mat, r_tilde, b_vec)."""
+    A_mat, r_tilde, b_vec = galerkin_lp_coefficients(P, r, gamma, W, beta)
+    ys, feas = [], []
+    for i in range(A_mat.shape[0]):
+        try:
+            y_i = DifferentiableLPSolver.apply(
+                A_mat[i:i + 1], r_tilde[i:i + 1], b_vec[i:i + 1])
+            ys.append(y_i)
+            feas.append(True)
+        except RuntimeError:
+            ys.append(torch.zeros_like(r_tilde[i:i + 1]))
+            feas.append(False)
+    return torch.cat(ys, 0), torch.tensor(feas), A_mat, r_tilde, b_vec
+
+
 def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     """Train and evaluate with elasticity-based inventory model.
     
@@ -368,6 +451,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     # Extra timing (for best comparisons across solver/aggregation variants)
     sa_time_sec_per_epoch = []         # aggregation wall time per epoch (sum over batches)
     solver_time_sec_per_epoch = []     # LP/QP layer wall time per epoch (sum over batches)
+    lp_infeasible_per_epoch_list = []  # projlp: infeasible instance-solves per epoch
     # For DFL: track MSE (prediction loss) and full DFL loss separately
     train_mse_list = []  # MSE (prediction loss) for DFL
     train_dfl_loss_list = []  # Full DFL loss (-v*_θ + λ·pred_loss)
@@ -432,6 +516,12 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             pretrain_aggregator(pred_model, agg, train_loader, args, device,
                                 pretrain_epochs=agg_pretrain_epochs)
 
+    if _sa_layer_of(args) != "projmdp":
+        if agg is None or args.algo != "dfl":
+            raise ValueError(
+                "--sa_layer projlp/hard requires --algo dfl with --n_agg != -1")
+        print(f"[Train] DFL-SA layer variant: {_sa_layer_of(args)}")
+
     params = list(pred_model.parameters())
     if agg is not None:
         params.extend(list(agg.parameters()))
@@ -443,6 +533,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         for batch_data in train_loader:
             feats, obj_true, lambda_true, prices, y_true, dual_true = batch_data
             batch_size = feats.shape[0]
+            _feas_init = None
             lambda_pred = pred_model(feats)
             
             if use_p_related:
@@ -470,10 +561,20 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
                 if agg is not None:
-                    P_use, r_use, gamma_agg, _agg_info = agg(P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5))
-                H_use = mdp.build_H(P_use)
-                r_flat_use = r_use.reshape(batch_size, -1)
-                if args.algo == "dfl":
+                    P_agg_i, r_agg_i, gamma_agg, _agg_info = _agg_forward(
+                        agg, P_use, r_use, gamma_use, args)
+                    if P_agg_i is not None:
+                        P_use, r_use = P_agg_i, r_agg_i
+                if agg is not None and _sa_layer_of(args) == "projlp":
+                    # exact Galerkin layer: per-instance solves with masking;
+                    # disaggregate_y below on the reduced w is the Phi-lift.
+                    y_star, _feas_init, _, _, _ = _solve_galerkin_masked(
+                        mdp.P, mdp.r, gamma_use, _agg_info["W"], args.beta)
+                    y_star = SoftAggDense.disaggregate_y(
+                        y_star, _agg_info["W"], mdp.r.shape[2])
+                elif args.algo == "dfl":
+                    H_use = mdp.build_H(P_use)
+                    r_flat_use = r_use.reshape(batch_size, -1)
                     if agg is not None and _agg_info is not None:
                         y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
                     else:
@@ -483,12 +584,16 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     # (the smoothed y_avg, whether sketch or perturb, is a
                     # stochastic mix of vertices and rolls out badly on the
                     # true MDP at degenerate cells).
+                    H_use = mdp.build_H(P_use)
+                    r_flat_use = r_use.reshape(batch_size, -1)
                     if agg is not None and _agg_info is not None:
                         y_plain, _, _ = lp_solver(H_use, r_flat_use, gamma_agg)
                     else:
                         y_plain, _, _ = lp_solver(H_use, r_flat_use, gamma_use)
                     y_star = y_plain
                 else:
+                    H_use = mdp.build_H(P_use)
+                    r_flat_use = r_use.reshape(batch_size, -1)
                     if agg is not None and _agg_info is not None:
                         y_star = solve_occupancy_qp_qpth(
                             H_use, r_flat_use, gamma_agg,
@@ -499,7 +604,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                             H_use, r_flat_use, gamma_use,
                             reg=getattr(args, "qp_reg", 0.1), qp_solver=qp_solver
                         )
-                if agg is not None and _agg_info is not None:
+                if agg is not None and _agg_info is not None and _sa_layer_of(args) != "projlp":
                     y_star = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
             else:
                 y_star, _, _, _ = solve_lp(mdp, lp_solver)
@@ -508,6 +613,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 v_star_init, _ = eval_y_on_true_mdp(mdp_true, y_star, gamma_use)
             # r_true = mdp_true.r.reshape(batch_size, -1)
             # v_star_init = (r_true * y_star).sum(dim=1).mean().item()
+            if _feas_init is not None:
+                v_star_init = v_star_init.flatten()[_feas_init]
             initial_rewards.extend(v_star_init.flatten().tolist())
     initial_reward = float(np.mean(initial_rewards))
 
@@ -519,6 +626,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
     fidelity_weight = float(getattr(args, "fidelity_weight", 0.0))
 
     for epoch in range(args.n_epochs):
+        # Optional τ annealing (--sa_tau_final): geometric ramp from sa_tau to
+        # sa_tau_final across the DFL epochs; _agg_forward reads _sa_tau_now.
+        tau_final = getattr(args, "sa_tau_final", None)
+        if tau_final is not None and agg is not None:
+            frac = epoch / max(args.n_epochs - 1, 1)
+            args._sa_tau_now = float(args.sa_tau * (tau_final / args.sa_tau) ** frac)
+            print(f"[Training] sa_tau annealed to {args._sa_tau_now:.4f}")
         if agg is not None:
             freeze_agg = (epoch < agg_warmup_epochs)
             for p_ in agg.parameters():
@@ -526,6 +640,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         train_loss = 0.0
         obj_loss = 0.0
         epoch_sa_time = 0.0
+        epoch_lp_infeasible = 0
         epoch_solver_time = 0.0
         solver_forward_time = 0.0
         backward_time = 0.0
@@ -549,6 +664,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         for batch_idx, batch_data in enumerate(train_loader):
             feats, obj_true, lambda_true, prices, y_true, dual_true = batch_data
             batch_size = feats.shape[0]
+            _batch_feas = None
 
             lambda_pred = pred_model(feats)
             if not torch.all(torch.isfinite(lambda_pred)):
@@ -577,21 +693,32 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
             gamma = gamma / gamma.sum(dim=1, keepdim=True)
             gamma_use = gamma
 
-            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch", "dfl_berthet"):
+            if args.algo in ("dfl", "dfl_qpth", "dfl_sketch", "dfl_berthet", "dfl_feas"):
                 # Optionally aggregate (P, r, gamma) into M=n_agg clusters.
                 P_use, r_use, gamma_use = mdp.P, mdp.r, gamma
                 _agg_info = None
                 if agg is not None:
-                    P_use, r_use, gamma_agg, _agg_info = agg(
-                        P_use, r_use, gamma_use, tau=getattr(args, "sa_tau", 0.5)
+                    P_agg_t, r_agg_t, gamma_agg, _agg_info = _agg_forward(
+                        agg, P_use, r_use, gamma_use, args
                     )
                     epoch_sa_time += float(_agg_info.get("runtime_sec", 0.0))
+                    if P_agg_t is not None:
+                        P_use, r_use = P_agg_t, r_agg_t
 
-                H_use = mdp.build_H(P_use)
-                r_flat_use = r_use.reshape(batch_size, -1)
+                if agg is not None and _sa_layer_of(args) == "projlp":
+                    H_use, r_flat_use = None, None
+                else:
+                    H_use = mdp.build_H(P_use)
+                    r_flat_use = r_use.reshape(batch_size, -1)
 
                 _t = time.time()
-                if args.algo == "dfl":
+                if agg is not None and _sa_layer_of(args) == "projlp":
+                    # The predicted-MDP solve is dead code for algo 'dfl' with
+                    # aggregation under loss_mode 'penalty'/'regret' (y_star is
+                    # overwritten by the true-MDP solve in the loss block below;
+                    # 'lagrangian'/'auglag' DO consume it), so projlp skips it.
+                    y_star = None
+                elif args.algo == "dfl":
                     if agg is not None and _agg_info is not None:
                         y_star = DifferentiableLPSolver.apply(H_use, r_flat_use, gamma_agg)
                         # y_star, dual = DifferentiableLPSolverDual.apply(H_use, r_flat_use, gamma_agg)
@@ -625,6 +752,13 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                             reg=getattr(args, "qp_reg", 0.1),
                             qp_solver=qp_solver
                         )
+                elif args.algo == "dfl_feas":
+                    # DFL-Feas (Odece): the predicted-LP solution is only the
+                    # stop-gradient negative example y^-; never differentiated.
+                    if agg is not None:
+                        raise ValueError("dfl_feas does not support --n_agg")
+                    with torch.no_grad():
+                        y_star, _, _, _ = solve_lp(mdp, lp_solver)
                 else:
                     raise ValueError(f"Invalid algorithm: {args.algo}")
                 solver_forward_time += (time.time() - _t)
@@ -636,7 +770,27 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     r_true = mdp_true.r.reshape(batch_size, -1)
                     H_true = mdp_true.build_H(mdp_true.P)
 
-                if agg is not None and _agg_info is not None:
+                if agg is not None and _agg_info is not None and _sa_layer_of(args) == "projlp":
+                    # Exact Galerkin (projected LP) on the true MDP with the
+                    # same predicted-W. The projected LP has no feasibility
+                    # guarantee, so infeasible instances are dropped from the
+                    # loss and counted in epoch_lp_infeasible.
+                    W = _agg_info["W"]
+                    y_star, _batch_feas, A_true, r_true_t, b_true = _solve_galerkin_masked(
+                        mdp_true.P, mdp_true.r, gamma_use, W, args.beta)
+                    epoch_lp_infeasible += int((~_batch_feas).sum())
+                    rho = getattr(args, 'aug_lag_rho', 0.1)
+                    if bool(_batch_feas.any()):
+                        violation = b_true - (A_true @ y_star.unsqueeze(-1)).squeeze(-1)
+                        aug_lag = rho * violation[_batch_feas].pow(2).mean()
+                        v_star = torch.sum(r_true_t * y_star, dim=1)
+                        dfl_loss = -v_star[_batch_feas].mean() + aug_lag
+                    else:
+                        # whole batch infeasible: no decision gradient this step
+                        aug_lag = torch.zeros(())
+                        v_star = torch.zeros(batch_size)
+                        dfl_loss = (lambda_pred * 0.0).sum()
+                elif agg is not None and _agg_info is not None:
                     W = _agg_info["W"]                                    # (B, S, M)
                     mass = W.sum(dim=1).clamp_min(1e-8)                   # (B, M)
                     r_true_3d = mdp_true.r                                # (B, S, A)
@@ -651,22 +805,109 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                     gamma_true_agg = torch.einsum("bs,bsm->bm", gamma_use, W).clamp_min(1e-8)
                     gamma_true_agg = gamma_true_agg / gamma_true_agg.sum(dim=1, keepdim=True).clamp_min(1e-8)
                     H_true_agg = mdp_true.build_H(P_true_agg)             # (B, M, M*A)
+                    loss_mode = getattr(args, 'loss_mode', 'penalty')
+                    r_true_agg_flat = r_true_agg.reshape(batch_size, -1)
                     if args.algo in ("dfl_sketch", "dfl_berthet"):
                         pass
+                    elif loss_mode in ('lagrangian', 'auglag'):
+                        # Aggregated analog of the non-agg auglag branch below:
+                        # KEEP the predicted-MDP aggregated solution y_star from
+                        # the forward pass and measure its violation on the
+                        # aggregated TRUE system. Re-solving on the true system
+                        # (as 'penalty' mode does) makes violation — and the
+                        # whole dual correction — identically zero, in value AND
+                        # gradient, through the basis-sensitivity backward
+                        # (H_B dy_B = dgamma - dH_B y_B cancels exactly).
+                        pass
                     else:
-                        y_star = DifferentiableLPSolver.apply(H_true_agg, r_true_agg.reshape(batch_size, -1), gamma_true_agg)
+                        y_star = DifferentiableLPSolver.apply(H_true_agg, r_true_agg_flat, gamma_true_agg)
 
                     violation = gamma_true_agg - (H_true_agg @ y_star.unsqueeze(-1)).squeeze(-1)
                     rho = getattr(args, 'aug_lag_rho', 0.1)
                     aug_lag = rho * violation.pow(2).mean()
-                    v_star = torch.sum(r_true_agg.reshape(batch_size, -1) * y_star, dim=1)
-                    dfl_loss = -v_star.mean() + aug_lag
+                    v_star = torch.sum(r_true_agg_flat * y_star, dim=1)
+                    dfl_loss = -v_star.mean()
+                    if loss_mode in ('penalty', 'auglag'):
+                        dfl_loss = dfl_loss + aug_lag
+                    if loss_mode in ('lagrangian', 'auglag'):
+                        # Linear dual term needs the dual of the AGGREGATED true
+                        # LP (data prep's dual_true lives in R^S, wrong space).
+                        # H̄, γ̄ change with W every step, so it is solved fresh
+                        # under no_grad — a constant wrt θ, exactly like
+                        # dual_true in the non-agg branch.
+                        with torch.no_grad():
+                            y_agg_true, _, dual_agg = solve_lp_gurobi(
+                                H_true_agg.detach(), r_true_agg_flat.detach(),
+                                gamma_true_agg.detach())
+                        if batch_idx == 0:
+                            # Strong-duality gate in the aggregated space:
+                            # γ̄ᵀν̄ == r̄ᵀȳ* at the aggregated-true optimum.
+                            lhs = (gamma_true_agg.detach() * dual_agg).sum(dim=1)
+                            rhs = (r_true_agg_flat.detach() * y_agg_true).sum(dim=1)
+                            if not torch.allclose(lhs, rhs, rtol=1e-2, atol=1e-2):
+                                rel = ((lhs - rhs).abs() / (rhs.abs() + 1e-8)).max().item()
+                                raise RuntimeError(
+                                    "Aggregated linear-term consistency check failed: "
+                                    f"gamma_agg^T dual != r_agg^T y*_agg (max rel err {rel:.3e}); "
+                                    "dual sign convention inconsistent — auglag results untrustworthy.")
+                        linear = -(dual_agg * violation).sum(dim=1)
+                        dfl_loss = dfl_loss + linear.mean()
                 else:
                     violation = gamma_use - (H_true @ y_star.unsqueeze(-1)).squeeze(-1)
                     rho = getattr(args, 'aug_lag_rho', 0.1)
                     aug_lag = rho * violation.pow(2).mean()
                     v_star = torch.sum(r_true * y_star, dim=1)
-                    dfl_loss = -v_star.mean() + aug_lag
+
+                    # ---- Augmented-Lagrangian ablation --------------------------
+                    # loss_mode in {regret, penalty, lagrangian, auglag}. Default
+                    # 'penalty' reproduces the original Eq.(5) EXACTLY, so runs
+                    # that do not set --loss_mode are byte-for-byte unchanged.
+                    if args.algo == "dfl_feas":
+                        # DFL-Feas: Odece (Mandi et al., NeurIPS'25) adapted to
+                        # the occupancy LP. Solver-free gradients: y_star (= y^-,
+                        # solved under no_grad) and y_true are constants; the loss
+                        # reaches the predictor only through c(y; th) = H_pred y
+                        # - gamma and the reward-completion MSE. Each equality is
+                        # the softplus pair of its two inequality sides; UNSAT
+                        # sides come from the sign of the true violation of y^-
+                        # (tolerance odece_tol, since exact equality feasibility
+                        # is measure-zero).
+                        ups = float(getattr(args, 'odece_margin', 0.01))
+                        tol = float(getattr(args, 'odece_tol', 1e-4))
+                        o_alpha = float(getattr(args, 'odece_alpha', 0.5))
+                        mse_w = float(getattr(args, 'odece_mse_weight', 0.0))
+                        # OPL: true optimum should satisfy predicted flow constraints
+                        c_true = (H_use @ y_true.unsqueeze(-1)).squeeze(-1) - gamma_use
+                        opl = (F.softplus(ups + c_true)
+                               + F.softplus(ups - c_true)).sum(dim=1).mean()
+                        # IPL: at c_neg = 0 the value is const but the gradient
+                        # -sigma(ups)*dc/dtheta pushes the predicted residual at
+                        # y^- toward the sign of its true violation
+                        c_neg = (H_use @ y_star.unsqueeze(-1)).squeeze(-1) - gamma_use
+                        v_neg = -violation  # = H_true y^- - gamma (constant)
+                        unsat_pos = (v_neg > tol).float()
+                        unsat_neg = (v_neg < -tol).float()
+                        infeas = (v_neg.abs().amax(dim=1, keepdim=True) > tol).float()
+                        ipl = (infeas * (unsat_pos * F.softplus(ups - c_neg)
+                                         + unsat_neg * F.softplus(ups + c_neg))).sum(dim=1).mean()
+                        dfl_loss = o_alpha * ipl + (1.0 - o_alpha) * opl
+                        if mse_w > 0:
+                            # known-objective completion: mu * ||r_pred - r_true||^2
+                            dfl_loss = dfl_loss + mse_w * F.mse_loss(r_flat_use, r_true)
+                        loss_mode = None  # skip the loss_mode branches below
+                    else:
+                        loss_mode = getattr(args, 'loss_mode', 'penalty')
+                        dfl_loss = -v_star.mean()
+                    if loss_mode in ('penalty', 'auglag'):
+                        dfl_loss = dfl_loss + aug_lag
+                    if loss_mode in ('lagrangian', 'auglag'):
+                        # Linear dual term (v*)^T(H_true y - gamma) = -(v*)^T violation,
+                        # since violation = gamma - H_true y here. dual_true is the
+                        # true LP dual (constraint H_true y = gamma) from data prep.
+                        if batch_idx == 0:
+                            _assert_strong_duality(gamma_use, dual_true, obj_true)
+                        linear = -(dual_true * violation).sum(dim=1)
+                        dfl_loss = dfl_loss + linear.mean()
 
                 # 3. Optional fidelity loss: anchor disaggregated occupancy to
                 # the oracle y_true. Gives the aggregator a supervised target
@@ -767,16 +1008,23 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 )
                 y_star_eval, _, _, _ = solve_lp(mdp_pred_full, lp_solver)
             elif agg is not None and _agg_info is not None:
+                # for projlp, y_star is the reduced w and disaggregate_y is the Phi-lift
                 y_star_eval = SoftAggDense.disaggregate_y(y_star, _agg_info["W"], mdp.r.shape[2])
             else:
                 y_star_eval = y_star
             v_eval, _ = eval_y_on_true_mdp(mdp_true, y_star_eval, gamma_use)
+            if _batch_feas is not None and bool(_batch_feas.any()):
+                v_eval = v_eval.flatten()[_batch_feas]
             v_star = v_eval.mean().item()
             epoch_rewards.append(v_star)
         
         train_reward_list.append(float(np.mean(epoch_rewards)))
         train_time_list.append(time.time() - start_time)
         sa_time_sec_per_epoch.append(epoch_sa_time)
+        lp_infeasible_per_epoch_list.append(int(epoch_lp_infeasible))
+        if epoch_lp_infeasible:
+            print(f"[Training] projlp: {epoch_lp_infeasible} infeasible "
+                  f"instance-solves skipped this epoch")
         epoch_solver_time = solver_forward_time + backward_time
         solver_time_sec_per_epoch.append(epoch_solver_time)
         avg_obj_loss = obj_loss / len(train_loader)
@@ -786,7 +1034,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
 
         
         # For DFL variants (LP-based and qpth-based): track average MSE and full DFL loss per epoch
-        if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet') and epoch_mse:
+        if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch', 'dfl_berthet', 'dfl_feas') and epoch_mse:
             train_mse_list.append(np.mean(epoch_mse))
             train_dfl_loss_list.append(np.mean(epoch_dfl_loss))
             train_twostage_loss_list.append(0.0)  # Placeholder for two-stage
@@ -828,7 +1076,7 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
         
         if (epoch + 1) % 1 == 0:
             msg = f'[Training] Epoch {epoch + 1}/{args.n_epochs}, Loss: {train_loss / len(train_loader):.4f}, λ_bias={train_lambda_bias_per_epoch[-1]:+.3f}'
-            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch') and epoch_vstar and epoch_aug_lag and epoch_mse:
+            if args.algo in ('dfl', 'dfl_qpth', 'dfl_sketch', 'dfl_feas') and epoch_vstar and epoch_aug_lag and epoch_mse:
                 msg += f'  |  v*={epoch_rewards[-1]:.2f}  aug_lag={epoch_aug_lag[-1]:.2f}  pred_MSE={epoch_mse[-1]:.4f}'
                 msg += f'  zero_grad={train_zero_grad_frac_list[-1]:.1%}  |dV/dλ|={train_dv_dlambda_mean_list[-1]:.4f}'
             if getattr(args, 'policy_analysis', False):
@@ -904,6 +1152,8 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                 'train_time': train_time_list.copy(),
                 'sa_time_sec_per_epoch': sa_time_sec_per_epoch.copy(),
                 'solver_time_sec_per_epoch': solver_time_sec_per_epoch.copy(),
+                'sa_layer': _sa_layer_of(args),
+                'lp_infeasible_per_epoch': list(lp_infeasible_per_epoch_list),
                 'train_lambda_pred': [l.cpu().numpy().tolist() for l in train_lambda_pred_list],
                 'train_lambda_true': [l.cpu().numpy().tolist() for l in train_lambda_true_list],
                 'obj_true': [obj.cpu().numpy().tolist() for obj in obj_true_list],
