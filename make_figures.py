@@ -243,8 +243,11 @@ def render_cartpole(out: Path) -> None:
 
     dr_nf = cp_mod.pick_best_dr(args, snf_ns)
 
-    # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config.
-    SA_DIM_CONFIGS = ((30, 8, 0.5), (60, 8, 0.5), (90, 4, 0.8))
+    # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config
+    # over the grid K in {4,8} x r in {0.3,0.5,0.7,0.8}. Must stay in sync with
+    # the DFL-SA rows of the results table; mdp_continuous/run_dfl_seeds.sh
+    # generates exactly these three caches and verifies them.
+    SA_DIM_CONFIGS = ((30, 4, 0.8), (60, 8, 0.5), (90, 4, 0.8))
     # Training-curves panel: pin to d=90 with its best (K, r).
     SA_CURVE_D, SA_CURVE_K, SA_CURVE_R = 90, 4, 0.8
 

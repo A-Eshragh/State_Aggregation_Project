@@ -627,7 +627,12 @@ def train_eval_cliff(args, train_loader, test_loader, meta):
                 # represent a deployable policy on the original MDP. Solve the
                 # plain LP on the (detached) predicted MDP for the metric,
                 # mirroring how mdp_lp evaluates dfl_sketch / dfl_ssa.
-                if args.algo in ("dfl_qpth", "dfl_sketch", "dfl_ssa"):
+                # During the CE-warmup epochs y_star ALREADY is that plain-LP
+                # solution (_solve_with_algo takes the same branch), so solving
+                # again would be a bit-identical duplicate: ~40% of the epochs
+                # here paid for two identical Gurobi solves per batch.
+                if args.algo in ("dfl_qpth", "dfl_sketch", "dfl_ssa") and \
+                        epoch >= int(getattr(args, "head_ce_warmup_epochs", 0)):
                     mdp_eval = CliffWalkingLP(P=P_pred.detach(), r=r_pred.detach(), beta=beta)
                     y_eval, _, _, _ = solve_lp(mdp_eval, lp_solver)
                 v, _ = eval_y_on_true_mdp(P_true, r_true, y_eval, gamma, beta)

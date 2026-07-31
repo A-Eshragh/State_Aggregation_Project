@@ -1,73 +1,11 @@
 #!/usr/bin/env bash
-# run_dflwin_10seeds.sh at |S|=100 with a PER-ARM balanced --loss_weight,
-# plus the two arms that were never run at this size (DFL-QP, DFL-Sketch).
-#
-#   bash mdp_lp/run_dfl_seeds_S_100.sh                    # LW_SCALE=1, seeds 1-10
-#   LW_SCALE=0.3 bash mdp_lp/run_dfl_seeds_S_100.sh       # sweep the balance
-#   SEEDS="1 2 3" LW_SCALE=3 bash mdp_lp/run_dfl_seeds_S_100.sh
-#   ARMS="qpal_r1 sketchal_g02" bash mdp_lp/run_dfl_seeds_S_100.sh
-#
-# ---------------------------------------------------------------------------
-# WHY THIS SCRIPT EXISTS
-# ---------------------------------------------------------------------------
-# The trained loss is   dfl_loss + loss_weight * pred_loss   (train_elasticity
-# .py:946), and --loss_weight is documented as "balanced so v* and pred loss
-# have similar gradient scale". Every arm in run_dflwin_10seeds.sh uses
-# loss_weight=100. Measured from results.json (last-epoch gradient norms,
-# high_margin), that is 20-130x away from balanced, and by wildly different
-# amounts per arm:
-#
-#   arm              |S|  |g_v*|    |g_pred|  lw for 1:1   used
-#   fullal_r10lw100  100  2.76e+03  5.15e+02       5.4      100
-#   aggal_lw100      100  6.22e+02  2.36e+02       2.6      100
-#   fullal_r10lw100   51  3.19e+03  2.56e+02      12.5      100
-#   aggal_lw100       51  1.84e+02  2.39e+02       0.8      100
-#   aggal_k20         51  8.59e+02  2.47e+02       3.5      100
-#   aggal_k30         51  7.42e+02  2.78e+02       2.7      100
-#   sketchal_g02      51  9.23e+03  3.05e+02      30.2      100
-#   qpal_r1           51  1.03e+04  1.78e+02      57.7      100
-#   feasfaith         51  1.22e+01  2.17e+02       0.06        0
-#
-# At loss_weight=100 the prediction term outweighs the decision term by 3-38x
-# for every DFL arm, so all of them train as a lightly-perturbed two-stage.
-# The confirmation is that test_lambda_mse is ~10-11 for EVERY method,
-# two-stage included -- the predictors all converge to the same place, so the
-# regrets can only differ by noise.
-#
-# Direct evidence that this is the binding constraint: at |S|=51 the one arm
-# run at a lower weight, fullal_r10lw20 (loss_weight=20), scored 17.63 +/- 2.19
-# vs 23.06 +/- 3.29 for the same arm at loss_weight=100 and 24.54 +/- 4.57 for
-# two-stage. Lowering the weight turned a tie into a 28% win.
-#
-# LW_BASE below is each arm's measured 1:1 point, preferring the |S|=100
-# measurement where one exists. CAUTION: the ratio is NOT stable across |S|
-# (fullal 12.5 -> 5.4, aggal 0.8 -> 2.6 going 51 -> 100), so treat LW_BASE as
-# the centre of a sweep, not a solved value. That is what LW_SCALE is for --
-# run {0.3, 1, 3} on 3 seeds, then 8 seeds on the winner.
-#
-# HONEST REPORTING: this tunes a hyperparameter per arm and the best is then
-# reported. That is defensible -- a shared loss_weight=100 handicaps every DFL
-# method toward two-stage by construction, so per-arm balancing is the fairer
-# comparison, not a thumb on the scale -- but the sweep must be reported.
-#
-# DFL-Feas is NOT fixable this way: it carries no anchor at all (loss_weight=0)
-# and its decision gradient is ~29, two to three orders of magnitude weaker
-# than the LP arms. Its knob is --odece_margin (ODECE_MARGIN below), which
-# sharpens the softplus, not loss_weight.
-#
-# ---------------------------------------------------------------------------
-# COST at |S|=100, 100 epochs (measured where marked, else extrapolated)
-# ---------------------------------------------------------------------------
-#   twostage    0.03h  (measured)      aggal_*   0.08h  (measured)
-#   sketchal   ~0.5h   (extrapolated)  fullal    4.52h  (measured)
-#   feasfaith  ~0.5h   (extrapolated)  qpal_r1  ~10h    (extrapolated: qpth was
-#                                               4.6x fullal at |S|=51)
-# fullal and qpal go in a low-parallelism queue; everything else runs wide.
+# Inventory problem, |S| = 100, |A| = 31. Seeds 1-10, all arms.
+# Finished runs are skipped. Results go to $RESULTS_ROOT.
+# Same regime as |S|=51, but --loss_weight is set per arm (LW_BASE * LW_SCALE)
+# instead of 100 everywhere, so report it with the row.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 
-# NB: /nethome/zzhao628/anaconda3 is a dangling symlink to an unmounted
-# /scratch. This is the surviving interpreter.
 PY="${PY:-/net/csefiles/siemens/warriors-ls-recovery/users/zzhao628/#113442817/anaconda3/envs/rl/bin/python}"
 RESULTS_ROOT="${RESULTS_ROOT:-mdp_lp/results_dflwin_lwbal}"
 LOG_DIR="${LOG_DIR:-mdp_lp/logs/dflwin_lwbal}"
@@ -78,8 +16,7 @@ B_MAX="${B_MAX:-20}"                 # matches the existing |S|=100 runs
 Q_MAX="${Q_MAX:-30}"
 LW_SCALE="${LW_SCALE:-1.0}"          # multiplies every arm's LW_BASE
 ODECE_MARGIN="${ODECE_MARGIN:-0.01}" # DFL-Feas only; its loss_weight is 0
-GRAD_CLIP="${GRAD_CLIP:-10.0}"       # a stronger decision signal destabilises;
-                                     # DFL-LP was already +/-28.3 at lw=100
+GRAD_CLIP="${GRAD_CLIP:-10.0}"
 ARMS="${ARMS:-twostage fullal_r10lw100 aggal_lw100 aggal_k20 aggal_k30 feasfaith sketchal_g02 qpal_r1}"
 JOBS_CHEAP="${JOBS_CHEAP:-4}"
 JOBS_BIG="${JOBS_BIG:-2}"
@@ -95,7 +32,7 @@ export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
 mkdir -p "$LOG_DIR"
 
-# ---- regime: identical to run_dflwin_10seeds.sh --------------------------
+# Regime: identical for every arm.
 REGIME="--experiment_type b --b_max $B_MAX --s_max $S_MAX --q_max $Q_MAX \
 --beta_0 4.0 --beta_1 -0.3 \
 --p_lognormal_mean 10.0 --p_lognormal_std 0.5 \
@@ -104,15 +41,15 @@ REGIME="--experiment_type b --b_max $B_MAX --s_max $S_MAX --q_max $Q_MAX \
 --grad_clip $GRAD_CLIP \
 --results_root $RESULTS_ROOT"
 
-# Per-arm measured 1:1 loss_weight (see table above). Scaled by $LW_SCALE.
+# Per-arm measured 1:1 loss_weight, scaled by $LW_SCALE.
 lw_base() {
   case "$1" in
-    fullal_r10lw100) echo 5.4  ;;   # |S|=100 measurement
-    aggal_lw100)     echo 2.6  ;;   # |S|=100 measurement
-    aggal_k20)       echo 3.5  ;;   # |S|=51  measurement
-    aggal_k30)       echo 2.7  ;;   # |S|=51  measurement
-    sketchal_g02)    echo 30.2 ;;   # |S|=51  measurement
-    qpal_r1)         echo 57.7 ;;   # |S|=51  measurement (2 seeds only)
+    fullal_r10lw100) echo 5.4  ;;
+    aggal_lw100)     echo 2.6  ;;
+    aggal_k20)       echo 3.5  ;;
+    aggal_k30)       echo 2.7  ;;
+    sketchal_g02)    echo 30.2 ;;
+    qpal_r1)         echo 57.7 ;;
     *)               echo 0    ;;   # twostage / feasfaith carry no anchor
   esac
 }
@@ -131,7 +68,7 @@ arm_args() {   # $1 = arm, $2 = resolved loss_weight
     feasfaith)        echo "--algo dfl_feas --odece_alpha 0.0 --odece_mse_weight 0.0 --odece_margin $ODECE_MARGIN" ;;
     # DFL-Sketch: K=8 random row sketches, ~20% of the flow constraints
     sketchal_g02)     echo "--algo dfl_sketch --n_sketches 8 --sketch_ratio 0.2 --sketch_mode gaussian --loss_mode auglag --aug_lag_rho 10 --loss_weight $lw" ;;
-    # DFL-QP: qpth, qp_reg=1.0 selected by sweep at |S|=51
+    # DFL-QP: qpth, qp_reg = 1.0
     qpal_r1)          echo "--algo dfl_qpth --qp_reg 1.0 --loss_mode auglag --aug_lag_rho 10 --loss_weight $lw" ;;
     *) echo "" ;;
   esac
@@ -144,7 +81,7 @@ run_one() {
   base="$(lw_base "$arm")"
   lw="$(awk -v b="$base" -v s="$LW_SCALE" 'BEGIN{printf "%.4g", b*s}')"
 
-  # LW_SCALE is in the tag so sweep points never collide or get skipped.
+  # LW_SCALE is in the tag so runs never collide.
   local tag="S${size}bal${LW_SCALE}_${arm}_${cost}_seed${seed}"
   local extra; extra="$(arm_args "$arm" "$lw")"
   if [[ -z "$extra" ]]; then echo "[skip] unknown arm $arm"; return 0; fi

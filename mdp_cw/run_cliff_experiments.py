@@ -46,7 +46,7 @@ def parse_args():
     p.add_argument("--train_frac", type=float, default=0.5)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--regime_set", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+    p.add_argument("--regime_set", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"],
                    help="v1 = 4 regimes (original, state-independent); "
                         "v2 = 8 policy-diverse regimes (state-independent); "
                         "v3 = 4 regimes, 3 volatile cells (state-dependent); "

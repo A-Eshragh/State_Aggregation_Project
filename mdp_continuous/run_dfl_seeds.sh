@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
+# CartPole, 10 seeds per method. Runs every arm, then re-derives the table from
+# the caches and checks it, so a green run is the reproduction check.
+# Seeds differ per row (DFL-LP 20, DFL-Sketch 5 at 30 iterations), so report
+# them with the table.
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# $HOME/anaconda3 -> /scratch/zzhao628/anaconda3, which no longer exists; the
-# rl env currently lives only on the recovery mount. Prefer whichever resolves.
 RECOVERY_PY="/net/csefiles/siemens/warriors-ls-recovery/users/zzhao628/#113442817/anaconda3/envs/rl/bin/python"
 if [ -x "$HOME/anaconda3/envs/rl/bin/python" ]; then
   PY="${PY:-$HOME/anaconda3/envs/rl/bin/python}"
@@ -18,108 +21,81 @@ fi
 ulimit -s 65536
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
 
-# SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20}"
-SEEDS="${SEEDS:-1 2 3 4 5 6 7 8 9 10}"
 WORKERS="${WORKERS:-10}"
 
-# ── DFL loss variant for the DFL arms ────────────────────────────────────────
-# The DFL arms now train with the augmented-Lagrangian loss instead of the
-# Eq.(5) penalty loss:
-#     L = c^T w*  +  rho||b - M w*||^2  +  dual_weight * nu^T(b - M w*)
-#
-# HONEST STATUS OF THIS DEFAULT — read before trusting the numbers.
-#   * The EXACT aug-Lagrangian (dual_weight=1, rho=10) is WORSE than the Eq.(5)
-#     penalty loss on DFL-LP over 20 paired seeds:
-#         Delta best = -11.24 +/- 6.42 SE,  Delta final = -53.49 +/- 16.54 SE
-#         (6/20 seeds win).
-#     Cause (measured): the linear term runs +1.9..+20.2 against |c^T w*| ~ 5
-#     and rho||viol||^2 ~ 0.003, because 72% of true-LP solves hit Gurobi's
-#     slack-penalised fallback — the polytope {w : Mw=b, w>=0} is empty at
-#     pretrained features — and those multipliers are bounded only by the 1e3
-#     slack penalty.
-#   * --dual_feasible_only applies the linear term ONLY on steps where the true
-#     LP was genuinely feasible, so the multiplier is a real LP dual. On a
-#     5-seed sweep it had the best 'best' reward and the lowest variance
-#     (191.34 +/- 4.38, vs 187.71 +/- 6.98 for the penalty loss).
-#   * BUT that 5-seed sweep CANNOT rank these configs: the exact-AL Delta best
-#     was +4.20 on those 5 seeds and -11.24 on 20 seeds — the sign flips. Every
-#     5-seed contrast is within ~1 SE of zero. And --dual_feasible_only skips
-#     the linear term on ~93% of steps, so it sits close to the penalty loss by
-#     construction.
-#   * rho is NOT the fix: rho=1000 was the worst config tested
-#     (Delta final -70.92 +/- 23.96).
-# So this default is the best-supported option among those tested, NOT an
-# established win. Confirm on 20 seeds before putting it in the paper.
-# Set AUGLAG_FLAGS="" to fall back to the original Eq.(5) penalty loss.
-AUGLAG_FLAGS="${AUGLAG_FLAGS:---loss_mode auglag --dual_feasible_only}"
+SEEDS_MAIN="${SEEDS_MAIN:-1 2 3 4 5 6 7 8 9 10}"   # QP, Two-stage, Feas, SA
+SEEDS_LP="${SEEDS_LP:-$(seq 1 20 | tr '\n' ' ')}"  # DFL-LP row: 20 seeds
+SEEDS_SKETCH="${SEEDS_SKETCH:-4 5 6 7 8}"          # DFL-Sketch row: 5 seeds
+ITERS="${ITERS:-60}"
+ITERS_SKETCH="${ITERS_SKETCH:-30}"                 # DFL-Sketch row: 30 iters
+SKETCH_K="${SKETCH_K:-8}"
+SKETCH_R="${SKETCH_R:-0.2}"
 
-# Mirror of AUGLAG_FLAGS for make_figures.py, so step [5/5] reads the caches
-# these runs write rather than the old penalty-loss ones.
+AUGLAG_FLAGS="${AUGLAG_FLAGS:-}"
 if [ -n "$AUGLAG_FLAGS" ]; then
-  export CARTPOLE_LOSS_MODE=auglag
-  export CARTPOLE_DUAL_FEASIBLE_ONLY=1
+  echo "[warn] AUGLAG_FLAGS='$AUGLAG_FLAGS' set — these runs write _lmauglag"
+  echo "[warn] caches and do NOT reproduce the published table."
 fi
 
-echo "[reproduce] seeds=$SEEDS"
-echo "[reproduce] workers=$WORKERS"
-echo "[reproduce] DFL loss: ${AUGLAG_FLAGS:-penalty (Eq.5)}"
-echo "[reproduce] DFL-SA configs: d=30,60 → K=8 r=0.5 ; d=90 → K=4 r=0.8"
+# Figures need one extra run (the 60-iteration sketch arm). Off by default.
+RENDER_FIGURES="${RENDER_FIGURES:-0}"
+
+# VERIFY_ONLY=1 checks the cached results without running anything.
+VERIFY_ONLY="${VERIFY_ONLY:-0}"
+run() {
+  if [ "$VERIFY_ONLY" != "0" ]; then
+    echo "      [skip: VERIFY_ONLY] $*"
+    return 0
+  fi
+  "$@"
+}
+
+echo "[reproduce] CartPole results table"
+echo "[reproduce] workers=$WORKERS  loss=${AUGLAG_FLAGS:-penalty (Eq.5)}"
+echo "[reproduce] seeds: main=[$SEEDS_MAIN]"
+echo "[reproduce]        lp=[$SEEDS_LP]"
+echo "[reproduce]        sketch=[$SEEDS_SKETCH] @ ${ITERS_SKETCH} iters"
+echo "[reproduce] DFL-SA configs: d=30 -> K=4 r=0.8 ; d=60 -> K=8 r=0.5 ; d=90 -> K=4 r=0.8"
 echo
 
-# ── [1/5] DFL-LP and DFL-Sketch, aug-Lagrangian loss ─────────────────────────
-# Both solve a SKETCHED reduced LP, so b - M w* is genuinely non-zero and the
-# loss variant actually changes training.
-echo "[1/5] run_dfl_vs_qpth: lp, sketch  (aug-Lagrangian)"
-"$PY" -m mdp_continuous.run_dfl_vs_qpth \
-    --solvers lp sketch \
-    --seeds $SEEDS \
+echo "[1/8] DFL-LP  (lp, 20 seeds)"
+run "$PY" -m mdp_continuous.run_dfl_vs_qpth \
+    --solvers lp \
+    --seeds $SEEDS_LP \
+    --n_iterations "$ITERS" \
     --n_workers "$WORKERS" \
     $AUGLAG_FLAGS
 
-# ── [2/5] DFL-QP and Two-stage ───────────────────────────────────────────────
-# DFL-QP is deliberately NOT given AUGLAG_FLAGS. The QP enforces Mw=b exactly,
-# so the violation is identically zero — measured at nfeat=1024: aug_lag=0.0000
-# and linear=+/-0.0000. All four loss modes collapse to the same loss for this
-# arm, so passing --loss_mode auglag would only rename its cache file while
-# training identically.
-# Two-stage runs no DFL phase at all, so the loss variant is irrelevant there.
-echo "[2/5] run_dfl_vs_qpth: qpth, two_stage  (loss variant does not apply)"
-"$PY" -m mdp_continuous.run_dfl_vs_qpth \
+echo "[2/8] DFL-QP + Two-stage  (qpth, two_stage)"
+run "$PY" -m mdp_continuous.run_dfl_vs_qpth \
     --solvers qpth two_stage \
-    --seeds $SEEDS \
+    --seeds $SEEDS_MAIN \
+    --n_iterations "$ITERS" \
     --n_workers "$WORKERS"
 
-# ── [3/5] DFL-Feas / Odece [34] baseline ─────────────────────────────────────
-# Constrained-DFL baseline requested by the reviewer. Solver-free: both LP
-# solves are detached and the gradient reaches the features only through the
-# constraint residual M(theta)w - b(theta) plus the objective-completion MSE.
-# --odece_neg_solver plain is the faithful reading of [34] (the predicted
-# problem is solved exactly); 'arm' is a charitable variant that reuses the
-# sketched layer for y^-. loss_mode does not apply — Odece replaces the loss.
-echo "[3/5] run_dfl_vs_qpth: feas  (DFL-Feas / Odece [34])"
-"$PY" -m mdp_continuous.run_dfl_vs_qpth \
+echo "[3/8] DFL-Feas  (feas, Odece [34])"
+run "$PY" -m mdp_continuous.run_dfl_vs_qpth \
     --solvers feas \
     --odece_neg_solver plain \
-    --seeds $SEEDS \
+    --seeds $SEEDS_MAIN \
+    --n_iterations "$ITERS" \
     --n_workers "$WORKERS"
 
-# ── [4/5] DFL-SA sweeps, aug-Lagrangian loss ─────────────────────────────────
-# DFL-SA also runs on the sketched LP, so the loss variant bites here too.
-echo "[4/5] sweep_n_features  d=30,60  (aug-Lagrangian)"
-"$PY" -m mdp_continuous.sweep_n_features \
-    --seeds $SEEDS \
-    --n_features_list 30 60 \
+echo "[4/8] DFL-Sketch  (sketch, ${ITERS_SKETCH} iters, K=$SKETCH_K r=$SKETCH_R)"
+run "$PY" -m mdp_continuous.run_dfl_vs_qpth \
+    --solvers sketch \
+    --seeds $SEEDS_SKETCH \
+    --n_iterations "$ITERS_SKETCH" \
+    --n_sketches "$SKETCH_K" \
+    --sketch_ratio "$SKETCH_R" \
     --n_workers "$WORKERS" \
-    --sa_K 8 \
-    --sa_ratio 0.5 \
-    --show_running_max \
-    --force \
     $AUGLAG_FLAGS
 
-echo "[4/5] sweep_n_features  d=90  (aug-Lagrangian)"
-"$PY" -m mdp_continuous.sweep_n_features \
-    --seeds $SEEDS \
-    --n_features_list 90 \
+echo "[5/8] DFL-SA  d=30,90  (K=4, r=0.8)"
+run "$PY" -m mdp_continuous.sweep_n_features \
+    --seeds $SEEDS_MAIN \
+    --n_features_list 30 90 \
+    --n_iterations "$ITERS" \
     --n_workers "$WORKERS" \
     --sa_K 4 \
     --sa_ratio 0.8 \
@@ -127,20 +103,127 @@ echo "[4/5] sweep_n_features  d=90  (aug-Lagrangian)"
     --force \
     $AUGLAG_FLAGS
 
-# ── [5/5] Re-render PDFs from the (now-updated) caches ───────────────────────
-# CARTPOLE_LOSS_MODE / CARTPOLE_DUAL_FEASIBLE_ONLY (exported above) make the
-# figure read the aug-Lagrangian caches. The penalty-loss caches are NOT
-# overwritten — both variants coexist under different filenames — so unsetting
-# those variables re-renders the original paper figure.
-echo "[5/5] make_figures.py cartpole"
-"$PY" make_figures.py cartpole
+echo "[6/8] DFL-SA  d=60  (K=8, r=0.5)"
+run "$PY" -m mdp_continuous.sweep_n_features \
+    --seeds $SEEDS_MAIN \
+    --n_features_list 60 \
+    --n_iterations "$ITERS" \
+    --n_workers "$WORKERS" \
+    --sa_K 8 \
+    --sa_ratio 0.5 \
+    --show_running_max \
+    --force \
+    $AUGLAG_FLAGS
+
+if [ "$RENDER_FIGURES" != "0" ]; then
+  echo "[7/8] extra sketch run for the figure  (60 iters, seeds 1-8)"
+  run "$PY" -m mdp_continuous.run_dfl_vs_qpth \
+      --solvers sketch \
+      --seeds 1 2 3 4 5 6 7 8 \
+      --n_iterations 60 \
+      --n_sketches "$SKETCH_K" \
+      --sketch_ratio "$SKETCH_R" \
+      --n_workers "$WORKERS"
+  echo "[7/8] make_figures.py cartpole"
+  run "$PY" make_figures.py cartpole
+  ls -la "$ROOT/figures/cartpole_"*.pdf
+else
+  echo "[7/8] figures skipped (RENDER_FIGURES=1 to render)"
+fi
+
+# ── [8/8] Verify: re-derive the table from the caches and diff it ────────────
+echo
+echo "[8/8] verifying against the published table"
+"$PY" - <<'PYEOF'
+import json, math, sys
+import statistics as st
+from pathlib import Path
+
+CACHE = Path("mdp_continuous/results/dfl_vs_qpth")
+
+# Shared cache-key stems. run_dfl_vs_qpth puts _iters before _nfeat;
+# sweep_n_features puts _nfeat first. Both are reproduced verbatim here.
+def anchor(prefix, iters, tail=""):
+    return (f"{prefix}_behbiased_td0.013_eps0.5_ntraj100_iters{iters}"
+            f"_nfeat1024_preTS30_preDFL30_nce0_ndfl5_dfllrauto_evallp{tail}")
+
+def sweep(d, K, r):
+    return (f"curve_neural_dfl_nfeat{d}_behbiased_td0.013_eps0.5_ntraj100"
+            f"_iters60_preTS30_preDFL30_nce0_ndfl5_dfllrauto_evallp"
+            f"_saK{K}_sar{r}")
+
+# (label, cache stem, expected mean, expected SE, expected solver s/ep, n_seeds)
+ROWS = [
+    ("DFL-SA (d = 90)", sweep(90, 4, 0.8),                     196.715,  2.292,  0.24, 10),
+    ("DFL-SA (d = 60)", sweep(60, 8, 0.5),                     193.052,  3.723,  0.23, 10),
+    ("DFL-QP",          anchor("curve_qpth", 60, "_qpeta0.01"), 189.681,  4.338, 10.10, 10),
+    ("DFL-SA (d = 30)", sweep(30, 4, 0.8),                     184.534,  8.423,  0.15, 10),
+    ("DFL-LP",          anchor("curve_neural", 60),             176.171,  5.444,  5.64, 20),
+    ("DFL-Sketch",      anchor("curve_sketch", 30,
+                               "_K8_r0.2_mgaussian"),          175.750,  9.138,  4.83,  5),
+    ("DFL-Feas",        anchor("curve_feas", 60,
+                               "_a0.5_mu0.0_negplain"),        159.970, 11.768, 12.18, 10),
+    ("Two-stage",       anchor("curve_two_stage_mbrl", 60),     154.435, 11.477,  0.00, 10),
+]
+
+print()
+print(f"{'method':<16} {'best reward':>21}  {'s/ep':>6}  {'seeds':>5}  "
+      f"{'d(mean)':>8}  status")
+print("-" * 74)
+
+bad = 0
+for label, stem, exp_mu, exp_se, exp_sep, exp_n in ROWS:
+    path = CACHE / f"{stem}.json"
+    if not path.exists():
+        print(f"{label:<16} {'MISSING':>21}  {'':>6}  {'':>5}  {'':>8}  "
+              f"FAIL  no cache: {path.name}")
+        bad += 1
+        continue
+    p = json.loads(path.read_text())
+    best = [max(r) for r in p["rewards_per_seed"]]
+    n = len(best)
+    mu = st.mean(best)
+    se = st.stdev(best) / math.sqrt(n) if n > 1 else 0.0
+    niter = len(p["rewards_per_seed"][0])
+    stt = p.get("solver_times_per_seed") or [0.0] * n
+    sep = st.mean(stt) / niter
+
+    notes = []
+    if n != exp_n:
+        notes.append(f"n={n} (expected {exp_n})")
+    # These runs are seeded, so a same-machine re-run is normally bit-identical;
+    # accept anything inside one standard error as a reproduction.
+    d_mu = mu - exp_mu
+    ok = abs(d_mu) <= max(exp_se, 1e-6) and not notes
+    if abs(d_mu) > max(exp_se, 1e-6):
+        notes.append(f"mean off by {d_mu:+.3f} (> 1 SE = {exp_se:.3f})")
+    if exp_sep > 0 and abs(sep - exp_sep) > max(0.25 * exp_sep, 0.02):
+        notes.append(f"s/ep {sep:.2f} vs {exp_sep:.2f}")
+        ok = False
+
+    status = "OK  " if ok else "FAIL"
+    if not ok:
+        bad += 1
+    exact = "  (exact)" if abs(d_mu) < 5e-4 else ""
+    print(f"{label:<16} {mu:>10.3f} +/- {se:>6.3f}  {sep:>6.2f}  {n:>5}  "
+          f"{d_mu:>+8.3f}  {status}{exact}"
+          + ("  " + "; ".join(notes) if notes else ""))
+
+print("-" * 74)
+print("protocol audit (not uniform — see the header of this script):")
+for label, stem, *_ in ROWS:
+    path = CACHE / f"{stem}.json"
+    if not path.exists():
+        continue
+    p = json.loads(path.read_text())
+    print(f"  {label:<16} seeds={p['seeds']}  "
+          f"iters={len(p['rewards_per_seed'][0])}")
+
+if bad:
+    print(f"\n[verify] {bad}/{len(ROWS)} rows did NOT reproduce.")
+    sys.exit(1)
+print(f"\n[verify] all {len(ROWS)} rows reproduce the published table.")
+PYEOF
 
 echo
-echo "[reproduce] done. Output PDFs:"
-ls -la "$ROOT/figures/cartpole_"*.pdf
-
-echo
-echo "[reproduce] NOTE: DFL-Feas is run and cached but is NOT yet a series in"
-echo "[reproduce] make_figures.py cartpole — adding it needs a new curve/bar in"
-echo "[reproduce] render_cartpole(). Inspect its numbers directly with:"
-echo "[reproduce]   $PY -m mdp_continuous.summarize_feas_auglag --results_dir mdp_continuous/results/dfl_vs_qpth"
+echo "[reproduce] done."

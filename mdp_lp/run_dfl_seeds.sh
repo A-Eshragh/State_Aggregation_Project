@@ -1,32 +1,5 @@
 #!/usr/bin/env bash
-#
-# Figure-3 inventory setting (|S| = B_MAX + S_MAX + 1 = 36, |A| = Q_MAX + 1 = 31).
-# Results below are the 10-seed (seeds 1-10) numbers produced by this script's
-# config, read from ${RESULTS_ROOT} and mdp_lp/results_feas_compare (same config,
-# verified byte-identical per-seed regret on the shared arms). regret% is the
-# Figure-3 unit: 100 * test_mean_regret / test_mean_oracle_reward, mean +/- SE
-# across seeds; raw is mean(test_regret); solver s/ep is the median across seeds
-# of mean(solver_time_sec_per_epoch) (two-stage has no decision-aware solver).
-#
-#   method                     CONFIGS name         regret%          raw regret     solver s/ep
-#   -------------------------------------------------------------------------------------------
-#   DFL-QP (reg=10)            dfl_qpth          12.55 +- 0.99    56.88 +-  4.48       13.26
-#   DFL-SA k=30 + sketch       dfl_sketch_agg30  12.86 +- 1.47    58.14 +-  6.50        0.56
-#   DFL-LP (penalty, rho=1e4)  dfl               13.01 +- 1.19    58.90 +-  5.31        0.28
-#   DFL-Sketch (no agg, r=0.2) dfl_sketch_noagg  13.06 +- 1.35    59.17 +-  6.08        0.53
-#   DFL aug-Lag (rho=1000)     dfl_auglag_r1000  13.28 +- 1.21    60.15 +-  5.43        0.68
-#   Two-stage                  twostage          13.35 +- 1.19    60.43 +-  5.29        0.00
-#   DFL-Feas (alpha=0, mu=0)   dfl_feas_a0_m0    13.66 +- 1.39    61.83 +-  6.17        0.74
-#   DFL-SA k=20 + sketch       dfl_sketch_agg20  13.98 +- 1.39    63.40 +-  6.38        0.39
-#   DFL-SA k=10 + sketch       dfl_sketch_agg10  14.97 +- 2.32    67.73 +- 10.53        0.17
-#
-# DFL-SA arms are dfl_sketch with n_agg=k, K=8 sketches, r=0.2, gaussian.
-# DFL-Feas is Odece [34] adapted; alpha=0 (OPL only) and mu=0 (no reward
-# completion) is the faithful variant, i.e. the weakest of the feas family --
-# alpha=0.5 with mu=1 scores 11.56% / 52.30 raw, ahead of every arm above.
-# All methods sit within ~2.4 percentage points on a ~13% oracle gap, i.e. this
-# setting is estimation-dominated; aggregation quality degrades monotonically as
-# k shrinks (30 -> 20 -> 10) while solver time drops 0.56 -> 0.39 -> 0.17 s/epoch.
+# Inventory problem, |S| = 36, |A| = 31. Seeds 1-10, all methods.
 
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,25 +22,21 @@ AUG_LAG_RHO_NOAGG=10.0
 AUG_LAG_RHO_SKETCH=0.1
 RESULTS_ROOT="mdp_lp/results/${COST_CASE}_pretrain_${PRETRAIN_EPOCHS}"
 
-# Config format: NAME|ALGO|N_AGG|N_EPOCHS|LR|EXTRA1|EXTRA2|EXTRA3|EXTRA4
-# The four EXTRA fields are interpreted per ALGO (see the dispatch below):
+# NAME|ALGO|N_AGG|N_EPOCHS|LR|EXTRA1|EXTRA2|EXTRA3|EXTRA4. The EXTRA fields are
+# read per ALGO:
 #   dfl_sketch : n_sketches | sketch_ratio | sketch_mode | aug_lag_rho override
 #   dfl_qpth   : qp_reg     | -            | -           | aug_lag_rho override
 #   dfl        : loss_mode  | aug_lag_rho  | -           | -
 #   dfl_feas   : odece_alpha| odece_mse_weight (mu) | odece_margin | -
-#   twostage   : -          | -            | -           | -
-# Uncommenting the whole block below reproduces the 8-row table in the header.
 CONFIGS=(
     "twostage|twostage|-1|50|0.01||||"
     "dfl_qpth|dfl_qpth|-1|50|0.01|10.0|||"
-    "dfl|dfl|-1|50|0.01|penalty|10000.0||"
     "dfl_auglag_r1000|dfl|-1|50|0.01|auglag|1000.0||"
     "dfl_sketch_agg30|dfl_sketch|30|50|0.01|8|0.2|gaussian|"
     "dfl_sketch_agg20|dfl_sketch|20|50|0.01|8|0.2|gaussian|"
     "dfl_sketch_agg10|dfl_sketch|10|50|0.01|8|0.2|gaussian|"
     "dfl_sketch_noagg|dfl_sketch|-1|50|0.01|8|0.2|gaussian|"
     "dfl_feas_a0_m0|dfl_feas|-1|50|0.01|0.0|0.0|0.01|"
-    # "dfl_sketch_agg5|dfl_sketch|5|50|0.01|16|0.2|gaussian|"
 )
 
 for SEED in "${SEEDS[@]}"; do

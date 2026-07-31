@@ -517,10 +517,17 @@ def train_eval_elasticity(args, train_loader, test_loader, gt_elasticity):
                                 pretrain_epochs=agg_pretrain_epochs)
 
     if _sa_layer_of(args) != "projmdp":
-        if agg is None or args.algo != "dfl":
+        if agg is None or args.algo not in ("dfl", "dfl_sketch"):
             raise ValueError(
-                "--sa_layer projlp/hard requires --algo dfl with --n_agg != -1")
+                "--sa_layer projlp/hard requires --algo dfl or dfl_sketch "
+                "with --n_agg != -1")
         print(f"[Train] DFL-SA layer variant: {_sa_layer_of(args)}")
+        if args.algo == "dfl_sketch" and _sa_layer_of(args) == "projlp":
+            # The Galerkin path below re-solves on the true MDP with a dense
+            # solver and never consults args.algo, so sketching is bypassed for
+            # this arm; it is the exact projected LP either way.
+            print("[Train] note: --sa_layer projlp ignores sketching "
+                  "(dense Galerkin solve)")
 
     params = list(pred_model.parameters())
     if agg is not None:

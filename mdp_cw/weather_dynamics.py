@@ -320,6 +320,25 @@ REGIMES_V7: list[dict] = [
 REGIME_NAMES_V7: list[str] = ["clear", "gate_mild", "gate", "gate_deadly"]
 
 
+# v8 — v7's near-absorbing gate, but the gate LOCATION varies by regime (v3/v4
+# geometry: west/mid/east). v7 has a single hazard cell, so the optimal detour
+# is one global binary choice that a 12-cluster aggregation already represents;
+# aggregation size then only trades regularization strength, not resolution.
+# Here the learner must route around whichever column is deadly this episode,
+# so a coarse aggregation that merges columns 3, 6 and 9 into shared clusters
+# physically cannot express the correct policy, while a finer one can. This is
+# the setting where M is an approximation budget rather than a regularizer.
+VOLATILE_CELLS_V8: list[int] = [state_idx(2, 3), state_idx(2, 6), state_idx(2, 9)]
+
+REGIMES_V8: list[dict] = [
+    _regime_v3(_AMBIENT_BENIGN, {}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 3): _GATE_DEADLY}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 6): _GATE_DEADLY}),
+    _regime_v3(_AMBIENT_BENIGN, {(2, 9): _GATE_DEADLY}),
+]
+REGIME_NAMES_V8: list[str] = ["clear", "deadly_west", "deadly_mid", "deadly_east"]
+
+
 # ---------------------------------------------------------------------------
 # Active regime set (mutable; switch via set_regime_set before data gen).
 # ---------------------------------------------------------------------------
@@ -361,13 +380,17 @@ def set_regime_set(name: str) -> None:
         REGIMES, REGIME_NAMES = REGIMES_V7, REGIME_NAMES_V7
         VOLATILE_CELLS = list(VOLATILE_CELLS_V7)
         _ACTIVE_MODE = "v7"
+    elif name == "v8":
+        REGIMES, REGIME_NAMES = REGIMES_V8, REGIME_NAMES_V8
+        VOLATILE_CELLS = list(VOLATILE_CELLS_V8)
+        _ACTIVE_MODE = "v8"
     else:
-        raise ValueError(f"unknown regime_set '{name}' (use 'v1'..'v7')")
+        raise ValueError(f"unknown regime_set '{name}' (use 'v1'..'v8')")
 
 
 def is_state_dependent() -> bool:
     """True if the active regime set encodes per-cell slip overrides."""
-    return _ACTIVE_MODE in ("v3", "v4", "v5", "v6", "v7")
+    return _ACTIVE_MODE in ("v3", "v4", "v5", "v6", "v7", "v8")
 
 
 def n_regimes() -> int:
