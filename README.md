@@ -1,7 +1,7 @@
 # Decision-Focused Learning in MDPs: An Occupancy Measure Approach
 
 Code for the NeurIPS 2026 paper
-[*Decision-Focused Learning in MDPs: An Occupancy Measure Approach*](https://openreview.net/forum?id=rzZPOKJV34).
+[*Decision-Focused Learning in MDPs: An Occupancy Measure Approach*](https://arxiv.org/abs/2610.08384).
 
 The repository trains a predictive model end-to-end through the occupancy-measure
 LP of an MDP and compares it against Two-stage, DFL-LP, DFL-QP, DFL-Feas,
