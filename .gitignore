@@ -2,6 +2,8 @@ __pycache__/
 .idea/
 *.py[cod]
 venv/
+.venv/
+env/
 .DS_Store
 *.log
 *.tmp

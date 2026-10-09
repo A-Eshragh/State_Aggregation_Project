@@ -27,7 +27,7 @@ CACHE_DIR = HERE / "results" / "dfl_vs_qpth"
 
 
 def _cache_path(name: str) -> Path:
-    CACHE_DIR.mkdir(exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / f"{name}.json"
 
 
@@ -81,6 +81,9 @@ def _run_one_seed(args_dict: dict) -> dict:
     Each worker re-imports torch and re-seeds, so runs are deterministic
     and isolated. Workers are CPU-only.
     """
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
+
     algo = args_dict["algo"]
     seed = args_dict["seed"]
 
@@ -155,7 +158,7 @@ def _run_one_seed(args_dict: dict) -> dict:
     t0 = time.time()
     out = runner(
         cfg,
-        verbose=False,
+        verbose=True,
         bins_per_dim=args_dict["bins_per_dim"],
         tau=args_dict["tau"],
         pretrain_epochs=pretrain,
@@ -502,21 +505,14 @@ def print_summary(args):
     nb_m, nb_s, nf_m, nf_s = _stats(_filter(neural))
     mb_m, mb_s, mf_m, mf_s = _stats(_filter(mbrl))
 
-    print("\n" + "=" * 60)
-    print(f"SUMMARY  (n_seeds = {len(args.seeds)})")
-    print("=" * 60)
-    print(f"  Two-stage MBRL: best = {mb_m:.1f} ± {mb_s:.1f}   "
-          f"final = {mf_m:.1f} ± {mf_s:.1f}")
-    print(f"  Neural DFL:     best = {nb_m:.1f} ± {nb_s:.1f}   "
-          f"final = {nf_m:.1f} ± {nf_s:.1f}")
+    print(f"\n[Eval/Summary]  n_seeds={len(args.seeds)}")
+    print(f"[Eval]  twostage_mbrl  best={mb_m:.1f}±{mb_s:.1f}  final={mf_m:.1f}±{mf_s:.1f}")
+    print(f"[Eval]  neural_dfl     best={nb_m:.1f}±{nb_s:.1f}  final={nf_m:.1f}±{nf_s:.1f}")
     if qpth:
         qb_m, qb_s, qf_m, qf_s = _stats(_filter(qpth))
-        print(f"  DFL-qpth:       best = {qb_m:.1f} ± {qb_s:.1f}   "
-              f"final = {qf_m:.1f} ± {qf_s:.1f}")
-        print(f"  qpth−MBRL gap (best):  {qb_m - mb_m:+.2f}")
-        print(f"  qpth−DFL gap (best):   {qb_m - nb_m:+.2f}")
-    print(f"  DFL−MBRL gap (best):  {nb_m - mb_m:+.2f}")
-    print(f"  DFL−MBRL gap (final): {nf_m - mf_m:+.2f}")
+        print(f"[Eval]  dfl_qpth       best={qb_m:.1f}±{qb_s:.1f}  final={qf_m:.1f}±{qf_s:.1f}")
+        print(f"[Eval]  dfl_qpth−mbrl gap (best): {qb_m - mb_m:+.2f}")
+    print(f"[Eval]  dfl−mbrl gap   best={nb_m - mb_m:+.2f}  final={nf_m - mf_m:+.2f}")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
