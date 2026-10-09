@@ -113,71 +113,74 @@ class SoftAggDense(nn.Module):
                 f"but got S={S},A={A}"
             )
 
-        if self.fixed_W:
-            # Method 5: fixed random W (buffer), broadcast to batch.
-            W = self.W_fixed.unsqueeze(0).expand(B, -1, -1)  # (B,S,M)
-        else:
-            # === (1) Build memberships W[b,s,m] from learned logits ===
-            # NOTE: Method 1: W depends on P
-            # P_flat = P.reshape(B, S, A * S)
-            # W_logits = self.W_logits(P_flat)          # (B, S, M)
-            # W = torch.softmax(W_logits / tau, dim=-1)
+        W = self.compute_W(P, r, tau)
 
-            # NOTE: Method 2: W doesn't depend on P and r
-            # W = torch.softmax(self.W_logits / float(tau), dim=1)  # (S, M)
-            # W = W.unsqueeze(0).expand(B, -1, -1)  # (B, S, M)
-
-            # NOTE: Method 3: Original method (correct einsum)
-            # E = self.dest_embed.weight  # (S, r)
-            # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-            # phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r)
-            # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
-            # logits = self.to_logits(phi_cat)  # (B,S,M)
-            # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
-
-            # NOTE: Method 3.2: Original method (wrong einsum)
-            # E = self.dest_embed.weight  # (S, r)
-            # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-            # phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
-            # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
-            # logits = self.to_logits(phi_cat)  # (B,S,M)
-            # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
-            
-            # NOTE: Method 4: Original method with r_bias
-            E = self.dest_embed.weight  # (S, r_embed)
-            # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
-            phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r_embed)
-            phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r_embed)
-            # NOTE: Only change
-            logits = self.to_logits(phi_cat) + self.r_bias(r) # (B,S,M)
-            W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
-
-        # Cluster masses: mass[b,m] = sum_s W[b,s,m]
-        mass = W.sum(dim=1).clamp_min(eps)  # (B,M)
-
-        # === (2) Aggregate rewards ===
-        # r_agg[b,m,a] = sum_s W[b,s,m] r[b,s,a] / mass[b,m]
-        r_agg = torch.einsum("bsm,bsa->bma", W, r) / mass.unsqueeze(-1)  # (B,M,A)
-
-        # === (3) Aggregate transitions ===
-        # Right[b,s,a,m'] = sum_{s'} P[b,s,a,s'] W[b,s',m']
-        # NOTE: Method 4: Original method with wrong einsum
-        # right = torch.einsum("bsas,bsm->bsam", P, W)  # (B,S,A,M)
-
-        right = torch.einsum("bsaj,bjm->bsam", P, W)  # (B,S,A,M)
-        p_hat = torch.einsum("bsm,bsan->bman", W, right)  # (B,M,A,M)
-        P_agg = p_hat / mass[:, :, None, None]  # (B,M,A,M)
-
-        # Enforce row-stochasticity for numerical stability
-        P_agg = P_agg.clamp_min(0.0)
-        P_agg = P_agg / P_agg.sum(dim=-1, keepdim=True).clamp_min(eps)
-
-        # === (4) Aggregate initial distribution ===
-        gamma_agg = torch.einsum("bs,bsm->bm", gamma, W)
-        gamma_agg = gamma_agg.clamp_min(eps)
-        gamma_agg = gamma_agg / gamma_agg.sum(dim=1, keepdim=True).clamp_min(eps)
+        P_agg, r_agg, gamma_agg = aggregate_with_W(P, r, gamma, W, eps=eps)
 
         return P_agg, r_agg, gamma_agg, {"W": W, "runtime_sec": time.time() - start}
+
+    def compute_W(self, P: torch.Tensor, r: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
+        """Build soft memberships W[b,s,m] from learned logits (or fixed buffer)."""
+        B, S, A, _ = P.shape
+
+        if self.fixed_W:
+            # Method 5: fixed random W (buffer), broadcast to batch.
+            return self.W_fixed.unsqueeze(0).expand(B, -1, -1)  # (B,S,M)
+
+        # NOTE: Method 1: W depends on P
+        # P_flat = P.reshape(B, S, A * S)
+        # W_logits = self.W_logits(P_flat)          # (B, S, M)
+        # W = torch.softmax(W_logits / tau, dim=-1)
+
+        # NOTE: Method 2: W doesn't depend on P and r
+        # W = torch.softmax(self.W_logits / float(tau), dim=1)  # (S, M)
+        # W = W.unsqueeze(0).expand(B, -1, -1)  # (B, S, M)
+
+        # NOTE: Method 3: Original method (correct einsum)
+        # E = self.dest_embed.weight  # (S, r)
+        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+        # phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r)
+        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+        # logits = self.to_logits(phi_cat)  # (B,S,M)
+        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+
+        # NOTE: Method 3.2: Original method (wrong einsum)
+        # E = self.dest_embed.weight  # (S, r)
+        # # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+        # phi = torch.einsum("bsas,sr->bsar", P, E)  # (B,S,A,r)
+        # phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r)
+        # logits = self.to_logits(phi_cat)  # (B,S,M)
+        # W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+
+        # NOTE: Method 4: Original method with r_bias
+        E = self.dest_embed.weight  # (S, r_embed)
+        # phi[b,s,a,r] = sum_{s'} P[b,s,a,s'] * E[s',r]
+        phi = torch.einsum("bsaj,jr->bsar", P, E)  # (B,S,A,r_embed)
+        phi_cat = phi.reshape(B, S, A * self.r_embed)  # (B,S,A*r_embed)
+        # NOTE: Only change
+        logits = self.to_logits(phi_cat) + self.r_bias(r)  # (B,S,M)
+        W = torch.softmax(logits / float(tau), dim=2)  # (B,S,M)
+        return W
+
+    def forward_galerkin(
+        self,
+        P: torch.Tensor,
+        r: torch.Tensor,
+        gamma: torch.Tensor,
+        beta: float,
+        tau: float = 0.5,
+    ):
+        """Exact Galerkin projected LP (LP-2 with Eq.(6) features), WITHOUT the
+        diagonal projection: the B-block is the full Gram sum_s W_si W_sm.
+
+        Returns (A, r_tilde, b, info) for  max r_tilde^T w  s.t.  A w = b, w >= 0,
+        directly consumable by DifferentiableLPSolver / DenseLPSolver.
+        The occupancy lift is y(s,a) = sum_m W_sm w_(m,a) = disaggregate_y(w, W, A).
+        """
+        start = time.time()
+        W = self.compute_W(P, r, tau)
+        A_mat, r_tilde, b = galerkin_lp_coefficients(P, r, gamma, W, beta)
+        return A_mat, r_tilde, b, {"W": W, "runtime_sec": time.time() - start}
 
     @staticmethod
     def disaggregate_y(y_agg: torch.Tensor, W: torch.Tensor, n_actions: int) -> torch.Tensor:
@@ -200,3 +203,86 @@ class SoftAggDense(nn.Module):
         # y_orig[b, s, a] = sum_m W[b, s, m] * y_agg[b, m, a]
         y_orig = torch.einsum("bsm,bma->bsa", W, y_agg_3d)   # (B, S, A)
         return y_orig.reshape(B, S * A)
+
+
+def aggregate_with_W(
+    P: torch.Tensor,
+    r: torch.Tensor,
+    gamma: torch.Tensor,
+    W: torch.Tensor,
+    eps: float = 1e-8,
+):
+    """Aggregate (P, r, gamma) with a given membership W[b,s,m].
+
+    This is the 'projected MDP' path (diagonal projection of the Galerkin
+    B-block): returns a genuine aggregated MDP (P_agg, r_agg, gamma_agg)
+    whose occupancy LP is  (I - beta*P_agg) y = gamma_agg.
+    """
+    # Cluster masses: mass[b,m] = sum_s W[b,s,m]
+    mass = W.sum(dim=1).clamp_min(eps)  # (B,M)
+
+    # === (2) Aggregate rewards ===
+    # r_agg[b,m,a] = sum_s W[b,s,m] r[b,s,a] / mass[b,m]
+    r_agg = torch.einsum("bsm,bsa->bma", W, r) / mass.unsqueeze(-1)  # (B,M,A)
+
+    # === (3) Aggregate transitions ===
+    # Right[b,s,a,m'] = sum_{s'} P[b,s,a,s'] W[b,s',m']
+    # NOTE: Method 4: Original method with wrong einsum
+    # right = torch.einsum("bsas,bsm->bsam", P, W)  # (B,S,A,M)
+
+    right = torch.einsum("bsaj,bjm->bsam", P, W)  # (B,S,A,M)
+    p_hat = torch.einsum("bsm,bsan->bman", W, right)  # (B,M,A,M)
+    P_agg = p_hat / mass[:, :, None, None]  # (B,M,A,M)
+
+    # Enforce row-stochasticity for numerical stability
+    P_agg = P_agg.clamp_min(0.0)
+    P_agg = P_agg / P_agg.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+    # === (4) Aggregate initial distribution ===
+    gamma_agg = torch.einsum("bs,bsm->bm", gamma, W)
+    gamma_agg = gamma_agg.clamp_min(eps)
+    gamma_agg = gamma_agg / gamma_agg.sum(dim=1, keepdim=True).clamp_min(eps)
+
+    return P_agg, r_agg, gamma_agg
+
+
+def galerkin_lp_coefficients(
+    P: torch.Tensor,
+    r: torch.Tensor,
+    gamma: torch.Tensor,
+    W: torch.Tensor,
+    beta: float,
+):
+    """Exact Galerkin projected-LP coefficients for a given membership W.
+
+    LP-2 with the Eq.(6) soft-aggregation features, no diagonal projection:
+
+        max  r_tilde^T w   s.t.   A w = b,  w >= 0
+
+        A[b, i, (m,a)]   = (W^T W)[b,i,m] - beta * sum_{s,s'} W[b,s',i] P[b,s,a,s'] W[b,s,m]
+        r_tilde[b,(m,a)] = sum_s W[b,s,m] r[b,s,a]          (= mass_m * r_agg, NOT normalized)
+        b[b,i]           = sum_s W[b,s,i] gamma[b,s]        (unnormalized W^T gamma)
+
+    Column flattening is (m,a) -> m*A + a, matching MDP.build_H / build_r.
+    For hard (one-hot) W this LP is the aggregated-MDP LP up to the variable
+    scaling y_agg(m,a) = mass_m * w_(m,a); the lift y(s,a) = sum_m W_sm w_(m,a)
+    coincides with the mass-corrected lift of the aggregated occupancy.
+    """
+    B, S, A, _ = P.shape
+    M = W.shape[2]
+
+    # B-block: full Gram, gram[b,i,m] = sum_s W[b,s,i] W[b,s,m]  (indep. of a)
+    gram = torch.einsum("bsi,bsm->bim", W, W)  # (B,M,M)
+
+    # P-block: pblk[b,i,m,a] = sum_{s,s'} W[b,s',i] P[b,s,a,s'] W[b,s,m]
+    #   (s = source state, s' = destination state)
+    right = torch.einsum("bsaj,bji->bsai", P, W)     # (B,S,A,M): dest side
+    pblk = torch.einsum("bsm,bsai->bima", W, right)  # (B,M,M,A)
+
+    A_mat = gram.unsqueeze(-1) - float(beta) * pblk  # (B,M,M,A)
+    A_mat = A_mat.reshape(B, M, M * A)               # col (m,a) -> m*A + a
+
+    r_tilde = torch.einsum("bsm,bsa->bma", W, r).reshape(B, M * A)  # (B, M*A)
+    b_vec = torch.einsum("bsi,bs->bi", W, gamma)                    # (B, M)
+
+    return A_mat, r_tilde, b_vec

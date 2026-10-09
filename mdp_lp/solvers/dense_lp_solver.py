@@ -10,28 +10,29 @@ import gurobipy as gp
 from gurobipy import GRB
 
 
-# Shared Gurobi environment (lazy, thread-safe). Reusing one Env avoids
+# One Gurobi environment PER THREAD, created lazily. Reusing an Env avoids
 # per-solve license/init overhead, which dominates for the small LPs solved
-# inside DFL / DFL-sketch / DFL-berthet.
-_gurobi_env = None
-_gurobi_env_lock = threading.Lock()
+# inside DFL / DFL-sketch / DFL-berthet -- but a single Env shared across the
+# pool serializes optimize(), so the batch solved effectively single-threaded
+# no matter how many workers were configured. Measured on the M=12 sketch LP
+# (8 rows x 48 cols, 256 per batch): shared Env gives 1.01x at 16 workers,
+# per-thread Env gives 5.85x. The pool is a process-wide singleton, so at most
+# MDPLP_LP_WORKERS + 1 environments are ever created.
+_gurobi_tls = threading.local()
 
 
 def _get_gurobi_env():
-    global _gurobi_env
-    if _gurobi_env is None:
-        with _gurobi_env_lock:
-            if _gurobi_env is None:
-                env = gp.Env(empty=True)
-                env.setParam("OutputFlag", 0)
-                env.start()
-                _gurobi_env = env
-    return _gurobi_env
+    env = getattr(_gurobi_tls, "env", None)
+    if env is None:
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.start()
+        _gurobi_tls.env = env
+    return env
 
 
-# Shared thread pool for parallel batch solves. Gurobi releases the GIL during
-# optimize(), so threads give real parallelism. Each thread builds its own
-# Model from the shared Env (supported and safe).
+# Shared thread pool for parallel batch solves. Each thread builds its own
+# Model from its own Env, which is what makes the solves actually concurrent.
 _executor = None
 _executor_lock = threading.Lock()
 

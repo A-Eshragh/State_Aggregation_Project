@@ -47,6 +47,15 @@ def _sweep_cache_key(prefix: str, args, n_features: int) -> str:
     sa_tag = ""
     if "neural_dfl" in prefix and (sa_K != 8 or abs(sa_r - 0.2) > 1e-9):
         sa_tag = f"_saK{sa_K}_sar{sa_r}"
+    # DFL loss variant. Empty for the paper's Eq.(5) penalty loss, so every
+    # pre-existing DFL-SA cache stays reachable under its original name.
+    lm = str(getattr(args, "loss_mode", "penalty"))
+    lm_tag = "" if lm == "penalty" else f"_lm{lm}"
+    if lm in ("lagrangian", "auglag"):
+        if float(getattr(args, "dual_weight", 1.0)) != 1.0:
+            lm_tag += f"_dw{float(args.dual_weight)}"
+        if bool(getattr(args, "dual_feasible_only", False)):
+            lm_tag += "_dfo"
     return (
         f"{prefix}_nfeat{n_features}"
         f"_beh{args.behavior}_td{args.td_weight}_eps{args.eps}"
@@ -56,7 +65,7 @@ def _sweep_cache_key(prefix: str, args, n_features: int) -> str:
         f"_nce{args.n_ce_steps}_ndfl{args.n_dfl_steps}"
         f"_dfllr{dfl_lr_tag}"
         f"_eval{args.eval_policy}"
-        f"{qpth_tag}{sa_tag}"
+        f"{qpth_tag}{sa_tag}{lm_tag}"
     )
 
 
@@ -223,6 +232,16 @@ def parse_args():
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--rho", type=float, default=10.0)
     p.add_argument("--tau", type=float, default=0.5)
+    p.add_argument("--loss_mode", type=str, default="penalty",
+                   choices=["regret", "penalty", "lagrangian", "auglag"],
+                   help="DFL loss variant for the DFL-SA arm. 'penalty' = the "
+                        "paper's Eq.(5), byte-identical to previous runs.")
+    p.add_argument("--dual_weight", type=float, default=1.0,
+                   help="Scalar on the aug-Lagrangian linear term (1.0 = exact "
+                        "AL; 0.0 reduces to the penalty loss).")
+    p.add_argument("--dual_feasible_only", action="store_true",
+                   help="Apply the linear term only on steps where the true LP "
+                        "was genuinely feasible.")
     p.add_argument("--sa_K", type=int, default=8,
                    help="number of sketches for DFL-SA (n_sketches in differentiable_sketched_lp)")
     p.add_argument("--sa_ratio", type=float, default=0.2,

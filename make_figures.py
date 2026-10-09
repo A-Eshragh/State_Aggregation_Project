@@ -226,10 +226,28 @@ def render_cartpole(out: Path) -> None:
     requested = set(int(s) for s in args.seeds)
     m1_ns = cp_mod._m1_args(args)
     snf_ns = cp_mod._snf_args(args)
+
+    # Which DFL loss variant to render. Defaults reproduce the paper's Eq.(5)
+    # penalty curves exactly; set CARTPOLE_LOSS_MODE=auglag (plus the damping
+    # env vars, if used) to render the aug-Lagrangian runs instead. The cache
+    # keys carry a matching tag, so both sets coexist on disk.
+    import os
+    _lm = os.environ.get("CARTPOLE_LOSS_MODE", "penalty")
+    _dw = float(os.environ.get("CARTPOLE_DUAL_WEIGHT", "1.0"))
+    _dfo = os.environ.get("CARTPOLE_DUAL_FEASIBLE_ONLY", "0") not in ("0", "", "false")
+    for _ns in (m1_ns, snf_ns):
+        _ns.loss_mode, _ns.dual_weight, _ns.dual_feasible_only = _lm, _dw, _dfo
+    if _lm != "penalty":
+        print(f"[cartpole] rendering DFL arms with loss_mode={_lm} "
+              f"dual_weight={_dw} dual_feasible_only={_dfo}")
+
     dr_nf = cp_mod.pick_best_dr(args, snf_ns)
 
-    # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config.
-    SA_DIM_CONFIGS = ((30, 8, 0.5), (60, 8, 0.5), (90, 4, 0.8))
+    # Per-dim (K, ratio) for the SA bars — each dim uses its best-tuned config
+    # over the grid K in {4,8} x r in {0.3,0.5,0.7,0.8}. Must stay in sync with
+    # the DFL-SA rows of the results table; mdp_continuous/run_dfl_seeds.sh
+    # generates exactly these three caches and verifies them.
+    SA_DIM_CONFIGS = ((30, 4, 0.8), (60, 8, 0.5), (90, 4, 0.8))
     # Training-curves panel: pin to d=90 with its best (K, r).
     SA_CURVE_D, SA_CURVE_K, SA_CURVE_R = 90, 4, 0.8
 

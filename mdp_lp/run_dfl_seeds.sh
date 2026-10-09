@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Inventory problem, |S| = 36, |A| = 31. Seeds 1-10, all methods.
 
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,15 +22,21 @@ AUG_LAG_RHO_NOAGG=10.0
 AUG_LAG_RHO_SKETCH=0.1
 RESULTS_ROOT="mdp_lp/results/${COST_CASE}_pretrain_${PRETRAIN_EPOCHS}"
 
+# NAME|ALGO|N_AGG|N_EPOCHS|LR|EXTRA1|EXTRA2|EXTRA3|EXTRA4. The EXTRA fields are
+# read per ALGO:
+#   dfl_sketch : n_sketches | sketch_ratio | sketch_mode | aug_lag_rho override
+#   dfl_qpth   : qp_reg     | -            | -           | aug_lag_rho override
+#   dfl        : loss_mode  | aug_lag_rho  | -           | -
+#   dfl_feas   : odece_alpha| odece_mse_weight (mu) | odece_margin | -
 CONFIGS=(
-    # "twostage|twostage|-1|50|0.01||||"
-    # "dfl|dfl|-1|50|0.01||||"
-    # "dfl_qpth|dfl_qpth|-1|50|0.01|10.0|||"
-    # "dfl_sketch_agg5|dfl_sketch|5|50|0.01|16|0.2|gaussian|"
-    # "dfl_sketch_agg10|dfl_sketch|10|50|0.01|8|0.2|gaussian|"
-    # "dfl_sketch_agg20|dfl_sketch|20|50|0.01|8|0.2|gaussian|"
-    # "dfl_sketch_agg30|dfl_sketch|30|50|0.01|8|0.2|gaussian|"
-   "dfl_sketch_noagg|dfl_sketch|-1|50|0.01|8|0.2|gaussian|"
+    "twostage|twostage|-1|50|0.01||||"
+    "dfl_qpth|dfl_qpth|-1|50|0.01|10.0|||"
+    "dfl_auglag_r1000|dfl|-1|50|0.01|auglag|1000.0||"
+    "dfl_sketch_agg30|dfl_sketch|30|50|0.01|8|0.2|gaussian|"
+    "dfl_sketch_agg20|dfl_sketch|20|50|0.01|8|0.2|gaussian|"
+    "dfl_sketch_agg10|dfl_sketch|10|50|0.01|8|0.2|gaussian|"
+    "dfl_sketch_noagg|dfl_sketch|-1|50|0.01|8|0.2|gaussian|"
+    "dfl_feas_a0_m0|dfl_feas|-1|50|0.01|0.0|0.0|0.01|"
 )
 
 for SEED in "${SEEDS[@]}"; do
@@ -57,11 +64,29 @@ for SEED in "${SEEDS[@]}"; do
       )
       TAG="${TAG}_K${N_SKETCHES}_r${SKETCH_RATIO}_${SKETCH_MODE}"
     elif [[ "$ALGO" == "dfl_qpth" ]]; then
-      QP_REG=0.001
-      EXTRA_ARGS+=(--qp_reg "$QP_REG" --aug_lag_rho "$AUG_LAG_RHO_DFL")
+      QP_REG="${EXTRA1:-10.0}"
+      EXTRA_ARGS+=(--qp_reg "$QP_REG" --aug_lag_rho "${EXTRA4:-$AUG_LAG_RHO_DFL}")
       TAG="${TAG}_nagg_${N_AGG}_qpreg${QP_REG}"
     elif [[ "$ALGO" == "dfl" ]]; then
-      EXTRA_ARGS+=(--aug_lag_rho "$AUG_LAG_RHO_DFL")
+      LOSS_MODE="${EXTRA1:-penalty}"
+      RHO="${EXTRA2:-$AUG_LAG_RHO_DFL}"
+      EXTRA_ARGS+=(--loss_mode "$LOSS_MODE" --aug_lag_rho "$RHO")
+      # Keep the plain penalty arm's tag as-is so it lands on the existing
+      # paper tree (tag_seed_<s>_s30q30); only variants get a suffix.
+      if [[ "$LOSS_MODE" != "penalty" || "$RHO" != "$AUG_LAG_RHO_DFL" ]]; then
+        TAG="${TAG}_${LOSS_MODE}_r${RHO}"
+      fi
+    elif [[ "$ALGO" == "dfl_feas" ]]; then
+      ODECE_ALPHA="${EXTRA1:-0.0}"
+      ODECE_MU="${EXTRA2:-0.0}"
+      ODECE_MARGIN="${EXTRA3:-0.01}"
+      EXTRA_ARGS+=(
+        --odece_alpha "$ODECE_ALPHA"
+        --odece_mse_weight "$ODECE_MU"
+        --odece_margin "$ODECE_MARGIN"
+        --aug_lag_rho "$AUG_LAG_RHO_DFL"
+      )
+      TAG="${TAG}_feas_a${ODECE_ALPHA}_m${ODECE_MU}"
     else
       EXTRA_ARGS+=(--aug_lag_rho "$AUG_LAG_RHO_DFL")
     fi

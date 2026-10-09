@@ -128,11 +128,16 @@ class TransitionHead(nn.Module):
         feat_dim: int,
         volatile_cells: Optional[list[int]] = None,
         n_states: int = N_STATES,
+        ambient_only: bool = False,
     ):
         super().__init__()
         self.volatile_cells = list(volatile_cells) if volatile_cells else []
         self.n_slots = 1 + len(self.volatile_cells)
         self.n_states = n_states
+        # Deliberate misspecification: the head predicts ONE ambient slip and
+        # broadcasts it to every volatile slot, so the model class cannot
+        # represent state-dependent hazards even though the environment has them.
+        self.ambient_only = bool(ambient_only)
         self.linear = nn.Linear(feat_dim, self.n_slots * N_ACTIONS * N_SLIP, bias=True)
         self._init_weights()
 
@@ -144,7 +149,10 @@ class TransitionHead(nn.Module):
     def forward_compact(self, h: torch.Tensor) -> torch.Tensor:
         """Return (B, n_slots, A, K) softmaxed compact slip slots."""
         logits = self.linear(h).view(-1, self.n_slots, N_ACTIONS, N_SLIP)
-        return F.softmax(logits, dim=-1)
+        compact = F.softmax(logits, dim=-1)
+        if self.ambient_only and self.n_slots > 1:
+            compact = compact[:, :1].expand(-1, self.n_slots, -1, -1)
+        return compact
 
     def forward_full(self, compact: torch.Tensor) -> torch.Tensor:
         """Expand compact (B, n_slots, A, K) to (B, S, A, K)."""
