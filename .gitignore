@@ -12,6 +12,7 @@ env/
 
 .claude/
 **/*result*/
+**/*results*/
 **/results*.json
 **/*cache*/
 **/*logs*/
