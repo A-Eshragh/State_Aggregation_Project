@@ -9,6 +9,27 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Publication (ICLR/NeurIPS) figure style: Times-like serif matching the paper
+# body, fonts sized to stay readable after the figure is scaled to \textwidth,
+# thicker marks, recessive grid, no top/right spines.
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"],
+    "mathtext.fontset": "cm",  # Computer Modern: LaTeX's own math glyphs
+    "font.size": 16,
+    "axes.titlesize": 18,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 18,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
+    "axes.linewidth": 1.2,
+    "xtick.major.width": 1.2,
+    "ytick.major.width": 1.2,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+})
+
 LAMBDA_TRUE = 10.0
 ALPHA_SK = 0.9
 RHO_SK = 100.0
@@ -49,21 +70,26 @@ for j, (title, lc, L, c) in enumerate(cols):
     good = np.isfinite(L); lg, Lg = lc[good], L[good]
     imin = int(np.argmin(Lg)); ls = lg[imin]; grad = grads[j]
     ax = axes[0, j]
-    ax.plot(lg, Lg, color=c, lw=2.0); ax.axvline(LAMBDA_TRUE, color="red", ls="--", lw=1.4)
-    ax.plot(ls, Lg[imin], "o", color="green", ms=6, zorder=5)
-    ax.set_title(title, fontsize=12); ax.set_ylabel("Loss" if j == 0 else ""); ax.grid(alpha=0.25)
-    shift_txt = f" (shift {ls-LAMBDA_TRUE:+.2f})" if abs(ls - LAMBDA_TRUE) > 0.005 else ""
-    ax.text(0.04, 0.06, f"$\\lambda_{{true}}={LAMBDA_TRUE:g}$\n$\\lambda^*={ls:.2f}$" + shift_txt,
-            transform=ax.transAxes, fontsize=11, va="bottom",
+    ax.plot(lg, Lg, color=c, lw=4.0); ax.axvline(LAMBDA_TRUE, color="red", ls="--", lw=2.2)
+    ax.plot(ls, Lg[imin], "o", color="green", ms=9, zorder=5)
+    ax.set_title(title, pad=10); ax.set_ylabel("Loss" if j == 0 else ""); ax.grid(alpha=0.25)
+    if j == 0:
+        shift_txt = f" (shift {ls-LAMBDA_TRUE:+.2f})" if abs(ls - LAMBDA_TRUE) > 0.005 else ""
+        box_txt = f"$\\lambda_{{\\mathrm{{true}}}}={LAMBDA_TRUE:g}$\n$\\lambda^*={ls:.2f}$" + shift_txt
+    else:  # panels 2-3: minimizer sits at lambda_true, no shift text needed
+        box_txt = f"$\\lambda_{{\\mathrm{{true}}}}={LAMBDA_TRUE:g}$\n$\\lambda^*={ls:.0f}$"
+    ax.text(0.04, 0.06, box_txt,
+            transform=ax.transAxes, fontsize=15, va="bottom",
             bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.9))
     ax = axes[1, j]
-    ax.plot(lg, grad, color=c, lw=1.3); ax.axhline(0, color="0.5", lw=0.8)
-    ax.axvline(LAMBDA_TRUE, color="red", ls="--", lw=1.4); ax.plot(ls, 0.0, "o", color="green", ms=5, zorder=5)
+    ax.plot(lg, grad, color=c, lw=2.8); ax.axhline(0, color="0.5", lw=1.2)
+    ax.axvline(LAMBDA_TRUE, color="red", ls="--", lw=2.2); ax.plot(ls, 0.0, "o", color="green", ms=8, zorder=5)
     ax.set_ylim(*GYLIMS[j])
-    ax.set_xlabel("$\\lambda_{pred}$"); ax.set_ylabel("$dL/d\\lambda$" if j == 0 else ""); ax.grid(alpha=0.25)
+    ax.set_xlabel("$\\lambda_{\\mathrm{pred}}$", fontsize=21)
+    ax.set_ylabel("$\\mathrm{dL/d}\\lambda$" if j == 0 else ""); ax.grid(alpha=0.25)
 
-axes[0, 2].plot([], [], "r--", label="$\\lambda_{true}$"); axes[0, 2].plot([], [], "go", label="$\\lambda^*$")
-axes[0, 2].legend(loc="upper right", fontsize=10)
+axes[0, 2].plot([], [], "r--", lw=2.0, label="$\\lambda_{\\mathrm{true}}$"); axes[0, 2].plot([], [], "go", ms=8, label="$\\lambda^*$")
+axes[0, 2].legend(loc="upper right")
 plt.tight_layout()
 out = "mdp_lp/plot_results/fig1_sa_final"
 plt.savefig(out + ".png", dpi=160, bbox_inches="tight"); plt.savefig(out + ".pdf", bbox_inches="tight")
